@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        525 routines (498 public, 27 local), 513 of them on all three and 12 local to one.
+        526 routines (499 public, 27 local), 514 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -210,6 +210,7 @@
           huffman_codes                  public  yes     yes     yes
           huffman_encode_back            public  yes     yes     yes
           huffman_lengths                public  yes     yes     yes
+          jpeg_idct_8x8                  public  yes     yes     yes
           jump_mark                      public  yes     yes     yes
           jump_to_mark                   public  yes     yes     yes
           keccak_blocks                  public  yes     yes     yes
@@ -59529,6 +59530,282 @@ __asm__(
 );
 #endif
 #endif // KERNEL_MODE, picture_lut3d_u32
+
+/*
+        The arithmetic of JPEG: what a decoder does to a block's coefficients and to its planes of samples, and what an encoder does
+        to pixels first. ui.c's decoder (ui_jpeg_*) is the driver, its markers, tables, Huffman decoding and scan loops; these are its
+        kernels, and a capture engine's encoder takes pixels_to_ycbcr.
+
+        jpeg_idct_8x8(into, pitch, coefficients, quantization) makes a block's 64 samples from its 64 coefficients (natural order,
+        row-major) and their quantizers: libjpeg's islow inverse DCT (jidctint.c, CONST_BITS 13, PASS1_BITS 2), columns then rows, its
+        rotations written as sums of two products, which is the same arithmetic exactly. Every input is defined, as a 16-bit multiply,
+        a 16-bit add and a 32-bit add keep them: each coefficient times its quantizer is its low 16 bits (pmullw); in[0] + in[4],
+        in[0] - in[4], in[7] + in[3] and in[5] + in[1] wrap at 16 bits; every product of an input and a constant is exact and the sums
+        of them wrap at 32; the columns' results, plus 1 << 10, are shifted right 11 and held to 16 bits; the rows', plus 1 << 17,
+        shifted right 18 and held to -128 to 127, then lifted by 128 into 8 rows of 8 bytes, pitch apart. For a block an honest
+        encoder made nothing wraps or saturates, and this is jidctint.c's picture, byte for byte (ui.c's checks hold it to djpeg's).
+
+        x86_64: SSE2, two halves of four columns a pass in 32-bit lanes (pmaddwd does each pair of products), the halves packed to
+        words, transposed in registers between the passes and again at the end; the inputs of a pass are read from 128 bytes of stack
+        a half needs twice. arm64: NEON, the eight columns at once in 32 registers, smull and smlal for the pairs, sqshrn for the
+        holding. riscv64: a column at a time in general registers (mulw, addw), the products' constants held in registers.
+*/
+#ifndef KERNEL_MODE
+fn jpeg_idct_8x8(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization);
+#if X64
+//      One half of a pass of jpeg_idct_8x8 over the 8 rows of words at 0(%rsp) to 112(%rsp): UNPACK (punpcklwd for columns 0 to 3,
+//      punpckhwd for 4 to 7) makes the pairs pmaddwd multiplies, xmm15 is zero, ROUND the rounding added to the even part (so to
+//      every output once). Out: xmm0 to xmm7, the eight results' four 32-bit lanes, shifted by SHIFT. xmm8 to xmm14 spent.
+#define JPEG_IDCT_HALF(UNPACK, ROUND, SHIFT)                                                                                            \
+    "movdqa (%rsp), %xmm8\n   movdqa %xmm8, %xmm9\n   paddw 64(%rsp), %xmm8\n   psubw 64(%rsp), %xmm9\n"                            \
+    "movdqa %xmm15, %xmm10\n   " UNPACK " %xmm8, %xmm10\n   psrad $3, %xmm10\n   movdqa %xmm15, %xmm11\n   " UNPACK " %xmm9, %xmm11\n" \
+    "psrad $3, %xmm11\n   paddd " ROUND ", %xmm10\n   paddd " ROUND ", %xmm11\n"                                                    \
+    "movdqa 32(%rsp), %xmm12\n   " UNPACK " 96(%rsp), %xmm12\n   movdqa %xmm12, %xmm13\n"                                            \
+    "pmaddwd " ASM_LABEL(jidct_k) "(%rip), %xmm12\n   pmaddwd " ASM_LABEL(jidct_k) "+16(%rip), %xmm13\n"                             \
+    "movdqa %xmm10, %xmm0\n   paddd %xmm12, %xmm0\n   psubd %xmm12, %xmm10\n   movdqa %xmm11, %xmm1\n   paddd %xmm13, %xmm1\n"     \
+    "psubd %xmm13, %xmm11\n"                                                                                                           \
+    "movdqa 112(%rsp), %xmm8\n   movdqa %xmm8, %xmm12\n   paddw 48(%rsp), %xmm12\n   movdqa 80(%rsp), %xmm9\n   movdqa %xmm9, %xmm13\n" \
+    "paddw 16(%rsp), %xmm13\n   " UNPACK " %xmm13, %xmm12\n   movdqa %xmm12, %xmm13\n"                                               \
+    "pmaddwd " ASM_LABEL(jidct_k) "+32(%rip), %xmm12\n   pmaddwd " ASM_LABEL(jidct_k) "+48(%rip), %xmm13\n"                          \
+    UNPACK " 16(%rsp), %xmm8\n   movdqa %xmm8, %xmm14\n   pmaddwd " ASM_LABEL(jidct_k) "+64(%rip), %xmm8\n   paddd %xmm12, %xmm8\n"     \
+    "pmaddwd " ASM_LABEL(jidct_k) "+80(%rip), %xmm14\n   paddd %xmm13, %xmm14\n"                                                     \
+    UNPACK " 48(%rsp), %xmm9\n   movdqa %xmm9, %xmm2\n   pmaddwd " ASM_LABEL(jidct_k) "+96(%rip), %xmm9\n   paddd %xmm13, %xmm9\n"      \
+    "pmaddwd " ASM_LABEL(jidct_k) "+112(%rip), %xmm2\n   paddd %xmm12, %xmm2\n"                                                      \
+    "movdqa %xmm0, %xmm7\n   paddd %xmm14, %xmm0\n   psubd %xmm14, %xmm7\n   movdqa %xmm1, %xmm6\n   paddd %xmm2, %xmm1\n"           \
+    "psubd %xmm2, %xmm6\n   movdqa %xmm11, %xmm2\n   paddd %xmm9, %xmm2\n   movdqa %xmm11, %xmm5\n   psubd %xmm9, %xmm5\n"          \
+    "movdqa %xmm10, %xmm3\n   paddd %xmm8, %xmm3\n   movdqa %xmm10, %xmm4\n   psubd %xmm8, %xmm4\n"                                  \
+    "psrad $" SHIFT ", %xmm0\n   psrad $" SHIFT ", %xmm1\n   psrad $" SHIFT ", %xmm2\n   psrad $" SHIFT ", %xmm3\n"                    \
+    "psrad $" SHIFT ", %xmm4\n   psrad $" SHIFT ", %xmm5\n   psrad $" SHIFT ", %xmm6\n   psrad $" SHIFT ", %xmm7\n"
+//      A whole pass: the upper half's results kept at 128(%rsp) while the lower half's are made, then packed with them to words
+//      (packssdw holds them to 16 bits): xmm0 to xmm7 the eight results, each 8 words.
+#define JPEG_IDCT_PASS(ROUND, SHIFT)                                                                                                    \
+    "pxor %xmm15, %xmm15\n"                                                                                                            \
+    JPEG_IDCT_HALF("punpckhwd", ROUND, SHIFT)                                                                                          \
+    "movdqa %xmm0, 128(%rsp)\n   movdqa %xmm1, 144(%rsp)\n   movdqa %xmm2, 160(%rsp)\n   movdqa %xmm3, 176(%rsp)\n"                   \
+    "movdqa %xmm4, 192(%rsp)\n   movdqa %xmm5, 208(%rsp)\n   movdqa %xmm6, 224(%rsp)\n   movdqa %xmm7, 240(%rsp)\n"                   \
+    "pxor %xmm15, %xmm15\n"                                                                                                            \
+    JPEG_IDCT_HALF("punpcklwd", ROUND, SHIFT)                                                                                          \
+    "packssdw 128(%rsp), %xmm0\n   packssdw 144(%rsp), %xmm1\n   packssdw 160(%rsp), %xmm2\n   packssdw 176(%rsp), %xmm3\n"           \
+    "packssdw 192(%rsp), %xmm4\n   packssdw 208(%rsp), %xmm5\n   packssdw 224(%rsp), %xmm6\n   packssdw 240(%rsp), %xmm7\n"
+//      xmm0 to xmm7, 8 words each, transposed: column k of them is in xmm1, xmm12, xmm2, xmm8, xmm3, xmm13, xmm5, xmm0 for k = 0
+//      to 7 (words, then double words, then quad words interleaved). xmm4, xmm6, xmm7, xmm9 to xmm11, xmm14 and xmm15 spent.
+#define JPEG_IDCT_TRANSPOSE                                                                                                             \
+    "movdqa %xmm0, %xmm8\n   punpcklwd %xmm1, %xmm8\n   punpckhwd %xmm1, %xmm0\n   movdqa %xmm2, %xmm9\n   punpcklwd %xmm3, %xmm9\n"   \
+    "punpckhwd %xmm3, %xmm2\n   movdqa %xmm4, %xmm10\n   punpcklwd %xmm5, %xmm10\n   punpckhwd %xmm5, %xmm4\n   movdqa %xmm6, %xmm11\n" \
+    "punpcklwd %xmm7, %xmm11\n   punpckhwd %xmm7, %xmm6\n"                                                                          \
+    "movdqa %xmm8, %xmm12\n   punpckldq %xmm9, %xmm12\n   punpckhdq %xmm9, %xmm8\n   movdqa %xmm0, %xmm13\n   punpckldq %xmm2, %xmm13\n" \
+    "punpckhdq %xmm2, %xmm0\n   movdqa %xmm10, %xmm14\n   punpckldq %xmm11, %xmm14\n   punpckhdq %xmm11, %xmm10\n"                     \
+    "movdqa %xmm4, %xmm15\n   punpckldq %xmm6, %xmm15\n   punpckhdq %xmm6, %xmm4\n"                                                 \
+    "movdqa %xmm12, %xmm1\n   punpcklqdq %xmm14, %xmm1\n   punpckhqdq %xmm14, %xmm12\n   movdqa %xmm8, %xmm2\n   punpcklqdq %xmm10, %xmm2\n" \
+    "punpckhqdq %xmm10, %xmm8\n   movdqa %xmm13, %xmm3\n   punpcklqdq %xmm15, %xmm3\n   punpckhqdq %xmm15, %xmm13\n"                   \
+    "movdqa %xmm0, %xmm5\n   punpcklqdq %xmm4, %xmm5\n   punpckhqdq %xmm4, %xmm0\n"
+__asm__(
+    ASM_SECTION
+    //      jpeg_idct_8x8: rdi into, rsi pitch, rdx coefficients, rcx quantization. 256 bytes of stack, on 16: the dequantized rows
+    //      (then the transposed columns' results) at 0, the upper halves at 128.
+    ASM_FUNC(jpeg_idct_8x8)
+    "mov %rsp, %r11\n   sub $256, %rsp\n   and $-16, %rsp\n"
+    "movdqu (%rdx), %xmm0\n   movdqu (%rcx), %xmm8\n   movdqu 16(%rdx), %xmm1\n   movdqu 16(%rcx), %xmm9\n   pmullw %xmm8, %xmm0\n"
+    "pmullw %xmm9, %xmm1\n   movdqu 32(%rdx), %xmm2\n   movdqu 32(%rcx), %xmm10\n   movdqu 48(%rdx), %xmm3\n   movdqu 48(%rcx), %xmm11\n"
+    "pmullw %xmm10, %xmm2\n   pmullw %xmm11, %xmm3\n   movdqa %xmm0, (%rsp)\n   movdqa %xmm1, 16(%rsp)\n   movdqa %xmm2, 32(%rsp)\n"
+    "movdqa %xmm3, 48(%rsp)\n   movdqu 64(%rdx), %xmm4\n   movdqu 64(%rcx), %xmm12\n   movdqu 80(%rdx), %xmm5\n   movdqu 80(%rcx), %xmm13\n"
+    "pmullw %xmm12, %xmm4\n   pmullw %xmm13, %xmm5\n   movdqu 96(%rdx), %xmm6\n   movdqu 96(%rcx), %xmm14\n   movdqu 112(%rdx), %xmm7\n"
+    "movdqu 112(%rcx), %xmm15\n   pmullw %xmm14, %xmm6\n   pmullw %xmm15, %xmm7\n   movdqa %xmm4, 64(%rsp)\n   movdqa %xmm5, 80(%rsp)\n"
+    "movdqa %xmm6, 96(%rsp)\n   movdqa %xmm7, 112(%rsp)\n"
+    //      The columns, then their results transposed to be the rows' inputs.
+    JPEG_IDCT_PASS(ASM_LABEL(jidct_k) "+128(%rip)", "11")
+    JPEG_IDCT_TRANSPOSE
+    "movdqa %xmm1, (%rsp)\n   movdqa %xmm12, 16(%rsp)\n   movdqa %xmm2, 32(%rsp)\n   movdqa %xmm8, 48(%rsp)\n   movdqa %xmm3, 64(%rsp)\n"
+    "movdqa %xmm13, 80(%rsp)\n   movdqa %xmm5, 96(%rsp)\n   movdqa %xmm0, 112(%rsp)\n"
+    //      The rows: their results transposed back are the block's rows, two to a register once held to bytes.
+    JPEG_IDCT_PASS(ASM_LABEL(jidct_k) "+144(%rip)", "18")
+    JPEG_IDCT_TRANSPOSE
+    "movdqa " ASM_LABEL(jidct_k) "+160(%rip), %xmm4\n   packsswb %xmm12, %xmm1\n   packsswb %xmm8, %xmm2\n   packsswb %xmm13, %xmm3\n"
+    "packsswb %xmm0, %xmm5\n   pxor %xmm4, %xmm1\n   pxor %xmm4, %xmm2\n   pxor %xmm4, %xmm3\n   pxor %xmm4, %xmm5\n"
+    "lea (%rsi,%rsi,2), %rax\n   movq %xmm1, (%rdi)\n   movhps %xmm1, (%rdi,%rsi)\n   movq %xmm2, (%rdi,%rsi,2)\n   movhps %xmm2, (%rdi,%rax)\n"
+    "lea (%rdi,%rsi,4), %rdi\n   movq %xmm3, (%rdi)\n   movhps %xmm3, (%rdi,%rsi)\n   movq %xmm5, (%rdi,%rsi,2)\n   movhps %xmm5, (%rdi,%rax)\n"
+    "mov %r11, %rsp\n" ASM_RET
+    //      The pairs pmaddwd multiplies by (each its two 16-bit constants, four times): the even part's (in2, in6) to tmp3 and tmp2,
+    //      the odd part's (z3, z4) to z3 and z4 rotated, (in7, in1) to tmp0 and tmp3, (in5, in3) to tmp1 and tmp2; then the two
+    //      passes' roundings, and 0x80 to lift a held byte.
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(jidct_k) ":\n"
+    "   .rept 4\n   .short 10703, 4433\n   .endr\n   .rept 4\n   .short 4433, -10704\n   .endr\n"
+    "   .rept 4\n   .short -6436, 9633\n   .endr\n   .rept 4\n   .short 9633, 6437\n   .endr\n"
+    "   .rept 4\n   .short -4927, -7373\n   .endr\n   .rept 4\n   .short -7373, 4926\n   .endr\n"
+    "   .rept 4\n   .short -4176, -20995\n   .endr\n   .rept 4\n   .short -20995, 4177\n   .endr\n"
+    "   .rept 4\n   .long 1024\n   .endr\n   .rept 4\n   .long 131072\n   .endr\n   .rept 16\n   .byte 0x80\n   .endr\n"
+    ".popsection\n"
+    ASM_END(jpeg_idct_8x8)
+);
+#undef JPEG_IDCT_HALF
+#undef JPEG_IDCT_PASS
+#undef JPEG_IDCT_TRANSPOSE
+#elif ARM64
+//      A pass of jpeg_idct_8x8 over eight columns at once: v16 to v23 the eight inputs (8 halfwords each), v0 and v1 the products'
+//      constants, ROUND the rounding the even part takes (movi's immediate), NARROW the narrowing of each output's two halves to
+//      halfwords (sqshrn by SHIFT, which holds them to 16 bits). Out: v24 to v31, the eight results. v2 to v23 spent.
+#define JPEG_IDCT_NEON_PASS(ROUND, SHIFT)                                                                                              \
+    "add v8.8h, v16.8h, v20.8h\n   sub v9.8h, v16.8h, v20.8h\n   movi v10.4s, " ROUND "\n"                                          \
+    "sshll v11.4s, v8.4h, #13\n   sshll2 v12.4s, v8.8h, #13\n   add v11.4s, v11.4s, v10.4s\n   add v12.4s, v12.4s, v10.4s\n"       \
+    "sshll v13.4s, v9.4h, #13\n   sshll2 v14.4s, v9.8h, #13\n   add v13.4s, v13.4s, v10.4s\n   add v14.4s, v14.4s, v10.4s\n"       \
+    "smull v8.4s, v18.4h, v0.h[0]\n   smlal v8.4s, v22.4h, v0.h[1]\n   smull2 v9.4s, v18.8h, v0.h[0]\n   smlal2 v9.4s, v22.8h, v0.h[1]\n" \
+    "smull v10.4s, v18.4h, v0.h[1]\n   smlal v10.4s, v22.4h, v0.h[2]\n   smull2 v15.4s, v18.8h, v0.h[1]\n   smlal2 v15.4s, v22.8h, v0.h[2]\n" \
+    "add v2.4s, v11.4s, v8.4s\n   add v3.4s, v12.4s, v9.4s\n   sub v4.4s, v11.4s, v8.4s\n   sub v5.4s, v12.4s, v9.4s\n"             \
+    "add v6.4s, v13.4s, v10.4s\n   add v7.4s, v14.4s, v15.4s\n   sub v13.4s, v13.4s, v10.4s\n   sub v14.4s, v14.4s, v15.4s\n"       \
+    "add v16.8h, v23.8h, v19.8h\n   add v18.8h, v21.8h, v17.8h\n"                                                                    \
+    "smull v8.4s, v16.4h, v0.h[3]\n   smlal v8.4s, v18.4h, v0.h[4]\n   smull2 v9.4s, v16.8h, v0.h[3]\n   smlal2 v9.4s, v18.8h, v0.h[4]\n" \
+    "smull v10.4s, v16.4h, v0.h[4]\n   smlal v10.4s, v18.4h, v0.h[5]\n   smull2 v11.4s, v16.8h, v0.h[4]\n   smlal2 v11.4s, v18.8h, v0.h[5]\n" \
+    "smull v12.4s, v23.4h, v0.h[6]\n   smlal v12.4s, v17.4h, v0.h[7]\n   smull2 v15.4s, v23.8h, v0.h[6]\n   smlal2 v15.4s, v17.8h, v0.h[7]\n" \
+    "add v12.4s, v12.4s, v8.4s\n   add v15.4s, v15.4s, v9.4s\n"                                                                      \
+    "smull v16.4s, v23.4h, v0.h[7]\n   smlal v16.4s, v17.4h, v1.h[0]\n   smull2 v18.4s, v23.8h, v0.h[7]\n   smlal2 v18.4s, v17.8h, v1.h[0]\n" \
+    "add v16.4s, v16.4s, v10.4s\n   add v18.4s, v18.4s, v11.4s\n"                                                                    \
+    "smull v20.4s, v21.4h, v1.h[1]\n   smlal v20.4s, v19.4h, v1.h[2]\n   smull2 v22.4s, v21.8h, v1.h[1]\n   smlal2 v22.4s, v19.8h, v1.h[2]\n" \
+    "add v20.4s, v20.4s, v10.4s\n   add v22.4s, v22.4s, v11.4s\n"                                                                    \
+    "smull v17.4s, v21.4h, v1.h[2]\n   smlal v17.4s, v19.4h, v1.h[3]\n   smull2 v23.4s, v21.8h, v1.h[2]\n   smlal2 v23.4s, v19.8h, v1.h[3]\n" \
+    "add v17.4s, v17.4s, v8.4s\n   add v23.4s, v23.4s, v9.4s\n"                                                                      \
+    "add v8.4s, v2.4s, v16.4s\n   add v9.4s, v3.4s, v18.4s\n   sqshrn v24.4h, v8.4s, #" SHIFT "\n   sqshrn2 v24.8h, v9.4s, #" SHIFT "\n" \
+    "sub v8.4s, v2.4s, v16.4s\n   sub v9.4s, v3.4s, v18.4s\n   sqshrn v31.4h, v8.4s, #" SHIFT "\n   sqshrn2 v31.8h, v9.4s, #" SHIFT "\n" \
+    "add v8.4s, v6.4s, v17.4s\n   add v9.4s, v7.4s, v23.4s\n   sqshrn v25.4h, v8.4s, #" SHIFT "\n   sqshrn2 v25.8h, v9.4s, #" SHIFT "\n" \
+    "sub v8.4s, v6.4s, v17.4s\n   sub v9.4s, v7.4s, v23.4s\n   sqshrn v30.4h, v8.4s, #" SHIFT "\n   sqshrn2 v30.8h, v9.4s, #" SHIFT "\n" \
+    "add v8.4s, v13.4s, v20.4s\n   add v9.4s, v14.4s, v22.4s\n   sqshrn v26.4h, v8.4s, #" SHIFT "\n   sqshrn2 v26.8h, v9.4s, #" SHIFT "\n" \
+    "sub v8.4s, v13.4s, v20.4s\n   sub v9.4s, v14.4s, v22.4s\n   sqshrn v29.4h, v8.4s, #" SHIFT "\n   sqshrn2 v29.8h, v9.4s, #" SHIFT "\n" \
+    "add v8.4s, v4.4s, v12.4s\n   add v9.4s, v5.4s, v15.4s\n   sqshrn v27.4h, v8.4s, #" SHIFT "\n   sqshrn2 v27.8h, v9.4s, #" SHIFT "\n" \
+    "sub v8.4s, v4.4s, v12.4s\n   sub v9.4s, v5.4s, v15.4s\n   sqshrn v28.4h, v8.4s, #" SHIFT "\n   sqshrn2 v28.8h, v9.4s, #" SHIFT "\n"
+//      v24 to v31 (8 halfwords each) transposed into v16 to v23: halfwords, words, then double words.
+#define JPEG_IDCT_NEON_TRANSPOSE                                                                                                         \
+    "trn1 v16.8h, v24.8h, v25.8h\n   trn2 v17.8h, v24.8h, v25.8h\n   trn1 v18.8h, v26.8h, v27.8h\n   trn2 v19.8h, v26.8h, v27.8h\n"   \
+    "trn1 v20.8h, v28.8h, v29.8h\n   trn2 v21.8h, v28.8h, v29.8h\n   trn1 v22.8h, v30.8h, v31.8h\n   trn2 v23.8h, v30.8h, v31.8h\n"   \
+    "trn1 v24.4s, v16.4s, v18.4s\n   trn2 v26.4s, v16.4s, v18.4s\n   trn1 v25.4s, v17.4s, v19.4s\n   trn2 v27.4s, v17.4s, v19.4s\n"   \
+    "trn1 v28.4s, v20.4s, v22.4s\n   trn2 v30.4s, v20.4s, v22.4s\n   trn1 v29.4s, v21.4s, v23.4s\n   trn2 v31.4s, v21.4s, v23.4s\n"   \
+    "trn1 v16.2d, v24.2d, v28.2d\n   trn2 v20.2d, v24.2d, v28.2d\n   trn1 v17.2d, v25.2d, v29.2d\n   trn2 v21.2d, v25.2d, v29.2d\n"   \
+    "trn1 v18.2d, v26.2d, v30.2d\n   trn2 v22.2d, v26.2d, v30.2d\n   trn1 v19.2d, v27.2d, v31.2d\n   trn2 v23.2d, v27.2d, v31.2d\n"
+__asm__(
+    ASM_SECTION
+    //      jpeg_idct_8x8: x0 into, x1 pitch, x2 coefficients, x3 quantization. The low halves of v8 to v15 are the caller's and
+    //      kept on the stack; nothing else is.
+    ASM_FUNC(jpeg_idct_8x8)
+    "stp d8, d9, [sp, #-64]!\n   stp d10, d11, [sp, #16]\n   stp d12, d13, [sp, #32]\n   stp d14, d15, [sp, #48]\n"
+    "adrp x9, " ASM_PAGE_LABEL(jidct_a) "\n   add x9, x9, " ASM_LO12_LABEL(jidct_a) "\n   ld1 {v0.8h, v1.8h}, [x9]\n"
+    "ld1 {v16.8h, v17.8h, v18.8h, v19.8h}, [x2], #64\n   ld1 {v20.8h, v21.8h, v22.8h, v23.8h}, [x2]\n"
+    "ld1 {v24.8h, v25.8h, v26.8h, v27.8h}, [x3], #64\n   ld1 {v28.8h, v29.8h, v30.8h, v31.8h}, [x3]\n"
+    "mul v16.8h, v16.8h, v24.8h\n   mul v17.8h, v17.8h, v25.8h\n   mul v18.8h, v18.8h, v26.8h\n   mul v19.8h, v19.8h, v27.8h\n"
+    "mul v20.8h, v20.8h, v28.8h\n   mul v21.8h, v21.8h, v29.8h\n   mul v22.8h, v22.8h, v30.8h\n   mul v23.8h, v23.8h, v31.8h\n"
+    //      The columns (their results 1024 up and shifted 11), transposed to be the rows' inputs; the rows (131072 up and 16 now,
+    //      2 more at the bytes: two saturating narrows are one of 18, since both shifts are floors), transposed back.
+    JPEG_IDCT_NEON_PASS("#4, lsl #8", "11")
+    JPEG_IDCT_NEON_TRANSPOSE
+    JPEG_IDCT_NEON_PASS("#2, lsl #16", "16")
+    JPEG_IDCT_NEON_TRANSPOSE
+    "movi v2.16b, #0x80\n"
+    "sqshrn v16.8b, v16.8h, #2\n   sqshrn2 v16.16b, v17.8h, #2\n   sqshrn v18.8b, v18.8h, #2\n   sqshrn2 v18.16b, v19.8h, #2\n"
+    "sqshrn v20.8b, v20.8h, #2\n   sqshrn2 v20.16b, v21.8h, #2\n   sqshrn v22.8b, v22.8h, #2\n   sqshrn2 v22.16b, v23.8h, #2\n"
+    "eor v16.16b, v16.16b, v2.16b\n   eor v18.16b, v18.16b, v2.16b\n   eor v20.16b, v20.16b, v2.16b\n   eor v22.16b, v22.16b, v2.16b\n"
+    "st1 {v16.d}[0], [x0], x1\n   st1 {v16.d}[1], [x0], x1\n   st1 {v18.d}[0], [x0], x1\n   st1 {v18.d}[1], [x0], x1\n"
+    "st1 {v20.d}[0], [x0], x1\n   st1 {v20.d}[1], [x0], x1\n   st1 {v22.d}[0], [x0], x1\n   st1 {v22.d}[1], [x0]\n"
+    "ldp d10, d11, [sp, #16]\n   ldp d12, d13, [sp, #32]\n   ldp d14, d15, [sp, #48]\n   ldp d8, d9, [sp], #64\n"
+    ASM_RET
+    //      v0: (in2, in6) to tmp3 and tmp2's constants, (z3, z4) rotated, (in7, in1) to tmp0; v1: the rest (x86_64's pairs).
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(jidct_a) ":\n   .short 10703, 4433, -10704, -6436, 9633, 6437, -4927, -7373\n   .short 4926, -4176, -20995, 4177, 0, 0, 0, 0\n"
+    ".popsection\n"
+    ASM_END(jpeg_idct_8x8)
+);
+#undef JPEG_IDCT_NEON_PASS
+#undef JPEG_IDCT_NEON_TRANSPOSE
+#elif RISCV64
+/*
+        jpeg_idct_8x8's 1-D transform in general registers, written once as JPEG_IDCT_RV_1D: s0 to s7 and s9 hold the products'
+        constants (the three o1 and o2 alone take are made with li where used), s8 the rounding the even part takes. Every sum is
+        addw or subw and every product mulw, so the 32-bit wrap is the machine's, and the four 16-bit sums are wrapped by a shift pair.
+*/
+#define JPEG_IDCT_RV_WRAP16(r) "slli " r ", " r ", 48\n   srai " r ", " r ", 48\n"
+//      in0 a4, in1 a5, in2 a6, in3 a7, in4 t5, in5 t6, in6 s10, in7 s11 (16-bit values, sign-extended); out: the eight sums in
+//      t0 (0), t1 (1), t2 (2), t3 (3), t4 (4), s10 (5), s11 (6), a4 (7); s8 the rounding. t0 to t4, a5 to a7, t5, t6 spent.
+#define JPEG_IDCT_RV_1D                                                                                                                  \
+    "addw t0, a4, t5\n" JPEG_IDCT_RV_WRAP16("t0") "subw t1, a4, t5\n" JPEG_IDCT_RV_WRAP16("t1")                                          \
+    "slliw t0, t0, 13\n   slliw t1, t1, 13\n   addw t0, t0, s8\n   addw t1, t1, s8\n"                                                  \
+    "mulw t2, a6, s0\n   mulw t3, s10, s1\n   addw t2, t2, t3\n"                       /* tmp3 */                                       \
+    "mulw t3, a6, s1\n   mulw t4, s10, s2\n   addw t3, t3, t4\n"                       /* tmp2 */                                       \
+    "addw t4, t0, t2\n   subw t0, t0, t2\n   addw t2, t1, t3\n   subw t1, t1, t3\n"   /* E0 t4, E3 t0, E1 t2, E2 t1 */                 \
+    "addw a4, s11, a7\n" JPEG_IDCT_RV_WRAP16("a4") "addw t5, t6, a5\n" JPEG_IDCT_RV_WRAP16("t5")                                         \
+    "mulw t3, a4, s3\n   mulw s10, t5, s4\n   addw t3, t3, s10\n"                     /* z3r t3 */                                     \
+    "mulw a4, a4, s4\n   mulw t5, t5, s5\n   addw a4, a4, t5\n"                        /* z4r a4 */                                     \
+    "mulw t5, s11, s6\n   mulw s10, a5, s7\n   addw t5, t5, s10\n   addw t5, t5, t3\n"  /* o0 t5 */                                    \
+    "mulw s11, s11, s7\n   mulw a5, a5, s9\n   addw s11, s11, a5\n   addw s11, s11, a4\n" /* o3 s11 */                                 \
+    "li s10, -4176\n   mulw s10, t6, s10\n   li a5, -20995\n   mulw a5, a7, a5\n   addw s10, s10, a5\n   addw s10, s10, a4\n" /* o1 s10 */ \
+    "li a5, -20995\n   mulw t6, t6, a5\n   li a5, 4177\n   mulw a7, a7, a5\n   addw t6, t6, a7\n   addw t6, t6, t3\n" /* o2 t6 */      \
+    "subw a4, t4, s11\n   addw a7, t4, s11\n   addw a6, t2, t6\n   subw t2, t2, t6\n"  /* out7 a4, out0 a7, out1 a6, out6 t2 */         \
+    "addw t3, t0, t5\n   subw t4, t0, t5\n   addw a5, t1, s10\n   subw t1, t1, s10\n" /* out3 t3, out4 t4, out2 a5, out5 t1 */          \
+    "mv t0, a7\n   mv s11, t2\n   mv s10, t1\n   mv t1, a6\n   mv t2, a5\n"
+//      A sum in r shifted right by n and held to 16 bits into r (t3's upper bits spent): the hold is a branch an honest block never
+//      takes.
+#define JPEG_IDCT_RV_HOLD16(r, n, tag)                                                                                                    \
+    "sraiw " r ", " r ", " n "\n   slli t5, " r ", 48\n   srai t5, t5, 48\n   beq t5, " r ", 1" tag "f\n"                              \
+    "li t5, 32767\n   bgt " r ", t5, 2" tag "f\n   li t5, -32768\n2" tag ":  mv " r ", t5\n1" tag ":\n"
+__asm__(
+    ASM_SECTION
+    //      jpeg_idct_8x8: a0 into, a1 pitch, a2 coefficients, a3 quantization. 192 bytes of stack: s0 to s11 and ra kept, and 128 of
+    //      them the columns' results (16-bit, row-major). A column (and then a row) whose seven inputs past the first are zero is
+    //      all one value, the first times 4 held to 16 bits (the rows': (first + 16) >> 5 held to a byte), as the whole transform
+    //      makes it exactly: libjpeg's C takes the same shortcut.
+    ASM_FUNC(jpeg_idct_8x8)
+    "addi sp, sp, -240\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n   sd ra, 96(sp)\n"
+    "li s0, 10703\n   li s1, 4433\n   li s2, -10704\n   li s3, -6436\n   li s4, 9633\n   li s5, 6437\n   li s6, -4927\n   li s7, -7373\n"
+    "li s9, 4926\n   li s8, 1024\n"
+    //      The columns: ra the column, its inputs dequantized at 16 bits.
+    "li ra, 0\n"
+    "1:  slli t0, ra, 1\n   add t1, a2, t0\n   add t2, a3, t0\n"
+    "lh a4, 0(t1)\n   lhu t3, 0(t2)\n   mulw a4, a4, t3\n" JPEG_IDCT_RV_WRAP16("a4")
+    "lh a5, 16(t1)\n   lhu t3, 16(t2)\n   mulw a5, a5, t3\n" JPEG_IDCT_RV_WRAP16("a5")
+    "lh a6, 32(t1)\n   lhu t3, 32(t2)\n   mulw a6, a6, t3\n" JPEG_IDCT_RV_WRAP16("a6")
+    "lh a7, 48(t1)\n   lhu t3, 48(t2)\n   mulw a7, a7, t3\n" JPEG_IDCT_RV_WRAP16("a7")
+    "lh t5, 64(t1)\n   lhu t3, 64(t2)\n   mulw t5, t5, t3\n" JPEG_IDCT_RV_WRAP16("t5")
+    "lh t6, 80(t1)\n   lhu t3, 80(t2)\n   mulw t6, t6, t3\n" JPEG_IDCT_RV_WRAP16("t6")
+    "lh s10, 96(t1)\n   lhu t3, 96(t2)\n   mulw s10, s10, t3\n" JPEG_IDCT_RV_WRAP16("s10")
+    "lh s11, 112(t1)\n   lhu t3, 112(t2)\n   mulw s11, s11, t3\n" JPEG_IDCT_RV_WRAP16("s11")
+    "or t3, a5, a6\n   or t3, t3, a7\n   or t3, t3, t5\n   or t3, t3, t6\n   or t3, t3, s10\n   or t3, t3, s11\n   bnez t3, 3f\n"
+    "slliw a4, a4, 2\n" JPEG_IDCT_RV_HOLD16("a4", "0", "0")
+    "slli a7, ra, 1\n   addi a7, a7, 112\n   add a7, a7, sp\n"
+    "sh a4, 0(a7)\n   sh a4, 16(a7)\n   sh a4, 32(a7)\n   sh a4, 48(a7)\n   sh a4, 64(a7)\n   sh a4, 80(a7)\n   sh a4, 96(a7)\n   sh a4, 112(a7)\n"
+    "j 4f\n"
+    //      The column's results are stored down its place in the 128 bytes (a7, free once the transform is done).
+    "3:  " JPEG_IDCT_RV_1D "slli a7, ra, 1\n   addi a7, a7, 112\n   add a7, a7, sp\n"
+    JPEG_IDCT_RV_HOLD16("t0", "11", "1") "sh t0, 0(a7)\n" JPEG_IDCT_RV_HOLD16("t1", "11", "2") "sh t1, 16(a7)\n"
+    JPEG_IDCT_RV_HOLD16("t2", "11", "3") "sh t2, 32(a7)\n" JPEG_IDCT_RV_HOLD16("t3", "11", "4") "sh t3, 48(a7)\n"
+    JPEG_IDCT_RV_HOLD16("t4", "11", "5") "sh t4, 64(a7)\n" JPEG_IDCT_RV_HOLD16("s10", "11", "6") "sh s10, 80(a7)\n"
+    JPEG_IDCT_RV_HOLD16("s11", "11", "7") "sh s11, 96(a7)\n" JPEG_IDCT_RV_HOLD16("a4", "11", "8") "sh a4, 112(a7)\n"
+    "4:  addi ra, ra, 1\n   li t0, 8\n   bltu ra, t0, 1b\n"
+    //      The rows, each into its 8 bytes of into.
+    "li s8, 131072\n   li ra, 0\n"
+    "5:  slli t0, ra, 4\n   addi t1, sp, 112\n   add t1, t1, t0\n"
+    "lh a4, 0(t1)\n   lh a5, 2(t1)\n   lh a6, 4(t1)\n   lh a7, 6(t1)\n   lh t5, 8(t1)\n   lh t6, 10(t1)\n   lh s10, 12(t1)\n   lh s11, 14(t1)\n"
+    "mul t4, ra, a1\n   add t4, t4, a0\n   sd t4, 104(sp)\n"
+    "or t3, a5, a6\n   or t3, t3, a7\n   or t3, t3, t5\n   or t3, t3, t6\n   or t3, t3, s10\n   or t3, t3, s11\n   bnez t3, 6f\n"
+    "addiw a4, a4, 16\n   sraiw a4, a4, 5\n   mv t0, a4\n   mv t1, a4\n   mv t2, a4\n   mv t3, a4\n   mv t4, a4\n   mv s10, a4\n   mv s11, a4\n"
+    "j 7f\n"
+    "6:  " JPEG_IDCT_RV_1D
+    "sraiw t0, t0, 18\n   sraiw t1, t1, 18\n   sraiw t2, t2, 18\n   sraiw t3, t3, 18\n   sraiw t4, t4, 18\n   sraiw s10, s10, 18\n"
+    "sraiw s11, s11, 18\n   sraiw a4, a4, 18\n"
+    //      Each held to -128..127 and lifted: one compare an honest block passes, the hold where it does not.
+    "7:  ld a5, 104(sp)\n   li a6, 255\n"
+#define JPEG_IDCT_RV_BYTE(r, offset, tag)                                                                                                  \
+    "addiw " r ", " r ", 128\n   bleu " r ", a6, 8" tag "f\n   slt " r ", zero, " r "\n   neg " r ", " r "\n8" tag ":  sb " r ", " offset "(a5)\n"
+    JPEG_IDCT_RV_BYTE("t0", "0", "0") JPEG_IDCT_RV_BYTE("t1", "1", "1") JPEG_IDCT_RV_BYTE("t2", "2", "2") JPEG_IDCT_RV_BYTE("t3", "3", "3")
+    JPEG_IDCT_RV_BYTE("t4", "4", "4") JPEG_IDCT_RV_BYTE("s10", "5", "5") JPEG_IDCT_RV_BYTE("s11", "6", "6") JPEG_IDCT_RV_BYTE("a4", "7", "7")
+#undef JPEG_IDCT_RV_BYTE
+    "addi ra, ra, 1\n   li t0, 8\n   bltu ra, t0, 5b\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n"
+    "ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   ld ra, 96(sp)\n   addi sp, sp, 240\n"
+    ASM_RET
+    ASM_END(jpeg_idct_8x8)
+);
+#undef JPEG_IDCT_RV_WRAP16
+#undef JPEG_IDCT_RV_1D
+#undef JPEG_IDCT_RV_HOLD16
+#endif
+#endif // KERNEL_MODE, jpeg_idct_8x8
 
 /*
         What this processor turned out to have.

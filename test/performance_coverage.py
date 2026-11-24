@@ -298,6 +298,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_matrix', 'gemm_f32',
 cover('benchmark_context', 'test/checks.c#BENCH_matrix', 'matrix_engine_f32',
       'the blocked engine gemm_f32 hands its job to, timed in every gemm_f32 row',
       {'matrix_engine_f32': 'gemm_f32'})
+cover('direct_benchmark', 'test/checks.c#BENCH_jpeg', 'jpeg_idct_8x8',
+      'paired timing against its definition in C (the check\'s jpeg_reference_idct_8x8, the kernel ui.c had) over 4096 honest '
+      'and 4096 smooth blocks, the two in turn a round at a time; CHECK_jpeg holds it to that definition byte for byte')
 cover('correctness_only', 'test/checks.c#CHECK_enhance', 'conv3x3_f32 u8_to_f32 picture_quads_f32 picture_quads_add_f32 picture_lut3d_u32',
       'the picture network routines the wallpaper enhancer runs on: every tile, panel and tail against a double model, '
       'guard pages, each x86-64 tier and riscv64 with V and without; timed in the enhancer\'s own rows (a 3840 by 2160 '

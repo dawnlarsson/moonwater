@@ -22192,22 +22192,13 @@ static const p8 ui_jpeg_natural[64 + 16] = {
         35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
         63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63};
 
-/* ---- the kernels: what the lib.c routines of the same contract do (jpeg_idct_*, pixels_*, samples_*) ---- */
+/* ---- the kernels: lib.c's jpeg_idct_8x8 does the whole block; these are the rest, in C until their lib.c routines land ---- */
 
-// libjpeg's islow constants, at CONST_BITS 13: FIX(x) is x * 8192 rounded.
-#define UI_JPEG_F0298 2446
-#define UI_JPEG_F0390 3196
-#define UI_JPEG_F0541 4433
+// libjpeg's constants for the reduced inverse DCTs (jidctred.c), at CONST_BITS 13: FIX(x) is x * 8192 rounded.
 #define UI_JPEG_F0765 6270
 #define UI_JPEG_F0899 7373
-#define UI_JPEG_F1175 9633
-#define UI_JPEG_F1501 12299
 #define UI_JPEG_F1847 15137
-#define UI_JPEG_F1961 16069
-#define UI_JPEG_F2053 16819
 #define UI_JPEG_F2562 20995
-#define UI_JPEG_F3072 25172
-// and jidctred's, for the reduced ones.
 #define UI_JPEG_F0211 1730
 #define UI_JPEG_F0509 4176
 #define UI_JPEG_F0601 4926
@@ -22236,58 +22227,7 @@ static inline INLINE CONST b16 ui_jpeg_dequantized(b16 coefficient, p16 quantize
 }
 
 /*
-        One dimension of the islow IDCT over in[0..7] (16-bit, each in[k] at stride apart), its eight sums (before the descale) into
-        out[]: libjpeg's jidctint.c with its rotations written as sums of two products, which is the same arithmetic exactly (every
-        product fits 32 bits) and what a pair of 16-bit lanes multiplied and added does in one instruction. in[0] + in[4], in[0] - in[4],
-        in[7] + in[3] and in[5] + in[1] are 16-bit sums, wrapping as a 16-bit add wraps; everything after is 32 bits, wrapping.
-*/
-static inline INLINE fn ui_jpeg_islow(const b16 address_to in, positive stride, p32 address_to out)
-{
-        b32 i0 = in[0], i1 = in[stride], i2 = in[2 * stride], i3 = in[3 * stride], i4 = in[4 * stride], i5 = in[5 * stride],
-            i6 = in[6 * stride], i7 = in[7 * stride];
-        b32 s04 = (b16)(p16)(i0 + i4), d04 = (b16)(p16)(i0 - i4), z3 = (b16)(p16)(i7 + i3), z4 = (b16)(p16)(i5 + i1);
-        p32 tmp0 = (p32)(s04 * 8192), tmp1 = (p32)(d04 * 8192);
-        p32 tmp3 = (p32)(i2 * (UI_JPEG_F0541 + UI_JPEG_F0765)) + (p32)(i6 * UI_JPEG_F0541);
-        p32 tmp2 = (p32)(i2 * UI_JPEG_F0541) + (p32)(i6 * (UI_JPEG_F0541 - UI_JPEG_F1847));
-        p32 tmp10 = tmp0 + tmp3, tmp13 = tmp0 - tmp3, tmp11 = tmp1 + tmp2, tmp12 = tmp1 - tmp2;
-        p32 z3r = (p32)(z3 * (UI_JPEG_F1175 - UI_JPEG_F1961)) + (p32)(z4 * UI_JPEG_F1175);
-        p32 z4r = (p32)(z3 * UI_JPEG_F1175) + (p32)(z4 * (UI_JPEG_F1175 - UI_JPEG_F0390));
-        p32 o0 = (p32)(i7 * (UI_JPEG_F0298 - UI_JPEG_F0899)) + (p32)(i1 * -UI_JPEG_F0899) + z3r;
-        p32 o3 = (p32)(i7 * -UI_JPEG_F0899) + (p32)(i1 * (UI_JPEG_F1501 - UI_JPEG_F0899)) + z4r;
-        p32 o1 = (p32)(i5 * (UI_JPEG_F2053 - UI_JPEG_F2562)) + (p32)(i3 * -UI_JPEG_F2562) + z4r;
-        p32 o2 = (p32)(i5 * -UI_JPEG_F2562) + (p32)(i3 * (UI_JPEG_F3072 - UI_JPEG_F2562)) + z3r;
-        out[0] = tmp10 + o3, out[7] = tmp10 - o3, out[1] = tmp11 + o2, out[6] = tmp11 - o2;
-        out[2] = tmp12 + o1, out[5] = tmp12 - o1, out[3] = tmp13 + o0, out[4] = tmp13 - o0;
-}
-
-/*
-        jpeg_idct_8x8(into, pitch, coefficients, quantization): a block's 64 coefficients (natural order) times its quantizers, inverse
-        transformed (libjpeg's islow: columns, their results descaled by 11 bits and held to 16, then rows, descaled by 18 bits), held to
-        -128..127 and lifted by 128, into 8 rows of 8 bytes pitch apart. Every input is defined: what wraps or saturates does so as said.
-*/
-static fn ui_jpeg_idct_8x8(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
-{
-        b16 in[64], work[64];
-        p32 out[8];
-
-        for (int k = 0; k < 64; k++)
-                in[k] = ui_jpeg_dequantized(coefficients[k], quantization[k]);
-        for (int column = 0; column < 8; column++)
-        {
-                ui_jpeg_islow(in + column, 8, out);
-                for (int row = 0; row < 8; row++)
-                        work[row * 8 + column] = ui_jpeg_held16((b32)(out[row] + 1024u) >> 11);
-        }
-        for (int row = 0; row < 8; row++, into += pitch)
-        {
-                ui_jpeg_islow(work + row * 8, 1, out);
-                for (int column = 0; column < 8; column++)
-                        into[column] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[column] + (1u << 17)) >> 18));
-        }
-}
-
-/*
-        jpeg_idct_4x4: the same block made 4 by 4 (libjpeg's jidctred.c jpeg_idct_4x4, for a decode at a half): the coefficients of rows
+        The same block made 4 by 4 (libjpeg's jidctred.c jpeg_idct_4x4, for a decode at a half): the coefficients of rows
         and columns 0 to 3, 5, 6 and 7 (4 is not wanted at this size), columns descaled by 12 bits and held to 16, rows by 19.
 */
 static inline INLINE fn ui_jpeg_reduced4(const b16 address_to in, positive stride, p32 address_to out)
@@ -22713,7 +22653,7 @@ static fn ui_jpeg_put(struct ui_jpeg_component address_to c, positive bx, positi
         if (block && last)
         {
                 if (scale == 8)
-                        ui_jpeg_idct_8x8(into, c->pitch, block, c->quantization);
+                        jpeg_idct_8x8(into, c->pitch, block, c->quantization);
                 else if (scale == 4)
                         ui_jpeg_idct_4x4(into, c->pitch, block, c->quantization);
                 else if (scale == 2)

@@ -47433,11 +47433,16 @@ int main(int argc, char **argv)
 
 
 def jpeg_fuzz_source():
-    """The decoder's block of ui.c as a hosted unit: JPEG_FUZZ_PRELUDE, the block, JPEG_FUZZ_ENTRY."""
+    """The decoder's block of ui.c as a hosted unit: JPEG_FUZZ_PRELUDE, lib.c's JPEG routines as test/checks/jpeg.c defines
+    them in C (each name made its reference's), the block, JPEG_FUZZ_ENTRY."""
     ui = (HARNESS_ROOT / "src/canvas/ui/ui.c").read_text()
     lift = ui[ui.index("/* ---- pictures: JPEG ----"):
               ui.index("/* ---- pictures: a PNG or a JPEG, by what the file begins with ----")]
-    return JPEG_FUZZ_PRELUDE + lift + JPEG_FUZZ_ENTRY
+    checks = (HARNESS_ROOT / "test/checks/jpeg.c").read_text()
+    references = checks[checks.index("/* ---- the references ---- */"):checks.index("/* ---- end of the references ---- */")]
+    names = sorted(set(re.findall(r"^static fn jpeg_reference_(\w+)\(", references, re.M)))
+    rename = "".join("#define jpeg_%s jpeg_reference_%s\n" % (name, name) for name in names)
+    return JPEG_FUZZ_PRELUDE + references + rename + lift + JPEG_FUZZ_ENTRY
 
 
 def jpeg_fuzz_seeds():

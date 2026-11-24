@@ -428,6 +428,9 @@ cover('folds_already', 'count', 'memory_s16_to_u8',
 cover('folds_already', 'frames', 'memory_window_peaks',
       'the frames are a source block (the sink\'s period, 16 to 512 or more), and the window is the source\'s rate over the stream\'s, '
       'both set at run time; a literal count would remove one compare from a loop of vector turns of four frames')
+cover('nothing_to_fold', None, 'jpeg_idct_8x8',
+      'a block of a picture: the coefficients and quantizers are the file\'s and the pitch its plane\'s, none of them known '
+      'where it is called; the work is fixed, 64 coefficients a call')
 cover('folds_already', 'width', 'conv3x3_f32',
       'the enhancer hands it a band of a picture a row at a time: the width is the band\'s, from the picture at run '
       'time, and the channel counts, though the model\'s, settle only the panel and tile chosen once a call, a few '
