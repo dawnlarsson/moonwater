@@ -8119,7 +8119,7 @@ gate_gpu_kernels_llvm()
         gpu_kernels_mutant '{"v_xor_b32", GPUASM_VOP2, 0x1d,' '{"v_xor_b32", GPUASM_VOP2, 0x1c,' test/gpu_stress.asm
 }
 
-#       The Intel kernels (src/canvas/gpu_i915.asm, Gen9) are made by build gpu-i915 into the work directory, checked against IGT's rows
+#       The Intel kernels (src/canvas/gpu_i915.asm, Gen9's and Gen12's) are made by build gpu-i915 into the work directory, checked against IGT's rows
 #       by the checker, and held to what --print-intel makes of the same source: a hand build and the build tool write the same array.
 gate_gpu_i915()
 {

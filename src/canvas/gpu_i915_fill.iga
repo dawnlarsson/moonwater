@@ -1,0 +1,16 @@
+// Gen9 fill (op 1), 16 bytes a thread: the colour's dword (CURBE r1.0) in every lane of r5 and r6, written by the media block write
+// of the header r4 to binding table entry 0 (the destination), then end of thread. These are IGT's words (lib/gpgpu_fill.c's
+// gen9_gpgpu_kernel, rows 1 to 9) as iga64 -d -p=9 reads them: Gen9's words in src/canvas/gpu_i915.asm are IGT's own (test/gpu_kernels.py
+// holds them to IGT's rows), and iga64 -a -p=9 -Xforce-no-compact of this file gives them back but for one bit of the write's
+// destination, which no message reads (IGT's word 0x24000a40 says acc0 with a stride, iga64's 0x20000a40 without). This file is
+// the source Gen12's fill is assembled from (fill12: test/gpu_kernels.py --intel-gen12). Thread group X (r0.1) is the 16-byte
+// block, group Y (r0.6) the row.
+mul (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    0x10:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mov (2|M0)               r4.0<1>:ud    r2.0<2;2,1>:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+mov (16|M0)              r5.0<1>:ud    r1.0<0;1,0>:ud
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000     // media block write, surface 0 (destination)
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

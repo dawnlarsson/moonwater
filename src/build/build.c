@@ -5142,7 +5142,7 @@ static b32 build_gpu_kernels(string_address input, string_address output)
 }
 
 /*
-        The Intel GPU's kernels (src/canvas/gpu_i915.asm, Gen9): the words after each `kernel NAME`
+        The Intel GPU's kernels (src/canvas/gpu_i915.asm, Gen9's and Gen12's): the words after each `kernel NAME`
         line, written as arrays named gpu_i915_NAME into output, which src/canvas/gpu.c's Intel
         set includes. A word is a hex number after a comma; a comment runs from a `;`. A line that
         is neither a kernel nor words refuses the build. The checker (test/gpu_kernels.py
