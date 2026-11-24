@@ -1,5 +1,6 @@
 ; The GPU's kernels, by hand: AMD RDNA2 (gfx1036), wave64. test/gpu_kernels.py assembles this and writes the arrays gpu.c holds.
 ; In: s[4:5] the arguments (struct gpu_args), s6 s7 the workgroup's x and y, v0 the lane. The pixels are 32 bits.
+; The scalar registers are s0 to s101 and no instruction names null (a carry nobody reads goes to s[36:37]): a gfx9 chip has neither s102 on nor null.
 .amdgcn_target "amdgcn-amd-amdhsa--gfx1036"
 .text
 
@@ -390,7 +391,7 @@ scene:
 	s_load_dwordx4	s[8:11], s[4:5], 0x8
 	s_load_dwordx4	s[12:15], s[4:5], 0x18
 	s_load_dwordx2	s[2:3], s[4:5], 0x30
-	s_load_dwordx2	s[102:103], s[4:5], 0x0
+	s_load_dwordx2	s[32:33], s[4:5], 0x0
 	v_and_b32	v1, 15, v0
 	v_lshrrev_b32	v2, 4, v0
 	s_waitcnt	lgkmcnt(0)
@@ -801,7 +802,7 @@ scene:
 	s_or_b64	s[90:91], s[90:91], s[86:87]
 	s_or_b64	s[90:91], s[90:91], s[88:89]
 	s_and_b64	exec, s[92:93], s[90:91]
-	global_load_dword v34, v31, s[102:103]
+	global_load_dword v34, v31, s[32:33]
 	s_mov_b64	exec, s[92:93]
 	v_mul_lo_u32	v35, v30, s81
 	v_add_nc_u32	v35, v35, v32
@@ -865,7 +866,7 @@ scene:
 	s_or_b64	s[90:91], s[90:91], s[86:87]
 	s_or_b64	s[90:91], s[90:91], s[88:89]
 	s_and_b64	exec, s[92:93], s[90:91]
-	global_load_dword v34, v30, s[102:103]
+	global_load_dword v34, v30, s[32:33]
 	s_mov_b64	exec, s[92:93]
 	s_bitcmp1_b32	s56, 6
 	s_cbranch_scc1	.mix_tiled
@@ -901,8 +902,8 @@ scene:
 	s_mov_b64	exec, s[92:93]
 	s_branch	.mix_blend
 .mix_tiled:
-	s_add_u32	s50, s102, s62
-	s_addc_u32	s51, s103, 0
+	s_add_u32	s50, s32, s62
+	s_addc_u32	s51, s33, 0
 	s_load_dwordx8	s[64:71], s[50:51], 0x0
 	s_and_b32	s50, s63, 0xffff
 	s_lshr_b32	s51, s63, 16
@@ -974,10 +975,10 @@ scene:
 	mixpixel	v8, v31, v27, s[88:89]
 	s_branch	.scene_loop
 .mix_linear:
-	s_add_u32	s98, s102, 43008
-	s_addc_u32	s99, s103, 0
-	s_add_u32	s100, s102, 44032
-	s_addc_u32	s101, s103, 0
+	s_add_u32	s98, s32, 43008
+	s_addc_u32	s99, s33, 0
+	s_add_u32	s100, s32, 44032
+	s_addc_u32	s101, s33, 0
 	mixlinear	v5, v28, v24, s[82:83]
 	mixlinear	v6, v29, v25, s[84:85]
 	mixlinear	v7, v30, v26, s[86:87]
@@ -1051,8 +1052,8 @@ scene:
 	s_waitcnt	vmcnt(0)
 	s_branch	.image_loaded
 .image_tiled:
-	s_add_u32	s50, s102, s61
-	s_addc_u32	s51, s103, 0
+	s_add_u32	s50, s32, s61
+	s_addc_u32	s51, s33, 0
 	s_load_dwordx8	s[64:71], s[50:51], 0x0
 	s_and_b32	s50, s62, 0xffff
 	s_lshr_b32	s51, s62, 16
@@ -1156,7 +1157,7 @@ scene:
 	s_or_b64	s[90:91], s[90:91], s[88:89]
 	s_and_saveexec_b64 s[92:93], s[90:91]
 	s_cbranch_execz	.text_done
-	s_mov_b64	s[98:99], s[102:103]
+	s_mov_b64	s[98:99], s[32:33]
 	s_bfe_u32	s100, s62, 0x80010
 	s_cmp_eq_u32	s100, 0
 	s_cbranch_scc1	.text_based
@@ -1246,7 +1247,7 @@ scene:
 	s_or_b64	s[90:91], s[90:91], s[88:89]
 	s_and_saveexec_b64 s[92:93], s[90:91]
 	s_cbranch_execz	.translate_done
-	s_mov_b64	s[98:99], s[102:103]
+	s_mov_b64	s[98:99], s[32:33]
 	s_bfe_u32	s100, s62, 0x80010
 	s_cmp_eq_u32	s100, 0
 	s_cbranch_scc1	.translate_based
@@ -1305,14 +1306,14 @@ scene:
 
 ; a box (256ths: x0 s57, y0 s58, x1 s59, y1 s60, the colour s61, rx s62, ry s63)
 .scene_box:
-	s_bfe_u32	s105, s56, 0x40008
-	s_add_u32	s44, s44, s105
-	s_mov_b32	s104, 0
+	s_bfe_u32	s35, s56, 0x40008
+	s_add_u32	s44, s44, s35
+	s_mov_b32	s34, 0
 	s_lshl_b32	s78, s28, 8
 	s_lshl_b32	s79, s29, 8
 	s_lshl_b32	s80, s40, 8
 	s_lshl_b32	s81, s41, 8
-; the record in s[56:63] (the box, then each of its changes of cover: s104 is the one in hand, s105 how many) against the patch
+; the record in s[56:63] (the box, then each of its changes of cover: s34 is the one in hand, s35 how many) against the patch
 .box_enter:
 	s_cmp_le_i32	s59, s57
 	s_cbranch_scc1	.box_miss
@@ -1328,7 +1329,7 @@ scene:
 	s_cbranch_scc1	.box_miss
 	s_add_i32	s86, s58, s63
 	s_sub_i32	s87, s60, s63
-	s_cmp_lg_u32	s104, 0
+	s_cmp_lg_u32	s34, 0
 	s_cbranch_scc1	.box_edge
 	s_lshr_b32	s52, s61, 24
 	s_cmp_eq_u32	s52, 0
@@ -1337,7 +1338,7 @@ scene:
 	s_and_b32	s64, s61, 255
 	s_bfe_u32	s65, s61, 0x80008
 	s_bfe_u32	s66, s61, 0x80010
-	s_cmp_lg_u32	s105, 0
+	s_cmp_lg_u32	s35, 0
 	s_cbranch_scc1	.box_edge
 	s_cmp_lt_i32	s78, s57
 	s_cbranch_scc1	.box_edge
@@ -1448,12 +1449,12 @@ scene:
 	v_cvt_u32_f32	v48, v48
 	v_lshlrev_b32	v50, 16, v47
 	v_lshrrev_b32	v51, 16, v47
-	v_mad_u64_u32	v[52:53], null, v48, s63, 0
+	v_mad_u64_u32	v[52:53], s[36:37], v48, s63, 0
 	v_cmp_gt_u64_e64 s[98:99], v[52:53], v[50:51]
 	v_subrev_nc_u32	v54, 1, v48
 	v_cndmask_b32_e64 v48, v48, v54, s[98:99]
 	v_add_nc_u32	v54, 1, v48
-	v_mad_u64_u32	v[52:53], null, v54, s63, 0
+	v_mad_u64_u32	v[52:53], s[36:37], v54, s63, 0
 	v_cmp_le_u64_e64 s[98:99], v[52:53], v[50:51]
 	v_cndmask_b32_e64 v48, v48, v54, s[98:99]
 	v_mul_lo_u32	v49, v48, v48
@@ -1463,15 +1464,15 @@ scene:
 	v_cvt_u32_f32	v54, v54
 	v_mov_b32	v56, v49
 	v_mov_b32	v57, 0
-	v_mad_u64_u32	v[58:59], null, v54, v54, 0
+	v_mad_u64_u32	v[58:59], s[36:37], v54, v54, 0
 	v_cmp_gt_u64_e64 s[98:99], v[58:59], v[56:57]
 	v_subrev_nc_u32	v60, 1, v54
 	v_cndmask_b32_e64 v54, v54, v60, s[98:99]
 	v_add_nc_u32	v60, 1, v54
-	v_mad_u64_u32	v[58:59], null, v60, v60, 0
+	v_mad_u64_u32	v[58:59], s[36:37], v60, v60, 0
 	v_cmp_le_u64_e64 s[98:99], v[58:59], v[56:57]
 	v_cndmask_b32_e64 v54, v54, v60, s[98:99]
-	v_mad_u64_u32	v[58:59], null, v54, s62, 0
+	v_mad_u64_u32	v[58:59], s[36:37], v54, s62, 0
 	v_alignbit_b32	v60, v59, v58, 16
 	v_cmp_gt_u32_e64 s[98:99], 0x10000, v48
 	v_cndmask_b32_e64 v60, 0, v60, s[98:99]
@@ -1508,7 +1509,7 @@ scene:
 	v_cndmask_b32_e64 v25, 0, v25, s[82:83]
 	v_cndmask_b32_e64 v26, 0, v26, s[82:83]
 	v_cndmask_b32_e64 v27, 0, v27, s[82:83]
-	s_cmp_lg_u32	s104, 0
+	s_cmp_lg_u32	s34, 0
 	s_cbranch_scc1	.box_combine
 	v_mov_b32	v12, v24
 	v_mov_b32	v13, v25
@@ -1516,10 +1517,10 @@ scene:
 	v_mov_b32	v15, v27
 ; the next change of the box's cover, if it has one: its record, then its cover as the box's was
 .box_next:
-	s_cmp_ge_u32	s104, s105
+	s_cmp_ge_u32	s34, s35
 	s_cbranch_scc1	.box_blend
-	s_add_u32	s104, s104, 1
-	s_lshl_b32	s46, s104, 5
+	s_add_u32	s34, s34, 1
+	s_lshl_b32	s46, s34, 5
 	s_add_u32	s2, s48, s46
 	s_addc_u32	s3, s49, 0
 	s_load_dwordx8	s[56:63], s[2:3], 0x0
@@ -1527,7 +1528,7 @@ scene:
 	s_branch	.box_enter
 ; a change that misses the patch: a hole takes nothing from the cover, a clip leaves none
 .box_miss:
-	s_cmp_eq_u32	s104, 0
+	s_cmp_eq_u32	s34, 0
 	s_cbranch_scc1	.scene_loop
 	s_bitcmp1_b32	s56, 0
 	s_cbranch_scc1	.scene_loop
@@ -1556,10 +1557,10 @@ scene:
 	v_lshrrev_b32	v15, 12, v15
 	s_branch	.box_next
 .box_blend:
-	s_add_u32	s98, s102, 43008
-	s_addc_u32	s99, s103, 0
-	s_add_u32	s100, s102, 44032
-	s_addc_u32	s101, s103, 0
+	s_add_u32	s98, s32, 43008
+	s_addc_u32	s99, s33, 0
+	s_add_u32	s100, s32, 44032
+	s_addc_u32	s101, s33, 0
 	s_lshr_b32	s67, s52, 7
 	s_add_u32	s67, s52, s67
 	s_mul_i32	s68, s64, s67
@@ -1820,7 +1821,7 @@ kernel copy, 8, 24
 kernel fill, 8, 24
 kernel tone, 10, 28
 kernel glass, 16, 32
-kernel scene, 64, 106
+kernel scene, 64, 102
 kernel scale, 8, 24
 kernel image, 16, 40
 kernel nv12, 16, 40
