@@ -411,6 +411,9 @@ static void wsi_note(char what, unsigned long long a, unsigned long long b, unsi
         wsi_log.line[wsi_log.count].what = what, wsi_log.line[wsi_log.count].a = a, wsi_log.line[wsi_log.count].b = b;
         wsi_log.line[wsi_log.count].c = c, wsi_log.line[wsi_log.count].d = d, wsi_log.line[wsi_log.count].e = e;
         wsi_log.count++;
+        // An answer or a swapchain is written at once (a game ended by a signal runs no exit handler); a present's line waits for more.
+        if (what != 'P' && what != 'D')
+                wsi_log_flush();
 }
 
 /* ---- the tables: an instance, a device, a surface and a swapchain each a row, found by key ---- */
