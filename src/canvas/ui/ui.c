@@ -6599,6 +6599,7 @@ LANGUAGE_ID(files_moved, "%d moved") \
 LANGUAGE_ID(files_moving, "Moving %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_name_bad, "That is not a name") \
 LANGUAGE_ID(files_name_taken, "That name is taken") \
+LANGUAGE_ID(files_new_file, "New file") \
 LANGUAGE_ID(files_new_folder, "New folder") \
 LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
@@ -6625,6 +6626,7 @@ LANGUAGE_ID(files_restored, "%d put back where they were") \
 LANGUAGE_ID(files_sheet_created, "Made %s") \
 LANGUAGE_ID(files_sheet_file, "File") \
 LANGUAGE_ID(files_sheet_folder, "Folder") \
+LANGUAGE_ID(files_sheet_free, "Free %1$s of %2$s") \
 LANGUAGE_ID(files_sheet_in, "In %s") \
 LANGUAGE_ID(files_sheet_items, "%d items") \
 LANGUAGE_ID(files_sheet_link, "Link to %s") \
@@ -6732,12 +6734,15 @@ LANGUAGE_ID(menu_close_tab, "Close Tab") \
 LANGUAGE_ID(menu_columns, "Columns") \
 LANGUAGE_ID(menu_copy, "&Copy") \
 LANGUAGE_ID(menu_copy_named, "Copy %s") \
+LANGUAGE_ID(menu_copy_path, "Copy path") \
 LANGUAGE_ID(menu_copy_row, "Copy row") \
 LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \
+LANGUAGE_ID(menu_duplicate, "Duplicate") \
 LANGUAGE_ID(menu_find, "&Find") \
 LANGUAGE_ID(menu_go_to_line, "&Go to Line") \
 LANGUAGE_ID(menu_hex_mode, "Hex Editor") \
+LANGUAGE_ID(menu_new_file, "New file") \
 LANGUAGE_ID(menu_new_folder, "&New Folder") \
 LANGUAGE_ID(menu_new_tab, "New Tab") \
 LANGUAGE_ID(menu_new_window, "New Window") \

@@ -87,6 +87,7 @@ files_moved	f6ef	%d moved
 files_moving	2b61	Moving %1$d of %2$d, %3$s of %4$s: Escape stops
 files_name_bad	467d	That is not a name
 files_name_taken	cbce	That name is taken
+files_new_file	18bd	New file
 files_new_folder	d127	New folder
 files_not_folder	2663	This is not a folder
 files_nothing_to_paste	c9d4	The clipboard holds no files
@@ -113,6 +114,7 @@ files_restored	4c30	%d put back where they were
 files_sheet_created	59ac	Made %s
 files_sheet_file	3663	File
 files_sheet_folder	7afd	Folder
+files_sheet_free	c01b	Free %1$s of %2$s
 files_sheet_in	3f9a	In %s
 files_sheet_items	cab8	%d items
 files_sheet_link	9772	Link to %s
@@ -220,12 +222,15 @@ menu_close_tab	eb40	Close Tab
 menu_columns	6fdc	Columns
 menu_copy	43e0	&Copy
 menu_copy_named	fb68	Copy %s
+menu_copy_path	cb2b	Copy path
 menu_copy_row	f3c8	Copy row
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
+menu_duplicate	0336	Duplicate
 menu_find	1fa6	&Find
 menu_go_to_line	bc96	&Go to Line
 menu_hex_mode	74bf	Hex Editor
+menu_new_file	18bd	New file
 menu_new_folder	41cb	&New Folder
 menu_new_tab	ecfa	New Tab
 menu_new_window	c3db	New Window

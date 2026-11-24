@@ -5541,6 +5541,22 @@ static fn browser_transfer_status(void)
         check("transfer: queue clear empties", q.count == 0);
 }
 
+static fn browser_polish(struct files_model address_to m)
+{
+        p64 avail = 0, total = 0;
+
+        browser_folder((string_address) "polish");
+        browser_file((string_address) "polish/file10.txt", 10, 1700000100);
+        browser_file((string_address) "polish/file2.txt", 10, 1700000100);
+        browser_file((string_address) "polish/file1.txt", 10, 1700000100);
+        browser_go(m, (string_address) "polish");
+        check("polish: natural numeric sort puts file1, file2 before file10",
+              m->state == FILES_READY && browser_is(m, (string_address) "file1.txt file2.txt file10.txt "));
+        check("polish: files_model_make_file creates a new file", files_model_make_file(m, (const p8 address_to) "fresh.txt") == FILES_DID);
+        check("polish: files_model_make_file refuses duplicate name", files_model_make_file(m, (const p8 address_to) "fresh.txt") == FILES_DID_EXISTS);
+        check("polish: files_space_free reports positive disk space", files_space_free(m->handle, &avail, &total) && total > 0 && avail <= total);
+}
+
 b32 main(void)
 {
         static struct files_model model;
@@ -5570,6 +5586,7 @@ b32 main(void)
         browser_ops(address_of model);
         browser_moves();
         browser_transfer_status();
+        browser_polish(address_of model);
         browser_tree();
         browser_filter(address_of model);
         browser_devices();

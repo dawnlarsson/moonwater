@@ -33,6 +33,7 @@
 # machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
+# machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 @language pt
 @name Português
 @translated machine
@@ -122,6 +123,7 @@ files_moved	f6ef	%d movidos
 files_moving	2b61	Movendo %1$d de %2$d, %3$s de %4$s: Escape para
 files_name_bad	467d	Isso não é um nome
 files_name_taken	cbce	Esse nome já existe
+files_new_file	18bd	Novo arquivo
 files_new_folder	d127	Nova pasta
 files_not_folder	2663	Isto não é uma pasta
 files_nothing_to_paste	c9d4	A área de transferência não tem arquivos
@@ -148,6 +150,7 @@ files_restored	4c30	%d devolvidos ao seu lugar
 files_sheet_created	59ac	Criado %s
 files_sheet_file	3663	Arquivo
 files_sheet_folder	7afd	Pasta
+files_sheet_free	c01b	Livre %1$s de %2$s
 files_sheet_in	3f9a	Em %s
 files_sheet_items	cab8	%d itens
 files_sheet_link	9772	Link para %s
@@ -255,12 +258,15 @@ menu_close_tab	eb40	Fechar aba
 menu_columns	6fdc	Colunas
 menu_copy	43e0	&Copiar
 menu_copy_named	fb68	Copiar %s
+menu_copy_path	cb2b	Copiar caminho
 menu_copy_row	f3c8	Copiar linha
 menu_cut	5c17	Recor&tar
 menu_delete	1e3e	&Excluir
+menu_duplicate	0336	Duplicar
 menu_find	1fa6	&Procurar
 menu_go_to_line	bc96	&Ir para a linha
 menu_hex_mode	74bf	Editor hexadecimal
+menu_new_file	18bd	Novo arquivo
 menu_new_folder	41cb	&Nova pasta
 menu_new_tab	ecfa	Nova aba
 menu_new_window	c3db	Nova janela

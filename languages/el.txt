@@ -33,6 +33,7 @@
 # machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
+# machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 @language el
 @name Ελληνικά
 @translated machine
@@ -122,6 +123,7 @@ files_moved	f6ef	Μετακινήθηκαν %d
 files_moving	2b61	Μετακίνηση %1$d από %2$d, %3$s από %4$s: Escape σταματά
 files_name_bad	467d	Αυτό δεν είναι όνομα
 files_name_taken	cbce	Το όνομα χρησιμοποιείται
+files_new_file	18bd	Νέο αρχείο
 files_new_folder	d127	Νέος φάκελος
 files_not_folder	2663	Αυτό δεν είναι φάκελος
 files_nothing_to_paste	c9d4	Το πρόχειρο δεν έχει αρχεία
@@ -148,6 +150,7 @@ files_restored	4c30	%d επέστρεψαν στη θέση τους
 files_sheet_created	59ac	Δημιουργήθηκε %s
 files_sheet_file	3663	Αρχείο
 files_sheet_folder	7afd	Φάκελος
+files_sheet_free	c01b	Ελεύθερα %1$s από %2$s
 files_sheet_in	3f9a	Στο %s
 files_sheet_items	cab8	%d στοιχεία
 files_sheet_link	9772	Σύνδεσμος προς %s
@@ -255,12 +258,15 @@ menu_close_tab	eb40	Κλείσιμο καρτέλας
 menu_columns	6fdc	Στήλες
 menu_copy	43e0	Αντιγραφή
 menu_copy_named	fb68	Αντιγραφή %s
+menu_copy_path	cb2b	Αντιγραφή διαδρομής
 menu_copy_row	f3c8	Αντιγραφή γραμμής
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
+menu_duplicate	0336	Διπλασιασμός
 menu_find	1fa6	Εύρεση
 menu_go_to_line	bc96	Μετάβαση στη γραμμή
 menu_hex_mode	74bf	Επεξεργαστής Hex
+menu_new_file	18bd	Νέο αρχείο
 menu_new_folder	41cb	Νέος φάκελος
 menu_new_tab	ecfa	Νέα καρτέλα
 menu_new_window	c3db	Νέο παράθυρο

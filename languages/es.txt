@@ -33,6 +33,7 @@
 # machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
+# machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 @language es
 @name Español
 @translated machine
@@ -122,6 +123,7 @@ files_moved	f6ef	%d movidos
 files_moving	2b61	Moviendo %1$d de %2$d, %3$s de %4$s: Escape detiene
 files_name_bad	467d	Eso no es un nombre
 files_name_taken	cbce	Ese nombre ya existe
+files_new_file	18bd	Nuevo archivo
 files_new_folder	d127	Carpeta nueva
 files_not_folder	2663	Esto no es una carpeta
 files_nothing_to_paste	c9d4	El portapapeles no tiene archivos
@@ -148,6 +150,7 @@ files_restored	4c30	%d devueltos a su sitio
 files_sheet_created	59ac	Creado %s
 files_sheet_file	3663	Archivo
 files_sheet_folder	7afd	Carpeta
+files_sheet_free	c01b	Libre %1$s de %2$s
 files_sheet_in	3f9a	En %s
 files_sheet_items	cab8	%d elementos
 files_sheet_link	9772	Enlace a %s
@@ -255,12 +258,15 @@ menu_close_tab	eb40	Cerrar pestaña
 menu_columns	6fdc	Columnas
 menu_copy	43e0	&Copiar
 menu_copy_named	fb68	Copiar %s
+menu_copy_path	cb2b	Copiar ruta
 menu_copy_row	f3c8	Copiar fila
 menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar
+menu_duplicate	0336	Duplicar
 menu_find	1fa6	&Buscar
 menu_go_to_line	bc96	&Ir a la línea
 menu_hex_mode	74bf	Editor hexadecimal
+menu_new_file	18bd	Nuevo archivo
 menu_new_folder	41cb	&Nueva carpeta
 menu_new_tab	ecfa	Nueva pestaña
 menu_new_window	c3db	Nueva ventana

@@ -33,6 +33,7 @@
 # machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
+# machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 @language ru
 @name Русский
 @translated machine
@@ -122,6 +123,7 @@ files_moved	f6ef	Перемещено: %d
 files_moving	2b61	Перемещение %1$d из %2$d, %3$s из %4$s: Escape останавливает
 files_name_bad	467d	Это не имя
 files_name_taken	cbce	Это имя занято
+files_new_file	18bd	Новый файл
 files_new_folder	d127	Новая папка
 files_not_folder	2663	Это не папка
 files_nothing_to_paste	c9d4	В буфере обмена нет файлов
@@ -148,6 +150,7 @@ files_restored	4c30	Возвращено на место: %d
 files_sheet_created	59ac	Создан %s
 files_sheet_file	3663	Файл
 files_sheet_folder	7afd	Папка
+files_sheet_free	c01b	Свободно %1$s из %2$s
 files_sheet_in	3f9a	В %s
 files_sheet_items	cab8	Элементов: %d
 files_sheet_link	9772	Ссылка на %s
@@ -255,12 +258,15 @@ menu_close_tab	eb40	Закрыть вкладку
 menu_columns	6fdc	Столбцы
 menu_copy	43e0	Копировать
 menu_copy_named	fb68	Копировать %s
+menu_copy_path	cb2b	Копировать путь
 menu_copy_row	f3c8	Копировать строку
 menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить
+menu_duplicate	0336	Дублировать
 menu_find	1fa6	Найти
 menu_go_to_line	bc96	Перейти к строке
 menu_hex_mode	74bf	Hex-редактор
+menu_new_file	18bd	Новый файл
 menu_new_folder	41cb	Новая папка
 menu_new_tab	ecfa	Новая вкладка
 menu_new_window	c3db	Новое окно

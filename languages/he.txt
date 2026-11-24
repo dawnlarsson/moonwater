@@ -34,6 +34,7 @@
 # machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
+# machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 @language he
 @name עברית
 @translated machine
@@ -123,6 +124,7 @@ files_moved	f6ef	%d הועברו
 files_moving	2b61	מעביר %1$d מתוך %2$d, %3$s מתוך %4$s: Escape עוצר
 files_name_bad	467d	זה לא שם
 files_name_taken	cbce	השם הזה תפוס
+files_new_file	18bd	קובץ חדש
 files_new_folder	d127	תיקייה חדשה
 files_not_folder	2663	זו לא תיקייה
 files_nothing_to_paste	c9d4	בלוח אין קבצים
@@ -149,6 +151,7 @@ files_restored	4c30	%d הוחזרו למקומם
 files_sheet_created	59ac	נוצר %s
 files_sheet_file	3663	קובץ
 files_sheet_folder	7afd	תיקייה
+files_sheet_free	c01b	פנוי %1$s מתוך %2$s
 files_sheet_in	3f9a	ב־%s
 files_sheet_items	cab8	%d פריטים
 files_sheet_link	9772	קישור אל %s
@@ -256,12 +259,15 @@ menu_close_tab	eb40	סגור לשונית
 menu_columns	6fdc	עמודות
 menu_copy	43e0	העתק
 menu_copy_named	fb68	העתק %s
+menu_copy_path	cb2b	העתק נתיב
 menu_copy_row	f3c8	העתק שורה
 menu_cut	5c17	גזור
 menu_delete	1e3e	מחק
+menu_duplicate	0336	שכפל
 menu_find	1fa6	חפש
 menu_go_to_line	bc96	עבור לשורה
 menu_hex_mode	74bf	עורך הקס
+menu_new_file	18bd	קובץ חדש
 menu_new_folder	41cb	תיקייה חדשה
 menu_new_tab	ecfa	לשונית חדשה
 menu_new_window	c3db	חלון חדש

@@ -166,9 +166,40 @@ static inline p8 files_kind_of_record(p8 t) { return t == DT_DIR ? FILES_KIND_DI
 
 static int files_name_order(const p8 address_to a, const p8 address_to b)
 {
-        b32 d = string_compare_folded((string_address)a, (string_address)b);
-        if (!d)
-                d = string_compare((string_address)a, (string_address)b);
+        const p8 address_to pa = a, address_to pb = b;
+        while (*pa && *pb)
+        {
+                if (*pa >= '0' && *pa <= '9' && *pb >= '0' && *pb <= '9')
+                {
+                        const p8 address_to za = pa, address_to zb = pb;
+                        while (*pa == '0')
+                                pa++;
+                        while (*pb == '0')
+                                pb++;
+                        const p8 address_to sa = pa, address_to sb = pb;
+                        while (*pa >= '0' && *pa <= '9')
+                                pa++;
+                        while (*pb >= '0' && *pb <= '9')
+                                pb++;
+                        positive la = (positive)(pa - sa), lb = (positive)(pb - sb);
+                        if (la != lb)
+                                return la < lb ? -1 : 1;
+                        for (positive k = 0; k < la; k++)
+                                if (sa[k] != sb[k])
+                                        return sa[k] < sb[k] ? -1 : 1;
+                        if ((pa - za) != (pb - zb))
+                                return (pa - za) < (pb - zb) ? -1 : 1;
+                        continue;
+                }
+                p8 ca = (*pa >= 'A' && *pa <= 'Z') ? (p8)(*pa + 32) : *pa;
+                p8 cb = (*pb >= 'A' && *pb <= 'Z') ? (p8)(*pb + 32) : *pb;
+                if (ca != cb)
+                        return ca < cb ? -1 : 1;
+                pa++, pb++;
+        }
+        if (*pa || *pb)
+                return *pa ? 1 : -1;
+        b32 d = string_compare((string_address)a, (string_address)b);
         return d < 0 ? -1 : d > 0;
 }
 
@@ -1013,7 +1044,8 @@ static fn files_keep_trim(struct files_model address_to m, const struct files_tr
 
 // The acts, by number: a menu's items and a key's shortcut name them, and the view gives each its words.
 enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_CUT, FILES_MENU_COPY, FILES_MENU_PASTE,
-       FILES_MENU_RENAME, FILES_MENU_DELETE, FILES_MENU_NEW_FOLDER, FILES_MENU_PROPERTIES, FILES_MENU_HIDDEN, FILES_MENU_ALL,
+       FILES_MENU_RENAME, FILES_MENU_DELETE, FILES_MENU_NEW_FOLDER, FILES_MENU_NEW_FILE, FILES_MENU_COPY_PATH, FILES_MENU_DUPLICATE,
+       FILES_MENU_PROPERTIES, FILES_MENU_HIDDEN, FILES_MENU_ALL,
        FILES_MENU_SHEET, FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, FILES_MENU_SORT = 32,
        FILES_MENU_UNDO = 40, FILES_MENU_REDO, FILES_MENU_BIN, FILES_MENU_BIN_EMPTY, FILES_MENU_RESTORE,
        FILES_MENU_WALLPAPER,
@@ -1028,7 +1060,7 @@ static const p8 files_folder_acts[] = {
         FILES_MENU_SORT, FILES_MENU_SORT + 1, FILES_MENU_SORT + 2, FILES_MENU_SORT + 3, 0,
         FILES_MENU_HIDDEN, FILES_ACT_RELOAD, 0,
         FILES_MENU_UNDO, FILES_MENU_REDO, 0,
-        FILES_MENU_PASTE, FILES_MENU_NEW_FOLDER, FILES_MENU_ALL, 0,
+        FILES_MENU_PASTE, FILES_MENU_NEW_FOLDER, FILES_MENU_NEW_FILE, FILES_MENU_ALL, 0,
         FILES_MENU_TERMINAL, FILES_MENU_BIN, 0,
         FILES_MENU_PROPERTIES,
 };
@@ -1062,6 +1094,32 @@ static b32 files_name_good(const p8 address_to name)
 
 static inline int files_did_code(bipolar res) { return res >= 0 ? FILES_DID : res == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED; }
 static int files_model_make_folder(struct files_model address_to m, const p8 address_to name) { return m->handle < 0 || !files_name_good(name) ? FILES_DID_BAD : files_did_code(files_mkdir(m->handle, name, 0755)); }
+
+static int files_model_make_file(struct files_model address_to m, const p8 address_to name)
+{
+        bipolar fd;
+        if (m->handle < 0 || !files_name_good(name))
+                return FILES_DID_BAD;
+        fd = system_open_at_mode(m->handle, (string_address)name, FILE_WRITE | FILE_CREATE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (fd >= 0)
+                system_close(fd);
+        return files_did_code(fd);
+}
+
+static b32 files_space_free(bipolar fd, p64 address_to avail, p64 address_to total)
+{
+        p64 buf[16];
+        if (fd < 0)
+                return false;
+        memory_fill(buf, 0, sizeof(buf));
+        if ((bipolar)system_call_2(syscall(fstatfs), (positive)fd, (positive)buf) < 0 || !buf[1] || !buf[2])
+                return false;
+        if (avail)
+                *avail = buf[4] * buf[1];
+        if (total)
+                *total = buf[2] * buf[1];
+        return true;
+}
 
 static int files_model_rename(struct files_model address_to m, p32 place, const p8 address_to name)
 {

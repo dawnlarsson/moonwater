@@ -39,7 +39,7 @@ enum { FILES_DEVICE_OPEN = 1, FILES_DEVICE_WRITE, FILES_DEVICE_EJECT, FILES_DEVI
 #define FILES_DISC_PLAY "/run/moonwater/disc.play" // the pid of the disc that plays (disc.c's DISC_PLAY_PATH)
 #define FILES_DISC_SETTLE_NS 3000000000ll    // a play started or stopped is taken at its word this long, before its pid says
 
-enum { FILES_KEY_1 = 2, FILES_KEY_R = 19, FILES_KEY_Y = 21, FILES_KEY_A = 30, FILES_KEY_F = 33, FILES_KEY_H = 35,
+enum { FILES_KEY_1 = 2, FILES_KEY_R = 19, FILES_KEY_Y = 21, FILES_KEY_A = 30, FILES_KEY_D = 32, FILES_KEY_F = 33, FILES_KEY_H = 35,
        FILES_KEY_L = 38, FILES_KEY_Z = 44, FILES_KEY_X = 45, FILES_KEY_C = 46, FILES_KEY_V = 47, FILES_KEY_N = 49,
        FILES_KEY_F2 = 60, FILES_KEY_F5 = 63, FILES_KEY_F6 = 64, FILES_KEY_F10 = 68, FILES_KEY_MENU = 127 };
 enum { FILES_EDIT_PATH = 1, FILES_EDIT_NAME = 2 };
@@ -132,9 +132,9 @@ static struct
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
         struct ui_iconbutton nav[4];
-        struct ui_rect view_box, transfer_box;
+        struct ui_rect view_box, transfer_box, find_close_box;
         struct ui_menubutton view_button;
-        struct ui_iconbutton transfer_cancel;
+        struct ui_iconbutton transfer_cancel, find_close;
         struct files_trail trail;
         struct ui_text field, finder, pick_name;
         struct ui_control path, finder_field, pick_field;
@@ -623,6 +623,14 @@ static fn files_bar_lay(void)
         }
         files.view_button.label = WORDS(files_view), files.view_button.icon = UI_ICON_SETTINGS + 1, files.view_button.open = files.menu.open && files.menu_view;
         files.view_button.x = files.view_box.x, files.view_button.y = files.view_box.y, files.view_button.w = files.view_box.w, files.view_button.h = files.view_box.h;
+        if (files.finding && files.find_close_box.w > 0)
+        {
+                struct ui_iconbutton address_to fb = &files.find_close;
+                fb->glyph = UI_ICON_REMOVE, fb->name = fb->tip = WORDS(files_pick_cancel);
+                fb->x = files.find_close_box.x, fb->y = files.find_close_box.y, fb->w = files.find_close_box.w, fb->h = files.find_close_box.h, fb->disabled = false;
+        }
+        else
+                files.find_close.w = files.find_close.h = 0, files.find_close.hover = files.find_close.down = false;
         files_transfer_card_lay(&files.ui, &files.big->list);
 }
 
@@ -683,7 +691,10 @@ static fn files_layout(void)
                         }
                         if (files.finding)
                                 ui_row(.class = "bar")
+                                {
                                         ui_control(&files.finder_field, .grow = 1, .h = FILES_BAND);
+                                        ui_host(&files.find_close_box, .w = FILES_BAND, .h = FILES_BAND);
+                                }
                         // A program's pick: the name to save under, and Cancel and the pick's own act.
                         if (files_pick_kind >= FILES_PICK_OPEN)
                                 ui_row(.class = "bar")
@@ -896,7 +907,12 @@ static fn files_edit(int how)
                 return;
         files.editing = how;
         if (how == FILES_EDIT_NAME)
-                ui_text_set(files_field(), files_model_name(m, e), e->length), files.naming = m->cursor;
+        {
+                const p8 address_to name = files_model_name(m, e);
+                positive sel_end = e->kind == FILES_KIND_DIRECTORY ? e->length : files_name_dot(name, e->length);
+                ui_text_set(files_field(), name, e->length), files.naming = m->cursor;
+                doc_select_set(&files_field()->doc, 0, sel_end);
+        }
         if (how == FILES_EDIT_PATH)
                 ui_text_set(&k->text, m->path, string_length((string_address)m->path));
         ui_tokens_focus(k, how == FILES_EDIT_PATH, true), k->invalid = false;
@@ -985,6 +1001,28 @@ static fn files_new_folder(void)
                         name[u++] = ' ', name[u + positive_into(name + u, (positive)n)] = end;
                 }
                 did = files_model_make_folder(m, name);
+        }
+        files.big->note[0] = 0, files.said = files_did_said(did), files.dirty = true;
+        if (did == FILES_DID)
+                files_model_reload(m), string_copy_bounded(m->came, name, FILES_NAME);
+}
+
+static fn files_new_file(void)
+{
+        struct files_model address_to m = &files.big->model;
+        static p8 name[FILES_NAME];
+        int did = FILES_DID_EXISTS;
+        if (files_model_is_remote(m))
+                return;
+        for (int n = 1; n < 100 && did == FILES_DID_EXISTS; n++)
+        {
+                string_copy_bounded(name, (string_address)WORDS(files_new_file), FILES_NAME - 8);
+                if (n > 1)
+                {
+                        positive u = string_length(name);
+                        name[u++] = ' ', name[u + positive_into(name + u, (positive)n)] = end;
+                }
+                did = files_model_make_file(m, name);
         }
         files.big->note[0] = 0, files.said = files_did_said(did), files.dirty = true;
         if (did == FILES_DID)
@@ -1194,6 +1232,44 @@ static fn files_rows_copy(b32 cut)
                 files.cut_dim = true;
         else
                 files_carry_end();
+}
+
+static fn files_copy_path(void)
+{
+        const struct files_model address_to m = &files.big->model;
+        p8 address_to list = null, address_to text = null;
+        positive lr = 0, lu = 0, tr = 0, tu = 0;
+        if (!files_paths_collect(m->cursor, files_model_chosen(m, m->cursor), &list, &lr, &lu, null))
+                return;
+        for (positive at = 0; at < lu;)
+        {
+                const p8 address_to path = list + at;
+                positive len = string_length((string_address)path);
+                at += len + 1;
+                if (!array_store_reserve(text, tr, tu, tu + len + 2, 4096))
+                        break;
+                memory_copy(text + tu, path, len), tu += len, text[tu++] = '\n';
+        }
+        if (tu)
+        {
+                struct windows_clip_part part = {WINDOWS_CLIP_TEXT, text, tu - 1};
+                windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, &part, 1);
+        }
+        array_store_release(text, tr, tu), array_store_release(list, lr, lu);
+}
+
+static fn files_duplicate(void)
+{
+        const struct files_model address_to m = &files.big->model;
+        p8 address_to list = null;
+        positive lr = 0, lu = 0;
+        p32 count;
+        if (files_model_is_remote(m))
+                return;
+        count = files_paths_collect(m->cursor, files_model_chosen(m, m->cursor), &list, &lr, &lu, null);
+        if (count)
+                (void)files_transfer(list, count, -1, FILES_MOVE_COPY);
+        array_store_release(list, lr, lu);
 }
 
 static b32 files_uri_transfer(p8 address_to bytes, unsigned long length, int row, int how, p32 address_to out_count)
@@ -1776,6 +1852,14 @@ static fn files_sheet_show(void)
         if (!files.sheet_folder)
                 files_sheet_escape(escaped, sizeof(escaped), m->path, string_length((string_address)m->path)),
                     language_format(sheet[lines++], room, WORDS(files_sheet_in), escaped);
+        else if (lines < FILES_SHEET_LINES)
+        {
+                p64 avail = 0, total = 0;
+                char avail_s[16], total_s[16];
+                if (files_space_free(m->handle, &avail, &total))
+                        ui_size_text(avail_s, sizeof(avail_s), avail), ui_size_text(total_s, sizeof(total_s), total),
+                            language_format(sheet[lines++], room, WORDS(files_sheet_free), avail_s, total_s);
+        }
         if (!many)
         {
                 files_format_time(when, facts.modified.seconds, ' ', true), language_format(sheet[lines++], room, WORDS(files_sheet_modified), when);
@@ -1985,6 +2069,7 @@ static const struct { p8 act; unsigned int words; const char address_to keys; } 
     {FILES_MENU_LIST, LANGUAGE_menu_view_list, "Ctrl+3"}, {FILES_MENU_HIDDEN, LANGUAGE_menu_show_hidden, "Ctrl+H"},
     {FILES_ACT_RELOAD, LANGUAGE_files_refresh, "F5"}, {FILES_MENU_UNDO, LANGUAGE_menu_undo, "Ctrl+Z"}, {FILES_MENU_REDO, LANGUAGE_menu_redo, "Ctrl+Y"},
     {FILES_MENU_PASTE, LANGUAGE_menu_paste, "Ctrl+V"}, {FILES_MENU_NEW_FOLDER, LANGUAGE_menu_new_folder, "Ctrl+Shift+N"},
+    {FILES_MENU_NEW_FILE, LANGUAGE_menu_new_file, null},
     {FILES_MENU_ALL, LANGUAGE_menu_select_all, "Ctrl+A"}, {FILES_MENU_TERMINAL, LANGUAGE_menu_open_terminal, null},
     {FILES_MENU_BIN, LANGUAGE_menu_bin_open, null}, {FILES_MENU_PROPERTIES, LANGUAGE_menu_properties, null},
 };
@@ -2045,6 +2130,8 @@ static fn files_menu_open(b32 on, int x, int y)
                 const struct ui_menu_spec tail[] = {
                     {WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL, !folder}, FILES_SEP,
                     {WORDS(menu_cut), "Ctrl+X", 0, FILES_MENU_CUT, false}, {WORDS(menu_copy), "Ctrl+C", 0, FILES_MENU_COPY, false},
+                    {WORDS(menu_copy_path), "Ctrl+Shift+C", 0, FILES_MENU_COPY_PATH, false},
+                    {WORDS(menu_duplicate), "Ctrl+D", 0, FILES_MENU_DUPLICATE, files_model_is_remote(m)},
                     {WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE, false}, FILES_SEP,
                     {WORDS(menu_rename), "F2", m->chosen_count > 1 ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME, false},
                     {WORDS(menu_bin_restore), null, 0, FILES_MENU_RESTORE, !bin},
@@ -2123,6 +2210,8 @@ static fn files_menu_do(int id)
         case FILES_MENU_TERMINAL: files_open_with(false); break;
         case FILES_MENU_CUT: files_rows_copy(true); break;
         case FILES_MENU_COPY: files_rows_copy(false); break;
+        case FILES_MENU_COPY_PATH: files_copy_path(); break;
+        case FILES_MENU_DUPLICATE: files_duplicate(); break;
         case FILES_MENU_PASTE: files.pasting = true, windows_clip_ask(&files.own, WINDOWS_CLIP_CLIPBOARD); break;
         case FILES_MENU_RENAME: files_edit(FILES_EDIT_NAME); break;
         case FILES_MENU_DELETE: if (files_in_bin()) files_delete(); else files_bin_act(false); break;
@@ -2132,6 +2221,7 @@ static fn files_menu_do(int id)
         case FILES_MENU_BIN: { p8 bin[FILES_PATH]; if (files_bin_root(bin, "/files") && files_bin_folders(bin) && files_model_go(m, (string_address)bin)) files_moved(); } break;
         case FILES_MENU_BIN_EMPTY: files_bin_empty(); break;
         case FILES_MENU_NEW_FOLDER: files_new_folder(); break;
+        case FILES_MENU_NEW_FILE: files_new_file(); break;
         case FILES_MENU_PROPERTIES: files_sheet_open(files.sheet_folder, files.sheet_x, files.sheet_y); break;
         case FILES_MENU_HIDDEN: m->hidden = !m->hidden, files_reload(); break;
         case FILES_MENU_ALL: files_select_all(m); break;
@@ -2887,7 +2977,9 @@ static b32 files_key(const struct window_event address_to event)
 {
         static const struct { p32 req; int key, act; } shortcuts[] = {
             {0, FILES_KEY_F2, FILES_MENU_RENAME}, {WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, FILES_KEY_N, FILES_MENU_NEW_FOLDER},
+            {WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, FILES_KEY_C, FILES_MENU_COPY_PATH},
             {WINDOW_KEY_CONTROL, FILES_KEY_H, FILES_MENU_HIDDEN}, {WINDOW_KEY_CONTROL, FILES_KEY_C, FILES_MENU_COPY},
+            {WINDOW_KEY_CONTROL, FILES_KEY_D, FILES_MENU_DUPLICATE},
             {WINDOW_KEY_CONTROL, FILES_KEY_X, FILES_MENU_CUT}, {WINDOW_KEY_CONTROL, FILES_KEY_V, FILES_MENU_PASTE},
             {WINDOW_KEY_CONTROL, FILES_KEY_1, FILES_MENU_DETAILS}, {WINDOW_KEY_CONTROL, FILES_KEY_1 + 1, FILES_MENU_ICONS},
             {WINDOW_KEY_CONTROL, FILES_KEY_1 + 2, FILES_MENU_LIST}, {WINDOW_KEY_CONTROL, FILES_KEY_A, FILES_MENU_ALL},
@@ -3080,6 +3172,11 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
         files.dirty = true;
         if (down && event->a != UI_POINTER_RIGHT)
                 files.armed = false, files.big->note[0] = 0;
+        if (down && (event->a == 0x113 || event->a == 0x114))
+        {
+                files_menu_do(event->a == 0x113 ? FILES_ACT_BACK : FILES_ACT_FWD);
+                return;
+        }
         if (event->a == UI_POINTER_LEFT && down && files.carrying)
         {
                 files.carry_press = true, files.carry_px = ui_kit.pointer_x, files.carry_py = ui_kit.pointer_y;
@@ -3217,6 +3314,15 @@ static b32 files_bar_event(const struct window_event address_to event)
                 took |= event->type == WINDOW_EVENT_BUTTON &&
                         files_in_rect(x, y, files.transfer_box.x, files.transfer_box.y, files.transfer_box.w, files.transfer_box.h);
                 files.dirty |= hover != c->hover || took;
+        }
+        if (files.finding && files.find_close.w > 0)
+        {
+                struct ui_iconbutton address_to fb = &files.find_close;
+                b32 hover = fb->hover;
+                if (ui_iconbutton_event(&files.ui, fb, event, x, y) & UI_ICONBUTTON_PRESSED)
+                        files_find(false);
+                took |= event->type == WINDOW_EVENT_BUTTON && files_in_rect(x, y, fb->x, fb->y, fb->w, fb->h);
+                files.dirty |= hover != fb->hover || took;
         }
         return took;
 }
@@ -3552,6 +3658,8 @@ static fn files_bar_draw(struct ui address_to ui)
         ui_menubutton_draw(ui, &files.view_button);
         if (files.editing != FILES_EDIT_NAME)
                 ui_tokens_draw(ui, &files.big->path, b->x, b->y, b->x + b->w, b->y + b->h);
+        if (files.finding && files.find_close.w > 0)
+                ui_iconbutton_draw(ui, &files.find_close);
 }
 
 // The tip of the button the pointer is on, over everything else the window draws.
@@ -3561,6 +3669,8 @@ static fn files_bar_tips(struct ui address_to ui)
                 ui_iconbutton_tip(ui, &files.nav[k]);
         if (files.transfer_cancel.w > 0)
                 ui_iconbutton_tip(ui, &files.transfer_cancel);
+        if (files.finding && files.find_close.w > 0)
+                ui_iconbutton_tip(ui, &files.find_close);
 }
 
 static fn files_draw(unsigned int address_to pixels)
