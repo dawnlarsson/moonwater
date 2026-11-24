@@ -3715,6 +3715,27 @@ static void al_test_loopback(void)
 #endif
 }
 
+static void al_test_narrow_mirror(void)
+{
+        struct audio_pcm pcm;
+        long result;
+
+        al_reset();
+        al_card_present[0] = 1;
+        al_model_of_card[0] = 0; // hda: S32LE playback
+        audio_set_card_bits(16);
+        ALCHECK(audio_narrow == 1, "primary 16-bit card sets audio_narrow to 1");
+        result = audio_pcm_open_fill(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1, 3);
+        ALCHECK(result == 0, "mirror playback PCM opens: %ld", result);
+        if (result == 0)
+        {
+                ALCHECK(audio_narrow == 1, "opening a secondary playback PCM does not overwrite audio_narrow (%d)", audio_narrow);
+                audio_pcm_close(&pcm);
+                ALCHECK(audio_narrow == 1, "closing a secondary playback PCM does not clobber audio_narrow (%d)", audio_narrow);
+        }
+        audio_set_card_bits(0);
+}
+
 int main(void)
 {
         al_test_layout();
@@ -3724,6 +3745,7 @@ int main(void)
         al_test_mixer();
         al_test_jacks();
         al_test_loopback();
+        al_test_narrow_mirror();
         printf("CHECK_audio_alsa: %u checks, %u failures\n", al_checks, al_failures);
         return al_failures ? 1 : 0;
 }
@@ -10105,6 +10127,102 @@ static void pt_test_resample_playing_for(void)
                 pulse_sink_mix(&pt_engine, 0, mix, AUDIO_FORMAT_S16LE, 2, 480);
 }
 
+static __attribute__((noinline)) void pt_poison_stack(void)
+{
+        volatile unsigned char poison[512];
+
+        for (size_t i = 0; i < sizeof(poison); i++)
+                poison[i] = 0xfe;
+}
+
+static void pt_test_loopback_move_policy(void)
+{
+        long mic, loop, slot;
+        struct pt_rec_args a = pt_rec_args();
+        struct pt_w w;
+        struct pt_out_info o;
+        unsigned long index;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        mic = pulse_source_add(&pt_engine, "mic", "Mic", 48000);
+        loop = pulse_loopback_add(&pt_engine, "loop", "Session Loopback");
+        slot = pt_connect(1000, 12, 35, "Recorder");
+        a.source_index = (unsigned long)mic;
+        PTCHECK(pt_rec_create(slot, 35, 10, &a) == 0, "non-root creates a record stream on a capture source");
+        index = pt_rec_reply.index;
+
+        w.n = 0;
+        pt_u32(&w, index);
+        pt_u32(&w, (unsigned long)loop);
+        pt_str(&w, 0);
+        pt_command(slot, PULSE_COMMAND_MOVE_SOURCE_OUTPUT, 11, &w);
+        pt_collect(slot);
+        PTCHECK(pt_expect_error(11, PULSE_ERR_ACCESS), "non-root cannot move a record stream onto a loopback source by index");
+        PTCHECK(pt_output_info(slot, 35, 12, index, &o) && o.source == (unsigned long)mic,
+                "record stream stays on its original capture source (%lu != %ld)", o.source, mic);
+
+        w.n = 0;
+        pt_u32(&w, index);
+        pt_u32(&w, PULSE_INVALID);
+        pt_str(&w, "loop");
+        pt_command(slot, PULSE_COMMAND_MOVE_SOURCE_OUTPUT, 13, &w);
+        pt_collect(slot);
+        PTCHECK(pt_expect_error(13, PULSE_ERR_ACCESS), "non-root cannot move a record stream onto a loopback source by name");
+        PTCHECK(pt_output_info(slot, 35, 14, index, &o) && o.source == (unsigned long)mic,
+                "record stream still stays on its original capture source (%lu != %ld)", o.source, mic);
+}
+
+static void pt_test_default_source_policy(void)
+{
+        long mic, loop, slot;
+        struct pt_rec_args a = pt_rec_args();
+        struct pulse_record *rec;
+        unsigned long index;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        mic = pulse_source_add(&pt_engine, "mic", "Mic", 48000);
+        loop = pulse_loopback_add(&pt_engine, "loop", "Session Loopback");
+        pulse_source_default(&pt_engine, mic);
+
+        slot = pt_connect(1000, 13, 35, "Recorder");
+        a.source_index = PULSE_INVALID;
+        a.source_name = 0;
+        PTCHECK(pt_rec_create(slot, 35, 20, &a) == 0, "non-root creates a default-following record stream");
+        index = pt_rec_reply.index;
+        rec = pulse_output_of(&pt_engine, index);
+        PTCHECK(rec && rec->source == mic && !rec->owner_set && !rec->no_move, "record stream starts on default mic and follows default");
+
+        pulse_source_default(&pt_engine, 0); // monitor source (!capture)
+        PTCHECK(rec && rec->source == mic, "pulse_source_default to monitor does not migrate non-root record stream (source=%ld)", rec ? rec->source : -1);
+
+        pulse_source_default(&pt_engine, loop); // loopback source (loop)
+        PTCHECK(rec && rec->source == mic, "pulse_source_default to loopback does not migrate non-root record stream (source=%ld)", rec ? rec->source : -1);
+}
+
+static void pt_test_control_oversized_sample(void)
+{
+        static char long_name[CTL_FRAME + 64];
+        unsigned char pcm[64];
+        long r1, r2;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        PTCHECK(pt_ctl_join(0) >= 0 && ctl_ready(&pt_ctl), "control client joins for oversized sample check");
+        memset(long_name, 'a', sizeof(long_name) - 1);
+        long_name[sizeof(long_name) - 1] = 0;
+        memset(pcm, 0, sizeof(pcm));
+
+        pt_poison_stack();
+        r1 = ctl_upload_sample(&pt_ctl, long_name, AUDIO_FORMAT_S16LE, 2, 48000, pcm, sizeof(pcm));
+        PTCHECK(r1 == CTL_FAILED, "ctl_upload_sample with oversized name returns CTL_FAILED (got %ld)", r1);
+
+        pt_poison_stack();
+        r2 = ctl_play_sample(&pt_ctl, long_name, CTL_NONE);
+        PTCHECK(r2 == CTL_FAILED, "ctl_play_sample with oversized name returns CTL_FAILED (got %ld)", r2);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -10136,6 +10254,8 @@ int main(void)
         pt_test_record_oracle();
         pt_test_record_create();
         pt_test_record_policy();
+        pt_test_loopback_move_policy();
+        pt_test_default_source_policy();
         pt_test_record_data();
         pt_test_record_gain();
         pt_test_record_cork();
@@ -10154,6 +10274,7 @@ int main(void)
         pt_test_session();
         pt_test_fuzz();
         pt_test_control_client();
+        pt_test_control_oversized_sample();
         pt_test_control_input();
         printf("CHECK_audio_pulse: %u checks, %u failures\n", pt_checks, pt_failures);
         return pt_failures ? 1 : 0;

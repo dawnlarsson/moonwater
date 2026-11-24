@@ -1617,7 +1617,8 @@ AUDIO_API int pulse_source_default(struct pulse *p, long slot)
                 return 1;
         p->default_source = slot;
         for (int i = 0; i < p->record_slots; i++)
-                if (p->record[i].used && !p->record[i].owner_set && !p->record[i].no_move)
+                if (p->record[i].used && !p->record[i].owner_set && !p->record[i].no_move &&
+                    (p->record[i].uid == 0 || (p->source[slot].capture && !p->source[slot].loop)))
                         pulse_record_move(p, p->record + i, slot);
         pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
         pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, slot);
@@ -3796,8 +3797,8 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 source = pulse_find_source(p, device, name);
                 if (!rec || !pulse_may(c, rec->uid))
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
-                // A source that is not a capture device, or is not there, is refused a program that is not root alike.
-                if (!c->root && (source < 0 || !p->source[source].capture))
+                // A source that is not a capture device, or is a loopback, or is not there, is refused a program that is not root alike.
+                if (!c->root && (source < 0 || !p->source[source].capture || p->source[source].loop))
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);

@@ -439,6 +439,108 @@ static fn te_lines(void)
         }
 }
 
+// Sorting LF-only line runs in a CRLF document expands each line end from 1 byte to 2 bytes; neither a single run
+// (in-place overlap with its own input block) nor multiple runs (buffer overflow past texts) may corrupt memory.
+static fn te_sort_mixed_eol(void)
+{
+        static const positive single_n = 1000, multi_n = 32000;
+        p8 address_to buf = null, address_to out = null;
+        positive buf_room = 0, out_room = 0, none = 0;
+
+        // Single run: "z\n" followed by 999 empty LF lines in a CRLF document.
+        {
+                struct doc doc;
+                positive len = 2 + 2 + (single_n - 1), want = 2 + 1 + single_n * 2;
+                b32 ok = true;
+
+                array_store_reserve(buf, buf_room, 0, len, 4096);
+                buf[0] = '\r', buf[1] = '\n', buf[2] = 'z', buf[3] = '\n';
+                for (positive i = 0; i < single_n - 1; i++)
+                        buf[4 + i] = '\n';
+                doc_open(&doc, buf, len);
+                te_check(doc.eol == DOC_EOL_CRLF, "sort mixed eol detects crlf", doc.eol);
+                doc_select_set(&doc, 2, len);
+                te_check(doc_command(&doc, DOC_CMD_SORT, null), "sort mixed eol single run succeeds", 0);
+                te_check(doc_length(&doc) == want, "sort mixed eol single run length", (positive)doc_length(&doc));
+                array_store_reserve(out, out_room, 0, want, 4096);
+                if (doc_length(&doc) == want && doc_read(&doc, 0, out, want) == want)
+                {
+                        for (positive i = 0; i < single_n; i++)
+                                ok &= out[i * 2] == '\r' && out[i * 2 + 1] == '\n';
+                        ok &= out[single_n * 2] == 'z' && out[single_n * 2 + 1] == '\r' && out[single_n * 2 + 2] == '\n';
+                }
+                else
+                        ok = false;
+                te_check(ok, "sort mixed eol single run preserves text without overlap corruption", 0);
+                doc_close(&doc);
+        }
+
+        // Single run: 1000 empty LF-only lines in a CRLF document expand to 2000 bytes of "\r\n".
+        {
+                struct doc doc;
+                positive len = 2 + single_n, want = 2 + single_n * 2;
+                b32 ok = true;
+
+                array_store_reserve(buf, buf_room, 0, len, 4096);
+                buf[0] = '\r', buf[1] = '\n';
+                for (positive i = 0; i < single_n; i++)
+                        buf[2 + i] = '\n';
+                doc_open(&doc, buf, len);
+                doc_select_set(&doc, 2, len);
+                te_check(doc_command(&doc, DOC_CMD_SORT, null), "sort mixed eol empty run succeeds", 0);
+                te_check(doc_length(&doc) == want, "sort mixed eol empty run length", (positive)doc_length(&doc));
+                array_store_reserve(out, out_room, 0, want, 4096);
+                if (doc_length(&doc) == want && doc_read(&doc, 0, out, want) == want)
+                {
+                        for (positive i = 0; i < want; i += 2)
+                                ok &= out[i] == '\r' && out[i + 1] == '\n';
+                }
+                else
+                        ok = false;
+                te_check(ok, "sort mixed eol empty run bytes", 0);
+                doc_close(&doc);
+        }
+
+        // Two non-adjacent runs of 32000 LF-only lines separated by "x\n" in a CRLF document.
+        {
+                struct doc doc;
+                positive len = 2 + multi_n + 2 + multi_n, want = 2 + multi_n * 2 + 2 + multi_n * 2;
+                b32 ok = true;
+
+                array_store_reserve(buf, buf_room, 0, len, 4096);
+                buf[0] = '\r', buf[1] = '\n';
+                for (positive i = 0; i < multi_n; i++)
+                        buf[2 + i] = '\n';
+                buf[2 + multi_n] = 'x', buf[2 + multi_n + 1] = '\n';
+                for (positive i = 0; i < multi_n; i++)
+                        buf[4 + multi_n + i] = '\n';
+                doc_open(&doc, buf, len);
+                doc_select_set(&doc, 2, 2 + multi_n);
+                te_check(doc_select_add(&doc, 4 + multi_n, len), "sort mixed eol adds second run", 0);
+                te_check(doc_command(&doc, DOC_CMD_SORT, null), "sort mixed eol multi run succeeds", 0);
+                te_check(doc_length(&doc) == want, "sort mixed eol multi run length", (positive)doc_length(&doc));
+                array_store_reserve(out, out_room, 0, want, 4096);
+                if (doc_length(&doc) == want && doc_read(&doc, 0, out, want) == want)
+                {
+                        positive sep = 2 + multi_n * 2;
+
+                        ok &= out[0] == '\r' && out[1] == '\n';
+                        for (positive i = 2; i < sep; i += 2)
+                                ok &= out[i] == '\r' && out[i + 1] == '\n';
+                        ok &= out[sep] == 'x' && out[sep + 1] == '\n';
+                        for (positive i = sep + 2; i < want; i += 2)
+                                ok &= out[i] == '\r' && out[i + 1] == '\n';
+                }
+                else
+                        ok = false;
+                te_check(ok, "sort mixed eol multi run bytes", 0);
+                doc_close(&doc);
+        }
+
+        array_store_release(buf, buf_room, none);
+        array_store_release(out, out_room, none);
+}
+
 /* ---- an edit at many carets is the edits made one at a time ---- */
 
 static fn te_carets(positive rounds)
@@ -2594,7 +2696,7 @@ b32 main(void)
                 }
                 TE_SECTION("buffer", te_buffer(40, 300))
                 TE_SECTION("history", te_history(30, 120))
-                TE_SECTION("commands", te_lines(); te_commands(40))
+                TE_SECTION("commands", te_lines(); te_sort_mixed_eol(); te_commands(40))
                 TE_SECTION("carets", te_carets(200))
                 TE_SECTION("boundaries", te_boundaries())
                 TE_SECTION("find", te_find(12))

@@ -1335,7 +1335,9 @@ static void canvas_plug_ensure(void)
 
 static void canvas_plug_queue(struct canvas *canvas)
 {
-        queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq, &canvas->plug);
+        struct workqueue_struct *wq = READ_ONCE(canvas_plug_wq);
+
+        queue_work(wq ? wq : system_unbound_wq, &canvas->plug);
 }
 
 static void canvas_plug_work(struct work_struct *work)
@@ -1774,15 +1776,7 @@ static long canvas_turn_off(void)
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
-        mutex_lock(&canvas_list_lock);
         atomic_set(&desktop.reclaim, 0);
-        canvas_thread_stop();
-        mutex_unlock(&canvas_list_lock);
-
-        rt_mutex_lock(&desktop.lock);
-        desktop.suspended = false;
-        WRITE_ONCE(canvas_yielded, false);
-        rt_mutex_unlock(&desktop.lock);
 
         while ((dev = canvas_next_dev(false)))
         {
@@ -1792,6 +1786,16 @@ static long canvas_turn_off(void)
                 else
                         drm_dev_put(dev);
         }
+
+        mutex_lock(&canvas_list_lock);
+        canvas_thread_stop();
+        mutex_unlock(&canvas_list_lock);
+
+        rt_mutex_lock(&desktop.lock);
+        desktop.suspended = false;
+        WRITE_ONCE(canvas_yielded, false);
+        rt_mutex_unlock(&desktop.lock);
+
         WRITE_ONCE(canvas_claimed, 0);
 
         for (unsigned int i = 0; i < count; i++)
@@ -1906,7 +1910,7 @@ static long canvas_modes_set(unsigned int modes)
         list_for_each_entry(canvas, &canvas_list, link)
         {
                 canvas->retarget = true;
-                queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq, &canvas->plug);
+                canvas_plug_queue(canvas);
         }
         mutex_unlock(&canvas_list_lock);
         return 0;
@@ -2268,11 +2272,6 @@ static void canvas_thread_stop(void)
         canvas_keyboard_give();
         synchronize_rcu();
         kthread_stop(thread);
-        if (canvas_plug_wq)
-        {
-                destroy_workqueue(canvas_plug_wq);
-                canvas_plug_wq = null;
-        }
 }
 
 static void canvas_thread_wake(void)
@@ -2604,9 +2603,15 @@ void canvas_boot(void)
 
 void canvas_unload(void)
 {
+        struct workqueue_struct *wq;
+
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
+        (void)canvas_turn_off();
+        wq = xchg(&canvas_plug_wq, null);
+        if (wq)
+                destroy_workqueue(wq);
 }
 #endif // CANVAS_DECLARE_ONLY
 #endif // CANVAS_ABI_ONLY

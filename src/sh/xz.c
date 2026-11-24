@@ -955,6 +955,8 @@ static fn xz_dec_dict_reset(xz_decoder address_to d)
 static bool xz_dec_dict_open(xz_decoder address_to d, positive size)
 {
         return_if(!size || size > XZ_DICT_MAX, xz_dec_fail(d, "xz dictionary"));
+        if (!d->linear && size < 4096)
+                size = 4096;
 
         positive limit = (size + 15) & ~(positive)15;
         positive cap = limit + XZ_DICT_START + XZ_DICT_SLACK;
@@ -999,7 +1001,7 @@ static fn xz_dec_wrap(xz_decoder address_to d)
         positive shift = d->dict_size - XZ_MIRROR;
         positive keep = (positive)(d->job.out - d->dict) - shift;
 
-        memory_copy_apart(d->dict, d->dict + shift, keep);
+        memory_copy(d->dict, d->dict + shift, keep);
         d->job.out -= shift;
         d->emitted = d->hashed = d->job.out;
         d->wrapped = true;
@@ -1604,9 +1606,10 @@ static bool xz_dec_block(xz_decoder address_to d)
                         return_if(header[at], xz_dec_fail(d, "xz block header"));
                 //      A block that says how much it holds never reaches back
                 //      further than that, so a dictionary claimed larger maps
-                //      no more than the block.
+                //      no more than the block, floored at the 4 KiB minimum so
+                //      ring wrapping never overlaps.
                 if ((flags & 0x80) && d->hdr_plain < dict)
-                        dict = d->hdr_plain ? (positive)d->hdr_plain : 1;
+                        dict = d->hdr_plain > 4096 ? (positive)d->hdr_plain : 4096;
                 return_if(!dict || !xz_dec_dict_open(d, dict), xz_dec_fail(d, "xz dictionary"));
                 if (d->nfilt && !d->linear && !d->fbuf)
                 {

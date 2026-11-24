@@ -550,7 +550,7 @@ static long ctl_upload_sample(struct ctl *c, const char *name, long format, long
         struct wire_r r;
         unsigned long channel, sent = 0;
         const unsigned char *p = (const unsigned char *)data;
-        long size;
+        long size = 0;
 
         if (!c->open || !name || !name[0] || !data || !bytes || channels < 1 || channels > CTL_CHANNELS || rate < 1)
                 return CTL_INVALID;
@@ -604,7 +604,7 @@ static long ctl_upload_sample(struct ctl *c, const char *name, long format, long
 static long ctl_play_sample(struct ctl *c, const char *name, unsigned long volume)
 {
         struct wire_w w;
-        long size;
+        long size = 0;
 
         if (!c->open || !name || !name[0])
                 return CTL_INVALID;

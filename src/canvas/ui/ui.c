@@ -4585,27 +4585,39 @@ static positive doc_block_line_len(const p8 address_to block, positive length, p
 static b32 doc_sort_lines(struct doc address_to doc, b32 descending)
 {
         p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
-        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, total = 0, used = 0, edit_count = 0, starts_room = 0, none = 0;
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, eol_length = doc_eol_length(doc);
+        positive total_out = 0, max_in = 0, used = 0, edit_count = 0, starts_room = 0, none = 0;
         struct doc_edit address_to edits = doc_edits_room(count);
         p8 address_to texts;
         p64 address_to starts = null;
         if (!edits || !count)
                 return false;
         for (positive r = 0; r < count; r++)
-                total += doc_line_start(doc, runs[r][1] + 1) - doc_line_start(doc, runs[r][0]) + 4;
-        if (!(texts = doc_bytes_room(total * 2)))
+        {
+                p64 first = runs[r][0], last = runs[r][1], line_count = last - first + 1;
+                positive span = (positive)(doc_line_start(doc, last + 1) - doc_line_start(doc, first));
+                if (line_count < 2)
+                        continue;
+                total_out += span + (positive)line_count * eol_length + 4;
+                if (span + 4 > max_in)
+                        max_in = span + 4;
+        }
+        if (!total_out || !(texts = doc_bytes_room(total_out + max_in)))
                 return false;
         for (positive r = 0; r < count; r++)
         {
                 p64 first = runs[r][0], last = runs[r][1], line_count = last - first + 1, start, finish;
-                p8 address_to block = texts + total + used;
+                p8 address_to block = texts + total_out;
                 b32 had_end;
                 positive length, out = 0, n = 0;
                 if (line_count < 2)
                         continue;
                 length = doc_block(doc, first, last, block, &had_end);
                 if (!array_store_reserve(starts, starts_room, 0, line_count + 1, 64))
+                {
+                        array_store_release(starts, starts_room, none);
                         return false;
+                }
                 for (positive at = 0; at < length && n < line_count; n++)
                 {
                         starts[n] = at;

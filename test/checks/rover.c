@@ -1682,6 +1682,37 @@ static fn rover_check_fuzz(void)
         check("red: random rule files that compile print back to the same table, every one", made > 100 && same == made);
 }
 
+static __attribute__((noinline)) fn rover_poison_stack(void)
+{
+        volatile p8 poison[512];
+
+        for (positive i = 0; i < sizeof(poison); i++)
+                poison[i] = 0x5a;
+}
+
+static fn rover_check_set_call_refusal(void)
+{
+        static p64 bytes_words[ROVER_TABLE_MOST / 8];
+        p8 address_to bytes = (p8 address_to)bytes_words;
+        struct rover_refusal refusal;
+        struct rover_table view;
+
+        if (!rover_compiled("rule a\n\ton dock off\n\tset brightness 50%\n"))
+                return;
+        memory_copy(bytes, rover_built(&rover_one), rover_one.size);
+        if (!rover_check(bytes, rover_one.size, &view, &refusal))
+        {
+                check("a valid set rule checks before mutation", false);
+                return;
+        }
+        ((struct rover_operand address_to)view.argument)[0].source = ROVER_CALL;
+        refusal.why = null;
+        rover_poison_stack();
+        check("a set action with a ROVER_CALL operand is refused with the expected message",
+              !rover_check(bytes, rover_one.size, &view, &refusal) && refusal.why != null &&
+                  string_equals((string_address)refusal.why, (string_address) "a call as an action's argument"));
+}
+
 b32 main(void)
 {
         rover_check_first_of_either();
@@ -1690,6 +1721,7 @@ b32 main(void)
         rover_check_round_trip();
         rover_check_refusals();
         rover_check_tamper();
+        rover_check_set_call_refusal();
         rover_check_evaluator();
         rover_check_kernel_events();
         rover_check_red();

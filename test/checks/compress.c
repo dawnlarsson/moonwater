@@ -697,6 +697,65 @@ static fn long_values(void)
         tar_pax_clear(address_of tar_pax_local);
 }
 
+/*
+        tar -d prefix deduplication cache (tar_diff_prefix_seen) only stores
+        prefixes shorter than TAR_PATH; a lookup with length >= TAR_PATH must
+        skip the cache comparison rather than reading past tar_diff_prefixes[].prefix.
+*/
+static fn diff_prefix_bounds(void)
+{
+        static p8 p1[TAR_PATH];
+        static p8 p_cross[TAR_PATH + 8];
+        static p8 p_long[TAR_PATH + 8];
+
+        tar_diff_prefix_count = 0;
+        memory_fill(tar_diff_prefixes, 0, sizeof(tar_diff_prefixes));
+
+        /* Cache a 4095-byte prefix in slot 0 and "../" in slot 1. */
+        memory_fill(p1, 'a', TAR_PATH - 5);
+        memory_copy(p1 + TAR_PATH - 5, "/../", 4);
+        p1[TAR_PATH - 1] = end;
+        check("a 4095-byte prefix is cached on first sight",
+              !tar_diff_prefix_seen((string_address)p1, TAR_PATH - 1, false));
+        check("the same 4095-byte prefix is recognized on second sight",
+              tar_diff_prefix_seen((string_address)p1, TAR_PATH - 1, false));
+        check("a second distinct prefix is cached in slot 1",
+              !tar_diff_prefix_seen((string_address)"../", 3, false));
+
+        /* A 4100-byte lookup whose bytes past TAR_PATH-1 match slot 0's NUL,
+           slot 0's said byte (0), and slot 1's "../" must NOT match slot 0
+           via an out-of-bounds read across adjacent cache slots. */
+        memory_copy(p_cross, p1, TAR_PATH - 1);
+        p_cross[TAR_PATH - 1] = 0;
+        p_cross[TAR_PATH] = 0;
+        memory_copy(p_cross + TAR_PATH + 1, "../", 3);
+        p_cross[TAR_PATH + 4] = end;
+        check("an oversized prefix never matches across adjacent cache slots",
+              !tar_diff_prefix_seen((string_address)p_cross, TAR_PATH + 4, false));
+
+        /* Fill remaining slots through slot 7 with a 4095-byte prefix in the
+           final slot, then look up a 4099-byte PAX/GNU-style prefix (no NULs). */
+        tar_diff_prefix_count = 0;
+        memory_fill(tar_diff_prefixes, 0, sizeof(tar_diff_prefixes));
+        for (positive slot = 0; slot < 7; slot++)
+        {
+                p8 tag[8] = {'d', (p8)('0' + slot), '/', '.', '.', '/', 0, 0};
+
+                check("prefix cache fills early slots",
+                      !tar_diff_prefix_seen((string_address)tag, 6, false));
+        }
+        check("prefix cache fills final slot with 4095-byte prefix",
+              !tar_diff_prefix_seen((string_address)p1, TAR_PATH - 1, false));
+        memory_copy(p_long, p1, TAR_PATH - 1);
+        memory_copy(p_long + TAR_PATH - 1, "/../", 4);
+        p_long[TAR_PATH + 3] = end;
+        check("an oversized 4099-byte prefix bypasses the cache without OOB read",
+              !tar_diff_prefix_seen((string_address)p_long, TAR_PATH + 3, false));
+
+        tar_diff_prefix_count = 0;
+        memory_fill(tar_diff_prefixes, 0, sizeof(tar_diff_prefixes));
+}
+
 b32 main(void)
 {
         checksums();
@@ -708,6 +767,7 @@ b32 main(void)
         name_spelling();
         digit_words();
         long_values();
+        diff_prefix_bounds();
         return test_report(null);
 }
 #endif /* CHECK_tar */
@@ -3563,6 +3623,101 @@ static fn salvaged(void)
         system_call_1(syscall(close), handle);
 }
 
+/* A block header whose uncompressed size is tiny (e.g. 1 byte) must not clamp
+   the ring dictionary below XZ_MIRROR + XZ_MATCH_MAX; otherwise a crafted
+   LZMA2 payload that emits a max-length match near top causes xz_dec_wrap to
+   call memory_copy_apart with overlapping source and destination regions. */
+static fn clamped_dict_wrap(void)
+{
+        static p8 plain[1024];
+        static p8 encoded[2048];
+        static p8 crafted[2048];
+        static p8 out[2048];
+        bipolar n;
+        bipolar handle;
+
+        memory_fill(plain, 'A', sizeof(plain));
+        n = xz_deflate_mem(plain, sizeof(plain), encoded, sizeof(encoded), 6);
+        check("clamped-dict fixture encodes", n > 64);
+        if (n <= 64)
+                return;
+
+        p8 check_type = encoded[7] & 15;
+        positive check_bytes = xz_check_size(check_type);
+        positive backward = ((positive)memory_load_unaligned(p32, encoded + n - 8) + 1) * 4;
+        positive index_at = (positive)n - 12 - backward;
+        positive orig_hdr = ((positive)encoded[12] + 1) * 4;
+        positive lzma2_at = 12 + orig_hdr;
+        positive lzma2_len = index_at - check_bytes - lzma2_at;
+
+        positive at = 0;
+        static const p8 stream_hdr[8] = {0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x00};
+        p32 crc = ~hash_crc32(0xffffffffu, stream_hdr + 6, 2);
+
+        memory_copy_apart(crafted + at, stream_hdr, 8);
+        at += 8;
+        memory_copy_apart(crafted + at, address_of crc, 4);
+        at += 4;
+
+        p8 bhdr[12];
+        memory_fill(bhdr, 0, sizeof(bhdr));
+        bhdr[0] = 2;    /* (2 + 1) * 4 = 12 bytes */
+        bhdr[1] = 0x80; /* 1 filter, uncompressed size present */
+        bhdr[2] = 0x01; /* uncompressed size = 1 */
+        bhdr[3] = 0x21; /* LZMA2 filter ID */
+        bhdr[4] = 0x01; /* props size = 1 */
+        bhdr[5] = 0x00; /* dict prop = 0 (4 KiB) */
+        crc = ~hash_crc32(0xffffffffu, bhdr, 8);
+        memory_copy_apart(bhdr + 8, address_of crc, 4);
+        memory_copy_apart(crafted + at, bhdr, sizeof(bhdr));
+        at += sizeof(bhdr);
+
+        memory_copy_apart(crafted + at, encoded + lzma2_at, lzma2_len);
+        at += lzma2_len;
+        while (at & 3)
+                crafted[at++] = 0;
+
+        handle = system_call_2(syscall(memfd_create), (positive)"xz-clamp", 0);
+        check("clamped-dict memfd opens", handle >= 0);
+        if (handle < 0)
+                return;
+        check("clamped-dict memfd writes",
+              system_write_all(handle, crafted, at) == (bipolar)at &&
+              system_seek(handle, 0, FILE_SEEK_SET) == 0);
+
+        address_any raw = xz_pull_open(handle, null, 0);
+        xz_decoder address_to d = (xz_decoder address_to)raw;
+
+        check("clamped-dict pull opens", d != null);
+        if (d)
+        {
+                positive got = 0;
+                bipolar last = 0;
+                p8 shift_safe = true;
+
+                for (;;)
+                {
+                        positive want = sizeof(out) - got;
+
+                        if (!want)
+                                break;
+                        last = xz_pull_read(raw, out + got, want);
+                        if (d->dict_size &&
+                            d->dict_size - XZ_MIRROR < XZ_MIRROR + XZ_MATCH_MAX)
+                                shift_safe = false;
+                        if (last <= 0)
+                                break;
+                        got += (positive)last;
+                }
+                check("ring dictionary shift never allows overlapping wrap copy",
+                      shift_safe && d->dict_size >= 4096 + XZ_DICT_START);
+                check("clamped-dict stream is rejected on block size mismatch",
+                      last < 0 && xz_pull_error(raw) != null);
+                xz_pull_close(raw);
+        }
+        system_call_1(syscall(close), handle);
+}
+
 b32 main(void)
 {
         members();
@@ -3575,6 +3730,7 @@ b32 main(void)
         sha256_checks();
         filters_split();
         salvaged();
+        clamped_dict_wrap();
         return test_report(null);
 }
 #endif /* CHECK_xz */

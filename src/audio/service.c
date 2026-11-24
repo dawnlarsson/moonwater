@@ -589,6 +589,7 @@ static int audio_output_open(long asked_rate, int low)
                 if (result == 0)
                 {
                         audio_service.pcm = pcm;
+                        audio_set_card_bits(pcm.format == AUDIO_FORMAT_S16LE ? 16 : 32);
                         audio_service.why = audio_service.pick_why;
                         audio_service.rate = pcm.rate;
                         audio_board_clear(AUDIO_ISSUE_OPEN);
@@ -716,6 +717,7 @@ static void audio_rate_choose(long stream, int low)
         if (open)
         {
                 audio_pcm_close(&audio_service.pcm);
+                audio_set_card_bits(0);
                 audio_service.pcm.fd = -1;
         }
         audio_output_open(target, low);
@@ -763,6 +765,7 @@ static void audio_game_pass(positive now)
         if (audio_service.pcm.fd >= 0)
         {
                 audio_pcm_close(&audio_service.pcm);
+                audio_set_card_bits(0);
                 audio_service.pcm.fd = -1;
         }
         audio_service.asked = audio_service.rate, audio_service.asked_low = want;
@@ -1542,6 +1545,7 @@ static void audio_devices_pass(void)
         if (audio_service.pcm.fd >= 0)
         {
                 audio_pcm_close(&audio_service.pcm);
+                audio_set_card_bits(0);
                 audio_service.pcm.fd = -1;
         }
         audio_output_open(audio_service.asked, audio_service.asked_low);
@@ -1879,6 +1883,7 @@ static void audio_card_pass(void)
                 {
                         audio_say("the card is gone, error", error);
                         audio_pcm_close(pcm);
+                        audio_set_card_bits(0);
                         pcm->fd = -1;
                         audio_timer_set(audio_service.rate);
                         audio_service.rescan_at = clock_monotonic_nanoseconds() + AUDIO_RESCAN_NS;
@@ -3167,6 +3172,7 @@ static void audio_power_apply(int action)
                 if (audio_service.pcm.fd >= 0)
                 {
                         audio_pcm_close(&audio_service.pcm);
+                        audio_set_card_bits(0);
                         audio_service.pcm.fd = -1;
                 }
                 audio_timer_stop();
@@ -3531,6 +3537,7 @@ static b32 audio_main()
                 audio_call(syscall(munmap), (positive)audio_service.page, AUDIO_STATE_BYTES, 0, 0, 0, 0);
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0, 0, 0, 0);
         audio_pcm_close(&audio_service.pcm);
+        audio_set_card_bits(0);
         for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
                 if (audio_service.mirror[k].open)
                         audio_pcm_close(&audio_service.mirror[k].pcm);

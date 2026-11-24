@@ -1028,6 +1028,37 @@ static bool tar_member_link(p8 address_to block, tar_text address_to into,
         return true;
 }
 
+typedef struct
+{
+        p8 prefix[TAR_PATH];
+        bool said;
+} tar_prefix_said;
+
+static tar_prefix_said tar_diff_prefixes[8];
+static positive tar_diff_prefix_count;
+
+static bool tar_diff_prefix_seen(string_address prefix, positive length,
+                                 bool link)
+{
+        if (length >= TAR_PATH)
+                return false;
+        for (positive at = 0; at < tar_diff_prefix_count; at++)
+                if (tar_diff_prefixes[at].said == link &&
+                    !memory_compare(tar_diff_prefixes[at].prefix, prefix, length) &&
+                    !tar_diff_prefixes[at].prefix[length])
+                        return true;
+        if (tar_diff_prefix_count < array_count(tar_diff_prefixes))
+        {
+                tar_prefix_said address_to kept =
+                    tar_diff_prefixes + tar_diff_prefix_count++;
+
+                memory_copy(kept->prefix, prefix, length);
+                kept->prefix[length] = end;
+                kept->said = link;
+        }
+        return false;
+}
+
 #ifndef TAR_PARSE_ONLY
 
 #define TAR_CREATE 'c'
@@ -4581,33 +4612,11 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
 */
 #define TAR_DIFF 'd'
 
-typedef struct
-{
-        p8 prefix[TAR_PATH];
-        bool said;
-} tar_prefix_said;
-
-static tar_prefix_said tar_diff_prefixes[8];
-static positive tar_diff_prefix_count;
-
 static fn tar_diff_prefix_once(string_address prefix, positive length,
                                bool link)
 {
-        for (positive at = 0; at < tar_diff_prefix_count; at++)
-                if (tar_diff_prefixes[at].said == link &&
-                    !memory_compare(tar_diff_prefixes[at].prefix, prefix, length) &&
-                    !tar_diff_prefixes[at].prefix[length])
-                        return;
-        if (tar_diff_prefix_count < array_count(tar_diff_prefixes) &&
-            length < TAR_PATH)
-        {
-                tar_prefix_said address_to kept =
-                    tar_diff_prefixes + tar_diff_prefix_count++;
-
-                memory_copy(kept->prefix, prefix, length);
-                kept->prefix[length] = end;
-                kept->said = link;
-        }
+        if (tar_diff_prefix_seen(prefix, length, link))
+                return;
         p8 shown[TAR_PATH];
         positive take = length < TAR_PATH ? length : TAR_PATH - 1;
 

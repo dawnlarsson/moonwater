@@ -193,7 +193,7 @@ static struct
         unsigned int generation, cursor, held, lost;
         long sum_x, sum_y;            // the relative motion read and not yet asked for (SDL_GetRelativeMouseState)
         int fine_x, fine_y;           // high-resolution wheel turns not yet a whole notch (120ths)
-        int log_fd, log_looked;
+        int log_fd, log_looked, log_busy;
         unsigned int logged;
 } mwi = {.fd = -1, .log_fd = -1};
 
@@ -310,11 +310,24 @@ static unsigned int mwi_decimal(char *into, unsigned long long value, int negati
         return at;
 }
 
-static void mwi_log_flush(void)
+static void mwi_log_lock(void)
+{
+        while (__atomic_exchange_n(&mwi.log_busy, 1, __ATOMIC_ACQUIRE))
+                ;
+}
+
+static void mwi_log_unlock(void)
+{
+        __atomic_store_n(&mwi.log_busy, 0, __ATOMIC_RELEASE);
+}
+
+static void mwi_log_flush_locked(void)
 {
         char text[4096];
         unsigned int length = 0;
 
+        if (mwi.log_fd < 0)
+                return;
         for (unsigned int at = 0; at < mwi.logged && at < MWI_LOG_RECORDS; at++)
         {
                 const struct mwi_record *r = &mwi_log[at];
@@ -334,15 +347,27 @@ static void mwi_log_flush(void)
         mwi.logged = 0;
 }
 
+static void mwi_log_flush(void)
+{
+        mwi_log_lock();
+        mwi_log_flush_locked();
+        mwi_log_unlock();
+}
+
 static void mwi_note(unsigned int what, unsigned long long ns, unsigned long long us, int a, int b, unsigned short kind, unsigned short code)
 {
+        mwi_log_lock();
         if (!mwi.log_looked)
                 mwi_log_open();
         if (mwi.log_fd < 0)
+        {
+                mwi_log_unlock();
                 return;
-        if (mwi.logged == MWI_LOG_RECORDS)
-                mwi_log_flush();
+        }
+        if (mwi.logged >= MWI_LOG_RECORDS)
+                mwi_log_flush_locked();
         mwi_log[mwi.logged++] = (struct mwi_record){ns, us, a, b, kind, code, what};
+        mwi_log_unlock();
 }
 
 /* ---- SDL's own functions, through the places this library took ---- */
@@ -391,9 +416,12 @@ static void mwi_push(union mwi_sdl_event *event)
 static void mwi_button(unsigned char button, int pressed, unsigned int window, int x, int y)
 {
         union mwi_sdl_event event;
-        unsigned int bit = 1u << (button - 1);
+        unsigned int bit;
 
-        if (!button || (pressed ? (mwi.held & bit) : !(mwi.held & bit)))
+        if (!button || button > 32)
+                return;
+        bit = 1u << (button - 1);
+        if (pressed ? (mwi.held & bit) : !(mwi.held & bit))
                 return;
         mwi.held = pressed ? mwi.held | bit : mwi.held & ~bit;
         event = (union mwi_sdl_event){.button = {pressed ? MWI_SDL_MOUSEBUTTONDOWN : MWI_SDL_MOUSEBUTTONUP, 0, window, 0, button,
@@ -657,8 +685,7 @@ static void mwi_swap(void *window)
 static void mwi_quit(void)
 {
         mwi_claim(0);
-        if (mwi.log_fd >= 0)
-                mwi_log_flush();
+        mwi_log_flush();
         MWI_REAL(mwi_quit_fn, MWI_AT_QUIT)();
 }
 

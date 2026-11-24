@@ -1607,7 +1607,7 @@ static const char address_to rover_action_check(const struct rover_table address
 {
         const struct rover_primitive_row address_to primitive = null;
         const struct rover_operand address_to argument;
-        const char address_to why;
+        const char address_to why = null;
 
         if (action->pad || action->runs >= ROVER_PLACES || action->count > ROVER_ARGUMENTS ||
             (positive)action->argument + action->count > table->head->arguments)
@@ -1658,8 +1658,10 @@ static const char address_to rover_action_check(const struct rover_table address
 
                 if (!row || action->count != 1 || action->runs != ROVER_RUNNER)
                         return "a set of a switch the schema does not have";
-                if (argument[0].source == ROVER_CALL || (why = rover_operand_check(table, argument[0], want, kernel, false)))
-                        return why ? why : "a call as an action's argument";
+                if (argument[0].source == ROVER_CALL)
+                        return "a call as an action's argument";
+                if ((why = rover_operand_check(table, argument[0], want, kernel, false)))
+                        return why;
                 if (!rover_constant_ok(table, argument[0], row->type))
                         return "an argument outside its type's range";
                 //      A switch with a deliberate value takes a constant, and never that one.

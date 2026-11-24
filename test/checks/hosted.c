@@ -1227,3 +1227,64 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_firewall_probe */
 
+#ifdef CHECK_shim_security
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+
+#define MWI_CHECK
+#include "../../src/shim/input.c"
+
+static pthread_barrier_t shim_sec_barrier;
+
+static void *shim_sec_note_worker(void *arg)
+{
+        unsigned int id = *(unsigned int *)arg;
+
+        pthread_barrier_wait(&shim_sec_barrier);
+        for (unsigned int i = 0; i < 200000; i++)
+                mwi_note(id ? 'W' : 'S', (unsigned long long)i, 0, (int)id, (int)i, 0, 0);
+        return NULL;
+}
+
+int main(void)
+{
+        unsigned int checks = 0, failures = 0;
+        pthread_t t0, t1;
+        unsigned int id0 = 0, id1 = 1;
+
+        /* SHIM-2: mwi_button(0, ...) must not evaluate 1u << (0 - 1) */
+        mwi.held = 0;
+        mwi_button(0, 1, 0, 0, 0);
+        mwi_button(0, 0, 0, 0, 0);
+        checks++;
+        if (mwi.held != 0)
+        {
+                fprintf(stderr, "FAIL: mwi_button(0, ...) modified mwi.held (%u)\n", mwi.held);
+                failures++;
+        }
+
+        /* SHIM-1: concurrent mwi_note() from event and render threads must not race or overflow mwi_log[] */
+        mwi.log_looked = 1;
+        mwi.log_fd = 0;
+        mwi.logged = 0;
+        pthread_barrier_init(&shim_sec_barrier, NULL, 2);
+        pthread_create(&t0, NULL, shim_sec_note_worker, &id0);
+        pthread_create(&t1, NULL, shim_sec_note_worker, &id1);
+        pthread_join(t0, NULL);
+        pthread_join(t1, NULL);
+        pthread_barrier_destroy(&shim_sec_barrier);
+        checks++;
+        if (mwi.logged > MWI_LOG_RECORDS)
+        {
+                fprintf(stderr, "FAIL: mwi.logged overflowed MWI_LOG_RECORDS (%u > %u)\n", mwi.logged, MWI_LOG_RECORDS);
+                failures++;
+        }
+        mwi_log_flush();
+
+        printf("CHECK_shim_security: %u checks, %u failures\n", checks, failures);
+        return failures ? 1 : 0;
+}
+#endif /* CHECK_shim_security */
+
+

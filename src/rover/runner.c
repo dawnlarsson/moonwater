@@ -147,7 +147,7 @@ static bool rover_runner_adopt_bytes(const p8 address_to bytes, positive size, p
         static p8 names[ROVER_SERVICES_MOST][ROVER_WORD_MOST + 1];
         static bool kept[ROVER_SERVICES_MOST];
         positive had = rover_runner.view.head ? rover_runner.view.head->services : 0;
-        struct rover_refusal refusal;
+        struct rover_refusal refusal = {.why = "a table larger than 64 KiB"};
         struct rover_table view;
 
         if (size > sizeof(rover_runner.table_words) || !rover_check(bytes, size, &view, &refusal))

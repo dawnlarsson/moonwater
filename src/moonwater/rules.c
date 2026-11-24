@@ -1537,7 +1537,7 @@ static void rules_free_rcu(struct rcu_head *head)
         rule, and the one before it stays. Loading is every state changing
         at once, so the when rules that already hold fire now.
 */
-static long rules_load(struct rover_control *request)
+static long rules_load(struct file *file, struct rover_control *request)
 {
         struct rules_live *live, *before;
         struct rover_refusal why;
@@ -1568,6 +1568,20 @@ static long rules_load(struct rover_control *request)
                 request->rule = why.rule;
                 rules_free(live);
                 return -EINVAL;
+        }
+        for (positive at = 0; at < live->view.head->actions; at++)
+        {
+                const struct rover_action *action = live->view.action + at;
+
+                if (action->kind == ROVER_DO && action->runs == ROVER_KERNEL &&
+                    (action->id == rules_prim[RP_POWEROFF] ||
+                     action->id == rules_prim[RP_REBOOT] ||
+                     action->id == rules_prim[RP_SUSPEND]) &&
+                    !spark_file_capable(file, CAP_SYS_BOOT))
+                {
+                        rules_free(live);
+                        return -EPERM;
+                }
         }
         //      Never a table partly inert: whatever can fire on one event fits what one event is answered.
         {
@@ -1740,7 +1754,7 @@ static long report_rover(struct file *file, struct rover_control __user *out)
         switch (request.op)
         {
         case ROVER_OP_LOAD:
-                ret = rules_load(&request);
+                ret = rules_load(file, &request);
                 break;
         case ROVER_OP_UNLOAD:
                 ret = rules_unload();
