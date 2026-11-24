@@ -39,7 +39,14 @@ static int compositor_glass_reach(int logical)
 
         The work below the top level is a sixty-fourth of the area; what is
         done at full size is a compose of the scene, a halving and the rise,
-        each a pass of the library's vector bodies.
+        each a pass of the library's vector bodies -- or the card's, where
+        its set has the kernels (gpu.c's gpu_halve and gpu_rise, whose
+        pixels are the library's): the card draws the scene under the glass
+        (compositor_gpu_frost_scene), halves it to the small picture
+        (compositor_gpu_frost_small) and raises the tinted one to the ground
+        with the grain (compositor_gpu_glass_rise), and the processor has the
+        small picture alone, the blocks the screen's edge cuts, and a change
+        too small to be worth a job (COMPOSITOR_GLASS_CARD_LEAST).
 */
 
 static int compositor_floor_shift(int x, int shift)
@@ -106,6 +113,9 @@ static const unsigned int *compositor_grain_row(unsigned int light, int x, int y
 #ifdef MOONWATER_GPU_C
 static const unsigned int *compositor_gpu_frost_scene(const struct compositor_frame *frames, unsigned int count,
                                                       int x0, int y0, int x1, int y1, unsigned long *pitch);
+static const unsigned int *compositor_gpu_frost_small(unsigned long fpitch, int bx0, int by0, int bw, int bh, unsigned long *pitch);
+static int compositor_gpu_glass_rise(int row, const int *c);
+static int compositor_gpu_glass_passes(void);
 #else
 static const unsigned int *compositor_gpu_frost_scene(const struct compositor_frame *frames, unsigned int count,
                                                       int x0, int y0, int x1, int y1, unsigned long *pitch)
@@ -113,7 +123,24 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
         (void)frames, (void)count, (void)x0, (void)y0, (void)x1, (void)y1, (void)pitch;
         return null;
 }
+static const unsigned int *compositor_gpu_frost_small(unsigned long fpitch, int bx0, int by0, int bw, int bh, unsigned long *pitch)
+{
+        (void)fpitch, (void)bx0, (void)by0, (void)bw, (void)bh, (void)pitch;
+        return null;
+}
+static int compositor_gpu_glass_rise(int row, const int *c)
+{
+        (void)row, (void)c;
+        return 0;
+}
+static int compositor_gpu_glass_passes(void)
+{
+        return 0;
+}
 #endif
+// The least area, in pixels, the card is asked to make of a glass window's backdrop: a job's submit costs the processor what it takes to make
+// about this much itself, so less is the processor's (a caret blinking under glass is a few blocks).
+#define COMPOSITOR_GLASS_CARD_LEAST 32768
 
 static positive compositor_glass_bg_at[WINDOWS];
 static positive compositor_glass_bg_next;
@@ -167,6 +194,41 @@ static int compositor_frost_has_gpu(const struct compositor_frame *frames, unsig
         return gpu_any;
 }
 
+// The blocks bx0 to bx1 of the output's block row by, as the small picture has them, from the scene the card drew (pic, a picture of the output
+// at pitch pixels a row): each block's 64 pixels halved three times, a pixel past the output's edge the last one on it. The processor's part of
+// a small picture the card halves: the blocks the screen's edge cuts or leaves out.
+static void compositor_frost_blocks(const unsigned int *pic, unsigned long pitch, int bx0, int bx1, int by, unsigned int *out)
+{
+        enum { MOST = 32 };
+        unsigned int strip[COMPOSITOR_GLASS_BLOCK * COMPOSITOR_GLASS_BLOCK * MOST];
+        int block = COMPOSITOR_GLASS_BLOCK;
+
+        for (int at = bx0; at < bx1; at += MOST)
+        {
+                int n = bx1 - at < MOST ? bx1 - at : MOST, ax = at * block, aw = n * block;
+                int in0 = ax < 0 ? 0 : ax > compositor.width - 1 ? compositor.width - 1 : ax, in1 = ax + aw > compositor.width ? compositor.width : ax + aw;
+
+                if (in1 <= in0)
+                        in1 = in0 + 1; // (all of it past an edge: the edge's column)
+                for (int r = 0; r < block; r++)
+                {
+                        int y = by * block + r;
+                        const unsigned int *from = pic + (unsigned long)(y < 0 ? 0 : y > compositor.height - 1 ? compositor.height - 1 : y) * pitch;
+                        unsigned int *line = strip + (long)r * aw;
+
+                        if (in0 > ax)
+                                memory_fill_u32(line, (positive)(in0 - ax < aw ? in0 - ax : aw), from[in0]);
+                        if (in0 < ax + aw && in1 > ax)
+                                memory_copy(line + (in0 - ax), from + in0, (positive)(in1 - in0) * 4);
+                        if (in1 < ax + aw)
+                                memory_fill_u32(line + (in1 > ax ? in1 - ax : 0), (positive)(ax + aw - (in1 > ax ? in1 : ax)), from[in1 - 1]);
+                }
+                for (int level = 1; level <= COMPOSITOR_GLASS_LEVELS; level++)
+                        memory_halve_u32(strip, (positive)aw, strip, (positive)aw, (positive)(aw >> level), (positive)(block >> level));
+                memory_copy(out + (at - bx0), strip, (positive)n * 4);
+        }
+}
+
 static int compositor_frost(const struct compositor_frame *frames, unsigned int count, int sx, int sy, int sw, int sh,
                             unsigned int *into, unsigned long pitch)
 {
@@ -177,7 +239,7 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         int cy0 = ay < 0 ? 0 : ay, cy1 = ay + ah > compositor.height ? compositor.height : ay + ah;
         const unsigned int *gpu_pic = null;
         unsigned long gpu_pitch = 0;
-        int has_tiled = 0, has_gpu;
+        int has_tiled = 0, has_gpu, carded = 0;
         unsigned int *strip, *small;
         unsigned long bytes;
 
@@ -193,7 +255,14 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         if (cy1 <= cy0)
                 cy0 = ay + ah <= 0 ? 0 : compositor.height - 1, cy1 = cy0 + 1;
         has_gpu = compositor_frost_has_gpu(frames, count, cx0, cy0, cx1, cy1, &has_tiled);
-        if (has_gpu)
+        // The scene under the glass is the card's to draw when a client's picture in it is the card's alone to read cheaply, as it was, and when
+        // the card halves it too (compositor_gpu_glass_passes) and there is enough of it to be worth the jobs: no pixel of it is then the processor's.
+        if (!has_gpu && compositor_gpu_glass_passes() && (long)(cx1 - cx0) * (cy1 - cy0) >= COMPOSITOR_GLASS_CARD_LEAST)
+        {
+                compositor_wl_tiled_settle();
+                gpu_pic = compositor_gpu_frost_scene(frames, count, cx0, cy0, cx1, cy1, &gpu_pitch);
+        }
+        else if (has_gpu)
         {
                 gpu_pic = compositor_gpu_frost_scene(frames, count, cx0, cy0, cx1, cy1, &gpu_pitch);
                 if (!gpu_pic)
@@ -206,6 +275,35 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         }
         else
                 compositor_wl_tiled_settle();
+        // The card's small picture of its scene: the blocks wholly on the screen are its halve's, the ones the screen's edge cuts or leaves out the
+        // processor's, from the card's scene with the output's last row and column again past its edges, as below.
+        if (gpu_pic)
+        {
+                int bx = sx - spread, by = sy - spread; // the small picture's first block
+                int ix0 = bx > 0 ? bx : 0, iy0 = by > 0 ? by : 0, ix1 = bx + tw < compositor.width / block ? bx + tw : compositor.width / block;
+                int iy1 = by + th < compositor.height / block ? by + th : compositor.height / block;
+                unsigned long card_pitch = 0;
+                const unsigned int *card = ix1 > ix0 && iy1 > iy0 ? compositor_gpu_frost_small(gpu_pitch, ix0, iy0, ix1 - ix0, iy1 - iy0, &card_pitch) : null;
+
+                if (card)
+                {
+                        for (int row = 0; row < th; row++)
+                        {
+                                unsigned int *line = small + (long)row * tw;
+
+                                if (by + row < iy0 || by + row >= iy1)
+                                {
+                                        compositor_frost_blocks(gpu_pic, gpu_pitch, bx, bx + tw, by + row, line);
+                                        continue;
+                                }
+                                compositor_frost_blocks(gpu_pic, gpu_pitch, bx, ix0, by + row, line);
+                                memory_copy(line + (ix0 - bx), card + (unsigned long)(by + row - iy0) * card_pitch, (positive)(ix1 - ix0) * 4);
+                                compositor_frost_blocks(gpu_pic, gpu_pitch, ix1, bx + tw, by + row, line + (ix1 - bx));
+                        }
+                        carded = 1;
+                }
+        }
+        if (!carded)
         {
                 int ox = cx0 < ax || cx0 >= ax + aw ? cx0 : ax;
                 int xfirst = ox == ax ? cx0 - ax : 0, xlast = ox == ax ? cx1 - ax : 1;
@@ -805,6 +903,9 @@ static int compositor_glass_ground_make(int row, const int *c)
 
         if (!into || width <= 0 || c[3] <= c[1])
                 return into != null;
+        // (the card raises it where there is enough to be worth its job: the blocks that hold the rectangle, the same pixels)
+        if ((long)width * (c[3] - c[1]) >= COMPOSITOR_GLASS_CARD_LEAST && compositor_gpu_glass_rise(row, c))
+                return 1;
         for (int y0 = c[1]; y0 < c[3]; y0 += COMPOSITOR_GLASS_BAND)
         {
                 int y1 = y0 + COMPOSITOR_GLASS_BAND < c[3] ? y0 + COMPOSITOR_GLASS_BAND : c[3];
@@ -923,10 +1024,15 @@ static int compositor_glass_room(int row)
         blocks[2] = compositor_ceil_shift(x + w, shift) + margin - blocks[0];
         blocks[3] = compositor_ceil_shift(y + h, shift) + margin - blocks[1];
         cells = (unsigned long)blocks[2] * (unsigned long)blocks[3];
-        // (the composed picture and, after it, the ground it is made over: compositor_glass_ground)
-        need = ((cells * 3 + 2 * pixels) * 4 + 4095) & ~4095ul;
-        most = (((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 3 +
-                 2 * (((unsigned long)compositor.width + 15) & ~15ul) * (unsigned long)compositor.height) * 4 + 4095) & ~4095ul;
+        // (the three small pictures, the composed picture and, from the next 64 KiB on, the ground it is made over: compositor_glass_ground_base)
+        need = (((cells * 3 + pixels) * 4 + 65535) & ~65535ul) + 65536 + compositor_glass_pitch(row) * ((unsigned long)h + COMPOSITOR_GLASS_PAD + 2) * 4;
+        {
+                unsigned long wide = ((unsigned long)compositor.width + COMPOSITOR_GLASS_PAD + 15) & ~15ul;
+
+                most = ((((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 3 +
+                          wide * (unsigned long)compositor.height) * 4 + 65535) & ~65535ul) + 65536 + wide * ((unsigned long)compositor.height + COMPOSITOR_GLASS_PAD + 2) * 4;
+        }
+        need = (need + 4095) & ~4095ul, most = (most + 4095) & ~4095ul;
         need = need > most ? need : most;
         if (need > compositor.glass_cut[row])
         {

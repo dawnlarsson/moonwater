@@ -1298,6 +1298,119 @@ b32 main(void)
                         log_flush();
                 }
         }
+        // 9. The glass's two passes at full size, on the card: the halve (op 10, the scene under a glass window made its small picture) against
+        // memory_halve_u32 three times, and the rise (op 11, the window's ground from its small tinted picture) against memory_double_u32 three times
+        // and the grain of memory_glass_over_u32, dark and light, whose pixels they must be; the pixels round what they write compared too. A set
+        // without the two says so (the compositor then makes both on the processor).
+        if (!gpu_has(GPU_OP_HALVE) || !gpu_has(GPU_OP_RISE))
+                string_format(log, "  gpu halve and rise: NOT RUN -- this card's set has no kernels for them\n");
+        else
+        {
+                static const unsigned int cases[][2] = {{240, 135}, {7, 5}, {255, 150}, {33, 17}, {1, 1}, {210, 131}, {130, 119}};
+                static const unsigned int none[1024];
+                static unsigned int grains[2][4][128];
+                static const unsigned char order[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+                unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at);
+                unsigned int address_to small = (unsigned int address_to)((p8 address_to)gpu.at + gs_bins_at);
+                unsigned int address_to two = (unsigned int address_to)memory(picture), address_to one = (unsigned int address_to)memory(picture);
+                unsigned int address_to full = (unsigned int address_to)memory(picture);
+
+                for (int side = 0; side < 2; side++)
+                        for (int row = 0; row < 4; row++)
+                                for (int at = 0; at < 64; at++)
+                                {
+                                        unsigned int level = (unsigned int)order[row][at & 3] >> 2;
+
+                                        grains[side][row][at] = side ? 0 : level * 0x010101u, grains[side][row][64 + at] = side ? level * 0x010101u : 0;
+                                }
+                for (unsigned int i = 0; two && one && full && i < sizeof cases / sizeof cases[0]; i++)
+                {
+                        unsigned int w = cases[i][0], h = cases[i][1], cols = (w + 7) / 8;
+                        positive bad = 0, card = ~0ull, rows = ~0ull, took;
+                        b32 done = true;
+
+                        // The halve: 64 * cols by 8 * h pixels of the source, GS_PITCH a row, into the small picture, GS_PITCH a row.
+                        for (positive k = 0; k < (positive)GS_PITCH * (h + 4); k++)
+                                small[k] = gs_want[k] = gs_random();
+                        for (int round = 0; round < 4 && done; round++)
+                        {
+                                took = clock_monotonic_nanoseconds();
+                                gpu_patient = 1, done = gpu_halve(GPU_VA + gs_src_at, GS_PITCH, GPU_VA + gs_bins_at, GS_PITCH, w, h), gpu_patient = 0;
+                                took = clock_monotonic_nanoseconds() - took, card = took < card ? took : card;
+                                took = clock_monotonic_nanoseconds();
+                                memory_copy_rect_u32(full, GS_PITCH, src, GS_PITCH, 64 * cols, 8 * h);
+                                for (int level = 1; level <= 3; level++)
+                                        memory_halve_u32(full, GS_PITCH, full, GS_PITCH, (64 * cols) >> level, (8 * h) >> level);
+                                took = clock_monotonic_nanoseconds() - took, rows = took < rows ? took : rows;
+                        }
+                        for (positive until = clock_monotonic_nanoseconds() + 8000000000ull; !done && !gpu_idle() && clock_monotonic_nanoseconds() < until;)
+                                ;
+                        if (!done)
+                        {
+                                string_format(log, "  gpu halve %p by %p: NOT DRAWN by this card (its error %p, end %p)\n", (positive)w, (positive)h, (positive)gpu_last_error, (positive)gpu_end);
+                                check("gpu halve: a set that has the kernel makes the small picture", false);
+                                continue;
+                        }
+                        for (unsigned int y = 0; y < h; y++)
+                                memory_copy(gs_want + (positive)y * GS_PITCH, full + (positive)y * GS_PITCH, 8 * cols * 4);
+                        for (positive k = 0; k < (positive)GS_PITCH * (h + 4); k++)
+                        {
+                                checks++;
+                                if (small[k] != gs_want[k] && (++failures, ++bad) < 4)
+                                        string_format(log, "  FAIL gpu halve: pixel %p,%p is %p, wanted %p\n", k % GS_PITCH, k / GS_PITCH, (positive)small[k], (positive)gs_want[k]);
+                        }
+                        string_format(log, "  gpu halve to %p by %p: card %p us best, processor %p us best, %p pixels wrong\n", (positive)w, (positive)h, card / 1000, rows / 1000, bad);
+                        log_flush();
+                        // The rise: the small picture w + 4 by h + 4 (two round the blocks: the library's doublings read one round each level, the card
+                        // reads one round the blocks), its pixel of the block before the first on a 64-byte line; w by h blocks into the destination.
+                        for (int side = 0; side < 2; side++)
+                        {
+                                unsigned int address_to top = small + GS_PITCH + 15, address_to first = top + GS_PITCH + 1;
+
+                                bad = 0, card = rows = ~0ull, done = true;
+                                for (positive k = 0; k < (positive)GS_PITCH * (h + 8); k++)
+                                        small[k] = gs_random();
+                                for (positive k = 0; k < (positive)GS_PITCH * (8 * h + 8); k++)
+                                        dst[k] = gs_want[k] = gs_random();
+                                for (int round = 0; round < 4 && done; round++)
+                                {
+                                        took = clock_monotonic_nanoseconds();
+                                        gpu_patient = 1;
+                                        done = gpu_rise(GPU_VA + gs_bins_at + (positive)(first - small) * 4, GS_PITCH, GPU_VA + gs_dst_at, GS_PITCH, w, h, (unsigned int)side);
+                                        gpu_patient = 0;
+                                        took = clock_monotonic_nanoseconds() - took, card = took < card ? took : card;
+                                        took = clock_monotonic_nanoseconds();
+                                        memory_double_u32(two, GS_PITCH, first, GS_PITCH, w + 2, h + 2);
+                                        memory_double_u32(one, GS_PITCH, two + GS_PITCH + 1, GS_PITCH, 2 * w + 2, 2 * h + 2);
+                                        memory_double_u32(full, GS_PITCH, one + GS_PITCH + 1, GS_PITCH, 4 * w + 2, 4 * h + 2);
+                                        for (unsigned int y = 0; y < 8 * h; y++)
+                                                for (unsigned int x = 0; x < 8 * w; x += 1024)
+                                                        memory_glass_over_u32(gs_want + (positive)y * GS_PITCH + x, none, full + (positive)(y + 2) * GS_PITCH + 2 + x,
+                                                                              8 * w - x < 1024 ? 8 * w - x : 1024, grains[side][y & 3] + (x & 15));
+                                        took = clock_monotonic_nanoseconds() - took, rows = took < rows ? took : rows;
+                                }
+                                for (positive until = clock_monotonic_nanoseconds() + 8000000000ull; !done && !gpu_idle() && clock_monotonic_nanoseconds() < until;)
+                                        ;
+                                if (!done)
+                                {
+                                        string_format(log, "  gpu rise %p by %p blocks: NOT DRAWN by this card (its error %p, end %p)\n", (positive)w, (positive)h, (positive)gpu_last_error,
+                                                      (positive)gpu_end);
+                                        check("gpu rise: a set that has the kernel makes the ground", false);
+                                        continue;
+                                }
+                                for (positive k = 0; k < (positive)GS_PITCH * (8 * h + 8); k++)
+                                {
+                                        checks++;
+                                        if (dst[k] != gs_want[k] && (++failures, ++bad) < 4)
+                                                string_format(log, "  FAIL gpu rise: pixel %p,%p is %p, wanted %p\n", k % GS_PITCH, k / GS_PITCH, (positive)dst[k], (positive)gs_want[k]);
+                                }
+                                string_format(log, "  gpu rise of %p by %p blocks, %s: card %p us best, processor %p us best, %p pixels wrong\n", (positive)w, (positive)h,
+                                              side ? (string_address) "light" : (string_address) "dark", card / 1000, rows / 1000, bad);
+                                log_flush();
+                        }
+                }
+                // (the bins' megabytes were the small pictures': the rows after this lay their own)
+        }
         // 4. The four operations (copy, fill, tone over, glass over) on whole 64-byte rows at a 32-byte base, the place every set takes: the rows
         // around them compared too.
         {

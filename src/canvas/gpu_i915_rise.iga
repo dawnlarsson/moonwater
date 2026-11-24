@@ -1,0 +1,544 @@
+// Gen9 rise (op 11): a glass window's ground made from its small tinted picture, as the processor's compositor_rise and the grain of
+// memory_glass_over_u32 make it (src/canvas/compositor/glass.c, src/lib.c): the small picture doubled three times, each pixel of a level
+// three quarters of the one over it and a quarter of its neighbour across and down by byte means (memory_double_u32: v = (c + ((c + n + 1) >> 1)) >> 1,
+// down the rows and then across), and the ordered grain of 0 to 3 levels added (dark glass, v = 0) or taken away (light, v != 0), clamped,
+// the alpha byte left as it is. A block of the output is 8 by 8 pixels fixed to the output's grid, made from the three by three small
+// pixels round its own. A thread is six blocks of a row (the card's time is the threads' more than their instructions'): walker group X
+// (r0.1) their column of six and Y (r0.6) their row. It reads the three small rows once (binding table entry 1: 32 bytes, eight small
+// pixels, by 3 rows at byte 24 X of row Y, so the source's first pixel is the block before the first across and above it) and writes each
+// block (entry 0: 32 bytes by 8 rows at byte 192 X + 32 k of row 8 Y), as many as the row has left of w (CURBE). For a block the three
+// small rows become four of level 2 (four pixels: the two under the block and one each side), those six of level 1 and those the eight of
+// the block, a row a register, its B and R bytes in the words of one register and its G and A bytes in another, so a byte mean is a
+// word's (avg, add and shr on sixteen words: no byte is a source, which Gen11 and later refuse); the small rows then move a pixel along.
+// The grain's level at x, y is 2 * ((x ^ y) & 1) + (y & 1); a block starts at even x and y, so its even rows have 0 2 0 2 and its odd rows
+// 3 1 3 1 across. CURBE: r1.0 = v, r1.1 = w (the blocks of a row). Written by the scratch generator genglass.py, which holds a block's
+// steps to a model of the library's three doublings. Assemble with: iga64 -a -p=9 src/canvas/gpu_i915_rise.iga (the words are in
+// src/canvas/gpu_i915.asm).
+mov (8|M0)               r3.0<1>:ud    r0.0<8;8,1>:ud
+mul (1|M0)               r3.0<1>:ud    r0.1<0;1,0>:ud    24:uw
+mov (1|M0)               r3.1<1>:ud    r0.6<0;1,0>:ud
+mov (1|M0)               r3.2<1>:ud    0x0002001f:ud
+send (16|M0)             r14:ud        r3:ud     0xC  0x02390001     // the three small rows (entry 1): r14, r15, r16
+// the blocks this thread makes: r2.3 = the least of six and what the row has left, r2.2 the one in hand
+mul (1|M0)               r2.3<1>:ud    r0.1<0;1,0>:ud    6:uw
+add (1|M0)               r2.3<1>:d     r1.1<0;1,0>:d     -r2.3<0;1,0>:d
+sel (1|M0)   (lt)f1.1    r2.3<1>:ud    r2.3<0;1,0>:ud    6:ud
+mov (1|M0)               r2.2<1>:ud    0:ud
+// the grain, as words to add (r120 to r123: the even rows' B and R, their G, the odd rows' the same): the sign 1 (dark) or -1 (light) in r2.0
+cmp (1|M0)   (ne)f0.0    null:d        r1.0<0;1,0>:d     0:d
+mov (1|M0)               r2.0<1>:d     1:d
+(f0.0) mov (1|M0)        r2.0<1>:d     -1:d
+mov (4|M0)               r120.0<2>:ud    0x00000000:ud
+mov (4|M0)               r120.1<2>:ud    0x00020002:ud
+mul (16|M0)              r120.0<1>:w     r120.0<16;16,1>:w   r2.0<0;1,0>:w
+mov (4|M0)               r121.0<2>:ud    0x00000000:ud
+mov (4|M0)               r121.1<2>:ud    0x00000002:ud
+mul (16|M0)              r121.0<1>:w     r121.0<16;16,1>:w   r2.0<0;1,0>:w
+mov (4|M0)               r122.0<2>:ud    0x00030003:ud
+mov (4|M0)               r122.1<2>:ud    0x00010001:ud
+mul (16|M0)              r122.0<1>:w     r122.0<16;16,1>:w   r2.0<0;1,0>:w
+mov (4|M0)               r123.0<2>:ud    0x00000003:ud
+mov (4|M0)               r123.1<2>:ud    0x00000001:ud
+mul (16|M0)              r123.0<1>:w     r123.0<16;16,1>:w   r2.0<0;1,0>:w
+// the first block's header: 32 bytes by 8 rows at byte 192 X of row 8 Y
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mul (1|M0)               r4.0<1>:ud    r0.1<0;1,0>:ud    192:uw
+shl (1|M0)               r4.1<1>:ud    r0.6<0;1,0>:ud    3:ud
+mov (1|M0)               r4.2<1>:ud    0x0007001f:ud
+block:
+and (4|M0)               r20.0<1>:ud   r14.0<4;4,1>:ud   0x00ff00ff:ud
+shr (4|M0)               r21.0<1>:ud   r14.0<4;4,1>:ud   8:ud
+and (4|M0)               r21.0<1>:ud   r21.0<4;4,1>:ud   0x00ff00ff:ud
+and (4|M0)               r22.0<1>:ud   r15.0<4;4,1>:ud   0x00ff00ff:ud
+shr (4|M0)               r23.0<1>:ud   r15.0<4;4,1>:ud   8:ud
+and (4|M0)               r23.0<1>:ud   r23.0<4;4,1>:ud   0x00ff00ff:ud
+and (4|M0)               r24.0<1>:ud   r16.0<4;4,1>:ud   0x00ff00ff:ud
+shr (4|M0)               r25.0<1>:ud   r16.0<4;4,1>:ud   8:ud
+and (4|M0)               r25.0<1>:ud   r25.0<4;4,1>:ud   0x00ff00ff:ud
+// level 2: down the rows
+avg (16|M0)              r26.0<1>:uw   r20.0<16;16,1>:uw   r22.0<16;16,1>:uw
+add (16|M0)              r27.0<1>:uw   r20.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r27.0<1>:uw   r27.0<16;16,1>:uw   1:uw
+add (16|M0)              r28.0<1>:uw   r22.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+avg (16|M0)              r26.0<1>:uw   r21.0<16;16,1>:uw   r23.0<16;16,1>:uw
+add (16|M0)              r29.0<1>:uw   r21.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r29.0<1>:uw   r29.0<16;16,1>:uw   1:uw
+add (16|M0)              r30.0<1>:uw   r23.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+avg (16|M0)              r26.0<1>:uw   r22.0<16;16,1>:uw   r24.0<16;16,1>:uw
+add (16|M0)              r31.0<1>:uw   r22.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r31.0<1>:uw   r31.0<16;16,1>:uw   1:uw
+add (16|M0)              r32.0<1>:uw   r24.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r32.0<1>:uw   r32.0<16;16,1>:uw   1:uw
+avg (16|M0)              r26.0<1>:uw   r23.0<16;16,1>:uw   r25.0<16;16,1>:uw
+add (16|M0)              r33.0<1>:uw   r23.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r33.0<1>:uw   r33.0<16;16,1>:uw   1:uw
+add (16|M0)              r34.0<1>:uw   r25.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r34.0<1>:uw   r34.0<16;16,1>:uw   1:uw
+// level 2: across
+mov (4|M0)               r25.0<1>:ud   r27.1<4;4,1>:ud
+avg (16|M0)              r24.0<1>:uw   r27.0<16;16,1>:uw   r25.0<16;16,1>:uw
+add (16|M0)              r23.0<1>:uw   r27.0<16;16,1>:uw   r24.0<16;16,1>:uw
+shr (16|M0)              r23.0<1>:uw   r23.0<16;16,1>:uw   1:uw
+add (16|M0)              r22.0<1>:uw   r25.0<16;16,1>:uw   r24.0<16;16,1>:uw
+shr (16|M0)              r22.0<1>:uw   r22.0<16;16,1>:uw   1:uw
+mov (4|M0)               r21.0<2>:ud   r23.0<4;4,1>:ud
+mov (4|M0)               r21.1<2>:ud   r22.0<4;4,1>:ud
+mov (4|M0)               r22.0<1>:ud   r29.1<4;4,1>:ud
+avg (16|M0)              r23.0<1>:uw   r29.0<16;16,1>:uw   r22.0<16;16,1>:uw
+add (16|M0)              r24.0<1>:uw   r29.0<16;16,1>:uw   r23.0<16;16,1>:uw
+shr (16|M0)              r24.0<1>:uw   r24.0<16;16,1>:uw   1:uw
+add (16|M0)              r25.0<1>:uw   r22.0<16;16,1>:uw   r23.0<16;16,1>:uw
+shr (16|M0)              r25.0<1>:uw   r25.0<16;16,1>:uw   1:uw
+mov (4|M0)               r20.0<2>:ud   r24.0<4;4,1>:ud
+mov (4|M0)               r20.1<2>:ud   r25.0<4;4,1>:ud
+mov (4|M0)               r29.0<1>:ud   r28.1<4;4,1>:ud
+avg (16|M0)              r27.0<1>:uw   r28.0<16;16,1>:uw   r29.0<16;16,1>:uw
+add (16|M0)              r25.0<1>:uw   r28.0<16;16,1>:uw   r27.0<16;16,1>:uw
+shr (16|M0)              r25.0<1>:uw   r25.0<16;16,1>:uw   1:uw
+add (16|M0)              r24.0<1>:uw   r29.0<16;16,1>:uw   r27.0<16;16,1>:uw
+shr (16|M0)              r24.0<1>:uw   r24.0<16;16,1>:uw   1:uw
+mov (4|M0)               r23.0<2>:ud   r25.0<4;4,1>:ud
+mov (4|M0)               r23.1<2>:ud   r24.0<4;4,1>:ud
+mov (4|M0)               r24.0<1>:ud   r30.1<4;4,1>:ud
+avg (16|M0)              r25.0<1>:uw   r30.0<16;16,1>:uw   r24.0<16;16,1>:uw
+add (16|M0)              r27.0<1>:uw   r30.0<16;16,1>:uw   r25.0<16;16,1>:uw
+shr (16|M0)              r27.0<1>:uw   r27.0<16;16,1>:uw   1:uw
+add (16|M0)              r29.0<1>:uw   r24.0<16;16,1>:uw   r25.0<16;16,1>:uw
+shr (16|M0)              r29.0<1>:uw   r29.0<16;16,1>:uw   1:uw
+mov (4|M0)               r22.0<2>:ud   r27.0<4;4,1>:ud
+mov (4|M0)               r22.1<2>:ud   r29.0<4;4,1>:ud
+mov (4|M0)               r30.0<1>:ud   r31.1<4;4,1>:ud
+avg (16|M0)              r28.0<1>:uw   r31.0<16;16,1>:uw   r30.0<16;16,1>:uw
+add (16|M0)              r29.0<1>:uw   r31.0<16;16,1>:uw   r28.0<16;16,1>:uw
+shr (16|M0)              r29.0<1>:uw   r29.0<16;16,1>:uw   1:uw
+add (16|M0)              r27.0<1>:uw   r30.0<16;16,1>:uw   r28.0<16;16,1>:uw
+shr (16|M0)              r27.0<1>:uw   r27.0<16;16,1>:uw   1:uw
+mov (4|M0)               r25.0<2>:ud   r29.0<4;4,1>:ud
+mov (4|M0)               r25.1<2>:ud   r27.0<4;4,1>:ud
+mov (4|M0)               r27.0<1>:ud   r33.1<4;4,1>:ud
+avg (16|M0)              r29.0<1>:uw   r33.0<16;16,1>:uw   r27.0<16;16,1>:uw
+add (16|M0)              r28.0<1>:uw   r33.0<16;16,1>:uw   r29.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+add (16|M0)              r30.0<1>:uw   r27.0<16;16,1>:uw   r29.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+mov (4|M0)               r24.0<2>:ud   r28.0<4;4,1>:ud
+mov (4|M0)               r24.1<2>:ud   r30.0<4;4,1>:ud
+mov (4|M0)               r33.0<1>:ud   r32.1<4;4,1>:ud
+avg (16|M0)              r31.0<1>:uw   r32.0<16;16,1>:uw   r33.0<16;16,1>:uw
+add (16|M0)              r30.0<1>:uw   r32.0<16;16,1>:uw   r31.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+add (16|M0)              r28.0<1>:uw   r33.0<16;16,1>:uw   r31.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+mov (4|M0)               r29.0<2>:ud   r30.0<4;4,1>:ud
+mov (4|M0)               r29.1<2>:ud   r28.0<4;4,1>:ud
+mov (4|M0)               r28.0<1>:ud   r34.1<4;4,1>:ud
+avg (16|M0)              r30.0<1>:uw   r34.0<16;16,1>:uw   r28.0<16;16,1>:uw
+add (16|M0)              r31.0<1>:uw   r34.0<16;16,1>:uw   r30.0<16;16,1>:uw
+shr (16|M0)              r31.0<1>:uw   r31.0<16;16,1>:uw   1:uw
+add (16|M0)              r33.0<1>:uw   r28.0<16;16,1>:uw   r30.0<16;16,1>:uw
+shr (16|M0)              r33.0<1>:uw   r33.0<16;16,1>:uw   1:uw
+mov (4|M0)               r27.0<2>:ud   r31.0<4;4,1>:ud
+mov (4|M0)               r27.1<2>:ud   r33.0<4;4,1>:ud
+// level 1: down the rows
+avg (16|M0)              r34.0<1>:uw   r21.0<16;16,1>:uw   r23.0<16;16,1>:uw
+add (16|M0)              r32.0<1>:uw   r21.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r32.0<1>:uw   r32.0<16;16,1>:uw   1:uw
+add (16|M0)              r33.0<1>:uw   r23.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r33.0<1>:uw   r33.0<16;16,1>:uw   1:uw
+avg (16|M0)              r34.0<1>:uw   r20.0<16;16,1>:uw   r22.0<16;16,1>:uw
+add (16|M0)              r31.0<1>:uw   r20.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r31.0<1>:uw   r31.0<16;16,1>:uw   1:uw
+add (16|M0)              r30.0<1>:uw   r22.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+avg (16|M0)              r34.0<1>:uw   r23.0<16;16,1>:uw   r25.0<16;16,1>:uw
+add (16|M0)              r28.0<1>:uw   r23.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+add (16|M0)              r26.0<1>:uw   r25.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r26.0<1>:uw   r26.0<16;16,1>:uw   1:uw
+avg (16|M0)              r34.0<1>:uw   r22.0<16;16,1>:uw   r24.0<16;16,1>:uw
+add (16|M0)              r35.0<1>:uw   r22.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r35.0<1>:uw   r35.0<16;16,1>:uw   1:uw
+add (16|M0)              r36.0<1>:uw   r24.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r36.0<1>:uw   r36.0<16;16,1>:uw   1:uw
+avg (16|M0)              r34.0<1>:uw   r25.0<16;16,1>:uw   r29.0<16;16,1>:uw
+add (16|M0)              r37.0<1>:uw   r25.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r37.0<1>:uw   r37.0<16;16,1>:uw   1:uw
+add (16|M0)              r38.0<1>:uw   r29.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r38.0<1>:uw   r38.0<16;16,1>:uw   1:uw
+avg (16|M0)              r34.0<1>:uw   r24.0<16;16,1>:uw   r27.0<16;16,1>:uw
+add (16|M0)              r39.0<1>:uw   r24.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r39.0<1>:uw   r39.0<16;16,1>:uw   1:uw
+add (16|M0)              r40.0<1>:uw   r27.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r40.0<1>:uw   r40.0<16;16,1>:uw   1:uw
+// level 1: across
+mov (4|M0)               r27.0<1>:ud   r32.1<4;4,1>:ud
+avg (16|M0)              r29.0<1>:uw   r32.0<16;16,1>:uw   r27.0<16;16,1>:uw
+add (16|M0)              r24.0<1>:uw   r32.0<16;16,1>:uw   r29.0<16;16,1>:uw
+shr (16|M0)              r24.0<1>:uw   r24.0<16;16,1>:uw   1:uw
+add (16|M0)              r25.0<1>:uw   r27.0<16;16,1>:uw   r29.0<16;16,1>:uw
+shr (16|M0)              r25.0<1>:uw   r25.0<16;16,1>:uw   1:uw
+mov (4|M0)               r22.0<2>:ud   r24.0<4;4,1>:ud
+mov (4|M0)               r22.1<2>:ud   r25.0<4;4,1>:ud
+mov (4|M0)               r25.0<1>:ud   r31.1<4;4,1>:ud
+avg (16|M0)              r24.0<1>:uw   r31.0<16;16,1>:uw   r25.0<16;16,1>:uw
+add (16|M0)              r29.0<1>:uw   r31.0<16;16,1>:uw   r24.0<16;16,1>:uw
+shr (16|M0)              r29.0<1>:uw   r29.0<16;16,1>:uw   1:uw
+add (16|M0)              r27.0<1>:uw   r25.0<16;16,1>:uw   r24.0<16;16,1>:uw
+shr (16|M0)              r27.0<1>:uw   r27.0<16;16,1>:uw   1:uw
+mov (4|M0)               r23.0<2>:ud   r29.0<4;4,1>:ud
+mov (4|M0)               r23.1<2>:ud   r27.0<4;4,1>:ud
+mov (4|M0)               r31.0<1>:ud   r33.1<4;4,1>:ud
+avg (16|M0)              r32.0<1>:uw   r33.0<16;16,1>:uw   r31.0<16;16,1>:uw
+add (16|M0)              r27.0<1>:uw   r33.0<16;16,1>:uw   r32.0<16;16,1>:uw
+shr (16|M0)              r27.0<1>:uw   r27.0<16;16,1>:uw   1:uw
+add (16|M0)              r29.0<1>:uw   r31.0<16;16,1>:uw   r32.0<16;16,1>:uw
+shr (16|M0)              r29.0<1>:uw   r29.0<16;16,1>:uw   1:uw
+mov (4|M0)               r24.0<2>:ud   r27.0<4;4,1>:ud
+mov (4|M0)               r24.1<2>:ud   r29.0<4;4,1>:ud
+mov (4|M0)               r29.0<1>:ud   r30.1<4;4,1>:ud
+avg (16|M0)              r27.0<1>:uw   r30.0<16;16,1>:uw   r29.0<16;16,1>:uw
+add (16|M0)              r32.0<1>:uw   r30.0<16;16,1>:uw   r27.0<16;16,1>:uw
+shr (16|M0)              r32.0<1>:uw   r32.0<16;16,1>:uw   1:uw
+add (16|M0)              r31.0<1>:uw   r29.0<16;16,1>:uw   r27.0<16;16,1>:uw
+shr (16|M0)              r31.0<1>:uw   r31.0<16;16,1>:uw   1:uw
+mov (4|M0)               r25.0<2>:ud   r32.0<4;4,1>:ud
+mov (4|M0)               r25.1<2>:ud   r31.0<4;4,1>:ud
+mov (4|M0)               r30.0<1>:ud   r28.1<4;4,1>:ud
+avg (16|M0)              r33.0<1>:uw   r28.0<16;16,1>:uw   r30.0<16;16,1>:uw
+add (16|M0)              r31.0<1>:uw   r28.0<16;16,1>:uw   r33.0<16;16,1>:uw
+shr (16|M0)              r31.0<1>:uw   r31.0<16;16,1>:uw   1:uw
+add (16|M0)              r32.0<1>:uw   r30.0<16;16,1>:uw   r33.0<16;16,1>:uw
+shr (16|M0)              r32.0<1>:uw   r32.0<16;16,1>:uw   1:uw
+mov (4|M0)               r27.0<2>:ud   r31.0<4;4,1>:ud
+mov (4|M0)               r27.1<2>:ud   r32.0<4;4,1>:ud
+mov (4|M0)               r32.0<1>:ud   r35.1<4;4,1>:ud
+avg (16|M0)              r31.0<1>:uw   r35.0<16;16,1>:uw   r32.0<16;16,1>:uw
+add (16|M0)              r33.0<1>:uw   r35.0<16;16,1>:uw   r31.0<16;16,1>:uw
+shr (16|M0)              r33.0<1>:uw   r33.0<16;16,1>:uw   1:uw
+add (16|M0)              r30.0<1>:uw   r32.0<16;16,1>:uw   r31.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+mov (4|M0)               r29.0<2>:ud   r33.0<4;4,1>:ud
+mov (4|M0)               r29.1<2>:ud   r30.0<4;4,1>:ud
+mov (4|M0)               r35.0<1>:ud   r26.1<4;4,1>:ud
+avg (16|M0)              r28.0<1>:uw   r26.0<16;16,1>:uw   r35.0<16;16,1>:uw
+add (16|M0)              r30.0<1>:uw   r26.0<16;16,1>:uw   r28.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+add (16|M0)              r33.0<1>:uw   r35.0<16;16,1>:uw   r28.0<16;16,1>:uw
+shr (16|M0)              r33.0<1>:uw   r33.0<16;16,1>:uw   1:uw
+mov (4|M0)               r31.0<2>:ud   r30.0<4;4,1>:ud
+mov (4|M0)               r31.1<2>:ud   r33.0<4;4,1>:ud
+mov (4|M0)               r33.0<1>:ud   r36.1<4;4,1>:ud
+avg (16|M0)              r30.0<1>:uw   r36.0<16;16,1>:uw   r33.0<16;16,1>:uw
+add (16|M0)              r28.0<1>:uw   r36.0<16;16,1>:uw   r30.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+add (16|M0)              r35.0<1>:uw   r33.0<16;16,1>:uw   r30.0<16;16,1>:uw
+shr (16|M0)              r35.0<1>:uw   r35.0<16;16,1>:uw   1:uw
+mov (4|M0)               r32.0<2>:ud   r28.0<4;4,1>:ud
+mov (4|M0)               r32.1<2>:ud   r35.0<4;4,1>:ud
+mov (4|M0)               r36.0<1>:ud   r37.1<4;4,1>:ud
+avg (16|M0)              r26.0<1>:uw   r37.0<16;16,1>:uw   r36.0<16;16,1>:uw
+add (16|M0)              r35.0<1>:uw   r37.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r35.0<1>:uw   r35.0<16;16,1>:uw   1:uw
+add (16|M0)              r28.0<1>:uw   r36.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+mov (4|M0)               r30.0<2>:ud   r35.0<4;4,1>:ud
+mov (4|M0)               r30.1<2>:ud   r28.0<4;4,1>:ud
+mov (4|M0)               r28.0<1>:ud   r39.1<4;4,1>:ud
+avg (16|M0)              r35.0<1>:uw   r39.0<16;16,1>:uw   r28.0<16;16,1>:uw
+add (16|M0)              r26.0<1>:uw   r39.0<16;16,1>:uw   r35.0<16;16,1>:uw
+shr (16|M0)              r26.0<1>:uw   r26.0<16;16,1>:uw   1:uw
+add (16|M0)              r36.0<1>:uw   r28.0<16;16,1>:uw   r35.0<16;16,1>:uw
+shr (16|M0)              r36.0<1>:uw   r36.0<16;16,1>:uw   1:uw
+mov (4|M0)               r33.0<2>:ud   r26.0<4;4,1>:ud
+mov (4|M0)               r33.1<2>:ud   r36.0<4;4,1>:ud
+mov (4|M0)               r39.0<1>:ud   r38.1<4;4,1>:ud
+avg (16|M0)              r37.0<1>:uw   r38.0<16;16,1>:uw   r39.0<16;16,1>:uw
+add (16|M0)              r36.0<1>:uw   r38.0<16;16,1>:uw   r37.0<16;16,1>:uw
+shr (16|M0)              r36.0<1>:uw   r36.0<16;16,1>:uw   1:uw
+add (16|M0)              r26.0<1>:uw   r39.0<16;16,1>:uw   r37.0<16;16,1>:uw
+shr (16|M0)              r26.0<1>:uw   r26.0<16;16,1>:uw   1:uw
+mov (4|M0)               r35.0<2>:ud   r36.0<4;4,1>:ud
+mov (4|M0)               r35.1<2>:ud   r26.0<4;4,1>:ud
+mov (4|M0)               r26.0<1>:ud   r40.1<4;4,1>:ud
+avg (16|M0)              r36.0<1>:uw   r40.0<16;16,1>:uw   r26.0<16;16,1>:uw
+add (16|M0)              r37.0<1>:uw   r40.0<16;16,1>:uw   r36.0<16;16,1>:uw
+shr (16|M0)              r37.0<1>:uw   r37.0<16;16,1>:uw   1:uw
+add (16|M0)              r39.0<1>:uw   r26.0<16;16,1>:uw   r36.0<16;16,1>:uw
+shr (16|M0)              r39.0<1>:uw   r39.0<16;16,1>:uw   1:uw
+mov (4|M0)               r28.0<2>:ud   r37.0<4;4,1>:ud
+mov (4|M0)               r28.1<2>:ud   r39.0<4;4,1>:ud
+// level 0: down the rows
+avg (16|M0)              r40.0<1>:uw   r22.0<16;16,1>:uw   r24.0<16;16,1>:uw
+add (16|M0)              r38.0<1>:uw   r24.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r38.0<1>:uw   r38.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r23.0<16;16,1>:uw   r25.0<16;16,1>:uw
+add (16|M0)              r39.0<1>:uw   r25.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r39.0<1>:uw   r39.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r24.0<16;16,1>:uw   r27.0<16;16,1>:uw
+add (16|M0)              r37.0<1>:uw   r24.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r37.0<1>:uw   r37.0<16;16,1>:uw   1:uw
+add (16|M0)              r36.0<1>:uw   r27.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r36.0<1>:uw   r36.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r25.0<16;16,1>:uw   r29.0<16;16,1>:uw
+add (16|M0)              r26.0<1>:uw   r25.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r26.0<1>:uw   r26.0<16;16,1>:uw   1:uw
+add (16|M0)              r20.0<1>:uw   r29.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r20.0<1>:uw   r20.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r27.0<16;16,1>:uw   r31.0<16;16,1>:uw
+add (16|M0)              r21.0<1>:uw   r27.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r21.0<1>:uw   r21.0<16;16,1>:uw   1:uw
+add (16|M0)              r34.0<1>:uw   r31.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r34.0<1>:uw   r34.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r29.0<16;16,1>:uw   r32.0<16;16,1>:uw
+add (16|M0)              r41.0<1>:uw   r29.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r41.0<1>:uw   r41.0<16;16,1>:uw   1:uw
+add (16|M0)              r42.0<1>:uw   r32.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r42.0<1>:uw   r42.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r31.0<16;16,1>:uw   r30.0<16;16,1>:uw
+add (16|M0)              r43.0<1>:uw   r31.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r43.0<1>:uw   r43.0<16;16,1>:uw   1:uw
+add (16|M0)              r44.0<1>:uw   r30.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r44.0<1>:uw   r44.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r32.0<16;16,1>:uw   r33.0<16;16,1>:uw
+add (16|M0)              r45.0<1>:uw   r32.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r45.0<1>:uw   r45.0<16;16,1>:uw   1:uw
+add (16|M0)              r46.0<1>:uw   r33.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r46.0<1>:uw   r46.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r30.0<16;16,1>:uw   r35.0<16;16,1>:uw
+add (16|M0)              r47.0<1>:uw   r30.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r47.0<1>:uw   r47.0<16;16,1>:uw   1:uw
+avg (16|M0)              r40.0<1>:uw   r33.0<16;16,1>:uw   r28.0<16;16,1>:uw
+add (16|M0)              r48.0<1>:uw   r33.0<16;16,1>:uw   r40.0<16;16,1>:uw
+shr (16|M0)              r48.0<1>:uw   r48.0<16;16,1>:uw   1:uw
+// level 0: across
+mov (4|M0)               r28.0<1>:ud   r38.1<4;4,1>:ud
+mov (1|M0)               r28.4<1>:ud   r38.5<0;1,0>:ud
+avg (16|M0)              r35.0<1>:uw   r38.0<16;16,1>:uw   r28.0<16;16,1>:uw
+add (16|M0)              r33.0<1>:uw   r38.0<16;16,1>:uw   r35.0<16;16,1>:uw
+shr (16|M0)              r33.0<1>:uw   r33.0<16;16,1>:uw   1:uw
+add (16|M0)              r30.0<1>:uw   r28.0<16;16,1>:uw   r35.0<16;16,1>:uw
+shr (16|M0)              r30.0<1>:uw   r30.0<16;16,1>:uw   1:uw
+mov (4|M0)               r32.0<2>:ud   r30.0<4;4,1>:ud
+mov (4|M0)               r32.1<2>:ud   r33.1<4;4,1>:ud
+mov (4|M0)               r30.0<1>:ud   r39.1<4;4,1>:ud
+mov (1|M0)               r30.4<1>:ud   r39.5<0;1,0>:ud
+avg (16|M0)              r33.0<1>:uw   r39.0<16;16,1>:uw   r30.0<16;16,1>:uw
+add (16|M0)              r35.0<1>:uw   r39.0<16;16,1>:uw   r33.0<16;16,1>:uw
+shr (16|M0)              r35.0<1>:uw   r35.0<16;16,1>:uw   1:uw
+add (16|M0)              r28.0<1>:uw   r30.0<16;16,1>:uw   r33.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+mov (4|M0)               r31.0<2>:ud   r28.0<4;4,1>:ud
+mov (4|M0)               r31.1<2>:ud   r35.1<4;4,1>:ud
+mov (4|M0)               r39.0<1>:ud   r37.1<4;4,1>:ud
+mov (1|M0)               r39.4<1>:ud   r37.5<0;1,0>:ud
+avg (16|M0)              r38.0<1>:uw   r37.0<16;16,1>:uw   r39.0<16;16,1>:uw
+add (16|M0)              r28.0<1>:uw   r37.0<16;16,1>:uw   r38.0<16;16,1>:uw
+shr (16|M0)              r28.0<1>:uw   r28.0<16;16,1>:uw   1:uw
+add (16|M0)              r35.0<1>:uw   r39.0<16;16,1>:uw   r38.0<16;16,1>:uw
+shr (16|M0)              r35.0<1>:uw   r35.0<16;16,1>:uw   1:uw
+mov (4|M0)               r33.0<2>:ud   r35.0<4;4,1>:ud
+mov (4|M0)               r33.1<2>:ud   r28.1<4;4,1>:ud
+mov (4|M0)               r35.0<1>:ud   r26.1<4;4,1>:ud
+mov (1|M0)               r35.4<1>:ud   r26.5<0;1,0>:ud
+avg (16|M0)              r28.0<1>:uw   r26.0<16;16,1>:uw   r35.0<16;16,1>:uw
+add (16|M0)              r38.0<1>:uw   r26.0<16;16,1>:uw   r28.0<16;16,1>:uw
+shr (16|M0)              r38.0<1>:uw   r38.0<16;16,1>:uw   1:uw
+add (16|M0)              r39.0<1>:uw   r35.0<16;16,1>:uw   r28.0<16;16,1>:uw
+shr (16|M0)              r39.0<1>:uw   r39.0<16;16,1>:uw   1:uw
+mov (4|M0)               r30.0<2>:ud   r39.0<4;4,1>:ud
+mov (4|M0)               r30.1<2>:ud   r38.1<4;4,1>:ud
+mov (4|M0)               r26.0<1>:ud   r36.1<4;4,1>:ud
+mov (1|M0)               r26.4<1>:ud   r36.5<0;1,0>:ud
+avg (16|M0)              r37.0<1>:uw   r36.0<16;16,1>:uw   r26.0<16;16,1>:uw
+add (16|M0)              r39.0<1>:uw   r36.0<16;16,1>:uw   r37.0<16;16,1>:uw
+shr (16|M0)              r39.0<1>:uw   r39.0<16;16,1>:uw   1:uw
+add (16|M0)              r38.0<1>:uw   r26.0<16;16,1>:uw   r37.0<16;16,1>:uw
+shr (16|M0)              r38.0<1>:uw   r38.0<16;16,1>:uw   1:uw
+mov (4|M0)               r28.0<2>:ud   r38.0<4;4,1>:ud
+mov (4|M0)               r28.1<2>:ud   r39.1<4;4,1>:ud
+mov (4|M0)               r38.0<1>:ud   r20.1<4;4,1>:ud
+mov (1|M0)               r38.4<1>:ud   r20.5<0;1,0>:ud
+avg (16|M0)              r39.0<1>:uw   r20.0<16;16,1>:uw   r38.0<16;16,1>:uw
+add (16|M0)              r37.0<1>:uw   r20.0<16;16,1>:uw   r39.0<16;16,1>:uw
+shr (16|M0)              r37.0<1>:uw   r37.0<16;16,1>:uw   1:uw
+add (16|M0)              r26.0<1>:uw   r38.0<16;16,1>:uw   r39.0<16;16,1>:uw
+shr (16|M0)              r26.0<1>:uw   r26.0<16;16,1>:uw   1:uw
+mov (4|M0)               r35.0<2>:ud   r26.0<4;4,1>:ud
+mov (4|M0)               r35.1<2>:ud   r37.1<4;4,1>:ud
+mov (4|M0)               r20.0<1>:ud   r21.1<4;4,1>:ud
+mov (1|M0)               r20.4<1>:ud   r21.5<0;1,0>:ud
+avg (16|M0)              r36.0<1>:uw   r21.0<16;16,1>:uw   r20.0<16;16,1>:uw
+add (16|M0)              r26.0<1>:uw   r21.0<16;16,1>:uw   r36.0<16;16,1>:uw
+shr (16|M0)              r26.0<1>:uw   r26.0<16;16,1>:uw   1:uw
+add (16|M0)              r37.0<1>:uw   r20.0<16;16,1>:uw   r36.0<16;16,1>:uw
+shr (16|M0)              r37.0<1>:uw   r37.0<16;16,1>:uw   1:uw
+mov (4|M0)               r39.0<2>:ud   r37.0<4;4,1>:ud
+mov (4|M0)               r39.1<2>:ud   r26.1<4;4,1>:ud
+mov (4|M0)               r37.0<1>:ud   r41.1<4;4,1>:ud
+mov (1|M0)               r37.4<1>:ud   r41.5<0;1,0>:ud
+avg (16|M0)              r26.0<1>:uw   r41.0<16;16,1>:uw   r37.0<16;16,1>:uw
+add (16|M0)              r36.0<1>:uw   r41.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r36.0<1>:uw   r36.0<16;16,1>:uw   1:uw
+add (16|M0)              r20.0<1>:uw   r37.0<16;16,1>:uw   r26.0<16;16,1>:uw
+shr (16|M0)              r20.0<1>:uw   r20.0<16;16,1>:uw   1:uw
+mov (4|M0)               r38.0<2>:ud   r20.0<4;4,1>:ud
+mov (4|M0)               r38.1<2>:ud   r36.1<4;4,1>:ud
+mov (4|M0)               r41.0<1>:ud   r34.1<4;4,1>:ud
+mov (1|M0)               r41.4<1>:ud   r34.5<0;1,0>:ud
+avg (16|M0)              r21.0<1>:uw   r34.0<16;16,1>:uw   r41.0<16;16,1>:uw
+add (16|M0)              r20.0<1>:uw   r34.0<16;16,1>:uw   r21.0<16;16,1>:uw
+shr (16|M0)              r20.0<1>:uw   r20.0<16;16,1>:uw   1:uw
+add (16|M0)              r36.0<1>:uw   r41.0<16;16,1>:uw   r21.0<16;16,1>:uw
+shr (16|M0)              r36.0<1>:uw   r36.0<16;16,1>:uw   1:uw
+mov (4|M0)               r26.0<2>:ud   r36.0<4;4,1>:ud
+mov (4|M0)               r26.1<2>:ud   r20.1<4;4,1>:ud
+mov (4|M0)               r36.0<1>:ud   r42.1<4;4,1>:ud
+mov (1|M0)               r36.4<1>:ud   r42.5<0;1,0>:ud
+avg (16|M0)              r20.0<1>:uw   r42.0<16;16,1>:uw   r36.0<16;16,1>:uw
+add (16|M0)              r21.0<1>:uw   r42.0<16;16,1>:uw   r20.0<16;16,1>:uw
+shr (16|M0)              r21.0<1>:uw   r21.0<16;16,1>:uw   1:uw
+add (16|M0)              r41.0<1>:uw   r36.0<16;16,1>:uw   r20.0<16;16,1>:uw
+shr (16|M0)              r41.0<1>:uw   r41.0<16;16,1>:uw   1:uw
+mov (4|M0)               r37.0<2>:ud   r41.0<4;4,1>:ud
+mov (4|M0)               r37.1<2>:ud   r21.1<4;4,1>:ud
+mov (4|M0)               r42.0<1>:ud   r43.1<4;4,1>:ud
+mov (1|M0)               r42.4<1>:ud   r43.5<0;1,0>:ud
+avg (16|M0)              r34.0<1>:uw   r43.0<16;16,1>:uw   r42.0<16;16,1>:uw
+add (16|M0)              r41.0<1>:uw   r43.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r41.0<1>:uw   r41.0<16;16,1>:uw   1:uw
+add (16|M0)              r21.0<1>:uw   r42.0<16;16,1>:uw   r34.0<16;16,1>:uw
+shr (16|M0)              r21.0<1>:uw   r21.0<16;16,1>:uw   1:uw
+mov (4|M0)               r20.0<2>:ud   r21.0<4;4,1>:ud
+mov (4|M0)               r20.1<2>:ud   r41.1<4;4,1>:ud
+mov (4|M0)               r21.0<1>:ud   r45.1<4;4,1>:ud
+mov (1|M0)               r21.4<1>:ud   r45.5<0;1,0>:ud
+avg (16|M0)              r41.0<1>:uw   r45.0<16;16,1>:uw   r21.0<16;16,1>:uw
+add (16|M0)              r34.0<1>:uw   r45.0<16;16,1>:uw   r41.0<16;16,1>:uw
+shr (16|M0)              r34.0<1>:uw   r34.0<16;16,1>:uw   1:uw
+add (16|M0)              r42.0<1>:uw   r21.0<16;16,1>:uw   r41.0<16;16,1>:uw
+shr (16|M0)              r42.0<1>:uw   r42.0<16;16,1>:uw   1:uw
+mov (4|M0)               r36.0<2>:ud   r42.0<4;4,1>:ud
+mov (4|M0)               r36.1<2>:ud   r34.1<4;4,1>:ud
+mov (4|M0)               r45.0<1>:ud   r44.1<4;4,1>:ud
+mov (1|M0)               r45.4<1>:ud   r44.5<0;1,0>:ud
+avg (16|M0)              r43.0<1>:uw   r44.0<16;16,1>:uw   r45.0<16;16,1>:uw
+add (16|M0)              r42.0<1>:uw   r44.0<16;16,1>:uw   r43.0<16;16,1>:uw
+shr (16|M0)              r42.0<1>:uw   r42.0<16;16,1>:uw   1:uw
+add (16|M0)              r34.0<1>:uw   r45.0<16;16,1>:uw   r43.0<16;16,1>:uw
+shr (16|M0)              r34.0<1>:uw   r34.0<16;16,1>:uw   1:uw
+mov (4|M0)               r41.0<2>:ud   r34.0<4;4,1>:ud
+mov (4|M0)               r41.1<2>:ud   r42.1<4;4,1>:ud
+mov (4|M0)               r34.0<1>:ud   r46.1<4;4,1>:ud
+mov (1|M0)               r34.4<1>:ud   r46.5<0;1,0>:ud
+avg (16|M0)              r42.0<1>:uw   r46.0<16;16,1>:uw   r34.0<16;16,1>:uw
+add (16|M0)              r43.0<1>:uw   r46.0<16;16,1>:uw   r42.0<16;16,1>:uw
+shr (16|M0)              r43.0<1>:uw   r43.0<16;16,1>:uw   1:uw
+add (16|M0)              r45.0<1>:uw   r34.0<16;16,1>:uw   r42.0<16;16,1>:uw
+shr (16|M0)              r45.0<1>:uw   r45.0<16;16,1>:uw   1:uw
+mov (4|M0)               r21.0<2>:ud   r45.0<4;4,1>:ud
+mov (4|M0)               r21.1<2>:ud   r43.1<4;4,1>:ud
+mov (4|M0)               r46.0<1>:ud   r47.1<4;4,1>:ud
+mov (1|M0)               r46.4<1>:ud   r47.5<0;1,0>:ud
+avg (16|M0)              r44.0<1>:uw   r47.0<16;16,1>:uw   r46.0<16;16,1>:uw
+add (16|M0)              r45.0<1>:uw   r47.0<16;16,1>:uw   r44.0<16;16,1>:uw
+shr (16|M0)              r45.0<1>:uw   r45.0<16;16,1>:uw   1:uw
+add (16|M0)              r43.0<1>:uw   r46.0<16;16,1>:uw   r44.0<16;16,1>:uw
+shr (16|M0)              r43.0<1>:uw   r43.0<16;16,1>:uw   1:uw
+mov (4|M0)               r42.0<2>:ud   r43.0<4;4,1>:ud
+mov (4|M0)               r42.1<2>:ud   r45.1<4;4,1>:ud
+mov (4|M0)               r43.0<1>:ud   r48.1<4;4,1>:ud
+mov (1|M0)               r43.4<1>:ud   r48.5<0;1,0>:ud
+avg (16|M0)              r45.0<1>:uw   r48.0<16;16,1>:uw   r43.0<16;16,1>:uw
+add (16|M0)              r44.0<1>:uw   r48.0<16;16,1>:uw   r45.0<16;16,1>:uw
+shr (16|M0)              r44.0<1>:uw   r44.0<16;16,1>:uw   1:uw
+add (16|M0)              r46.0<1>:uw   r43.0<16;16,1>:uw   r45.0<16;16,1>:uw
+shr (16|M0)              r46.0<1>:uw   r46.0<16;16,1>:uw   1:uw
+mov (4|M0)               r34.0<2>:ud   r46.0<4;4,1>:ud
+mov (4|M0)               r34.1<2>:ud   r44.1<4;4,1>:ud
+// the grain put in and clamped, the bytes packed: the block in r5 to r12, after its header
+add (16|M0)              r32.0<1>:w    r32.0<16;16,1>:w   r120.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r32.0<1>:w    r32.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r32.0<1>:w    r32.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r31.0<1>:w    r31.0<16;16,1>:w   r121.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r31.0<1>:w    r31.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r31.0<1>:w    r31.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+or (8|M0)                r5.0<1>:ud   r32.0<8;8,1>:ud   r31.0<8;8,1>:ud
+add (16|M0)              r33.0<1>:w    r33.0<16;16,1>:w   r122.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r33.0<1>:w    r33.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r33.0<1>:w    r33.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r30.0<1>:w    r30.0<16;16,1>:w   r123.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r30.0<1>:w    r30.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r30.0<1>:w    r30.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r30.0<1>:ud   r30.0<8;8,1>:ud   8:ud
+or (8|M0)                r6.0<1>:ud   r33.0<8;8,1>:ud   r30.0<8;8,1>:ud
+add (16|M0)              r28.0<1>:w    r28.0<16;16,1>:w   r120.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r28.0<1>:w    r28.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r28.0<1>:w    r28.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r35.0<1>:w    r35.0<16;16,1>:w   r121.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r35.0<1>:w    r35.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r35.0<1>:w    r35.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r35.0<1>:ud   r35.0<8;8,1>:ud   8:ud
+or (8|M0)                r7.0<1>:ud   r28.0<8;8,1>:ud   r35.0<8;8,1>:ud
+add (16|M0)              r39.0<1>:w    r39.0<16;16,1>:w   r122.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r39.0<1>:w    r39.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r39.0<1>:w    r39.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r38.0<1>:w    r38.0<16;16,1>:w   r123.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r38.0<1>:w    r38.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r38.0<1>:w    r38.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r38.0<1>:ud   r38.0<8;8,1>:ud   8:ud
+or (8|M0)                r8.0<1>:ud   r39.0<8;8,1>:ud   r38.0<8;8,1>:ud
+add (16|M0)              r26.0<1>:w    r26.0<16;16,1>:w   r120.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r26.0<1>:w    r26.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r26.0<1>:w    r26.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r37.0<1>:w    r37.0<16;16,1>:w   r121.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r37.0<1>:w    r37.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r37.0<1>:w    r37.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r37.0<1>:ud   r37.0<8;8,1>:ud   8:ud
+or (8|M0)                r9.0<1>:ud   r26.0<8;8,1>:ud   r37.0<8;8,1>:ud
+add (16|M0)              r20.0<1>:w    r20.0<16;16,1>:w   r122.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r20.0<1>:w    r20.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r20.0<1>:w    r20.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r36.0<1>:w    r36.0<16;16,1>:w   r123.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r36.0<1>:w    r36.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r36.0<1>:w    r36.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r36.0<1>:ud   r36.0<8;8,1>:ud   8:ud
+or (8|M0)                r10.0<1>:ud   r20.0<8;8,1>:ud   r36.0<8;8,1>:ud
+add (16|M0)              r41.0<1>:w    r41.0<16;16,1>:w   r120.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r41.0<1>:w    r41.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r41.0<1>:w    r41.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r21.0<1>:w    r21.0<16;16,1>:w   r121.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r21.0<1>:w    r21.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r21.0<1>:w    r21.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r21.0<1>:ud   r21.0<8;8,1>:ud   8:ud
+or (8|M0)                r11.0<1>:ud   r41.0<8;8,1>:ud   r21.0<8;8,1>:ud
+add (16|M0)              r42.0<1>:w    r42.0<16;16,1>:w   r122.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r42.0<1>:w    r42.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r42.0<1>:w    r42.0<16;16,1>:w   0x00ff:w
+add (16|M0)              r34.0<1>:w    r34.0<16;16,1>:w   r123.0<16;16,1>:w
+sel (16|M0)  (ge)f0.0    r34.0<1>:w    r34.0<16;16,1>:w   0:w
+sel (16|M0)  (lt)f0.0    r34.0<1>:w    r34.0<16;16,1>:w   0x00ff:w
+shl (8|M0)               r34.0<1>:ud   r34.0<8;8,1>:ud   8:ud
+or (8|M0)                r12.0<1>:ud   r42.0<8;8,1>:ud   r34.0<8;8,1>:ud
+send (16|M0)             null:uw       r4:ud     0xC  0x120A8000     // the block written (entry 0): its header and eight rows
+// the next block: the small rows a pixel along, the header 32 bytes on
+mov (4|M0)               r17.0<1>:ud   r14.1<4;4,1>:ud
+mov (2|M0)               r17.4<1>:ud   r14.5<2;2,1>:ud
+mov (1|M0)               r17.6<1>:ud   r14.7<0;1,0>:ud
+mov (8|M0)               r14.0<1>:ud   r17.0<8;8,1>:ud
+mov (4|M0)               r17.0<1>:ud   r15.1<4;4,1>:ud
+mov (2|M0)               r17.4<1>:ud   r15.5<2;2,1>:ud
+mov (1|M0)               r17.6<1>:ud   r15.7<0;1,0>:ud
+mov (8|M0)               r15.0<1>:ud   r17.0<8;8,1>:ud
+mov (4|M0)               r17.0<1>:ud   r16.1<4;4,1>:ud
+mov (2|M0)               r17.4<1>:ud   r16.5<2;2,1>:ud
+mov (1|M0)               r17.6<1>:ud   r16.7<0;1,0>:ud
+mov (8|M0)               r16.0<1>:ud   r17.0<8;8,1>:ud
+add (1|M0)               r4.0<1>:ud    r4.0<0;1,0>:ud    32:ud
+add (1|M0)               r2.2<1>:ud    r2.2<0;1,0>:ud    1:ud
+cmp (16|M0)  (lt)f0.1    null:ud       r2.2<0;1,0>:ud    r2.3<0;1,0>:ud
+(W&f0.1) jmpi block
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

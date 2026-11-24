@@ -1598,20 +1598,40 @@ static int compositor_controls_near(unsigned int a, unsigned int b)
                db <= COMPOSITOR_CONTROLS_NEAR && db >= -COMPOSITOR_CONTROLS_NEAR;
 }
 
-// The pitch of a glass window's composed picture, in pixels: its width in whole 64-byte lines. The card finds a picture's row only where the row
-// begins on a line (i915's block reads: a row elsewhere in a line comes back in pieces from up to 15 pixels off, and a glass window composed at its
-// own width drew as a sawtooth on a Haswell), so the picture the scene reads is made with its rows on lines, whatever the window's width.
+// The pitch of a glass window's composed picture and of its ground, in pixels: whole 64-byte lines that hold the window's width and the blocks
+// the ground is made in (below: up to seven pixels before the window and seven after it). The card finds a picture's row only where the row begins
+// on a line (i915's block reads: a row elsewhere in a line comes back in pieces from up to 15 pixels off, and a glass window composed at its own
+// width drew as a sawtooth on a Haswell), so the pictures the scene reads are made with their rows on lines, whatever the window's width.
+#define COMPOSITOR_GLASS_PAD 14 // the pixels a ground has more than its window, each way: the blocks of 8 that hold the window's first and last
 static inline unsigned long compositor_glass_pitch(int row)
 {
-        return ((unsigned long)compositor.w[row] + 15) & ~15ul;
+        return ((unsigned long)compositor.w[row] + COMPOSITOR_GLASS_PAD + 15) & ~15ul;
 }
 
-// A glass row's ground: its backdrop risen to full size, tinted, with the grain, a picture as large as the composed one and kept after it
-// (compositor_glass_room). The program's picture laid over it is the window: the card lays it (the frame's glass_under and glass_over), and the
-// composed picture is made of the two only where the processor reads it (compositor_glass_settle, glass.c).
+/*
+        A glass row's ground: its backdrop risen to full size, tinted, with the grain. The program's picture laid over it is the window: the card
+        lays it (the frame's glass_under and glass_over), and the composed picture is made of the two only where the processor reads it
+        (compositor_glass_settle, glass.c). It is kept after the composed picture in the row's memory (compositor_glass_room), from the next 64 KiB
+        on (compositor_glass_ground_base), so the card's map of it, which the card writes, shares no page with its map of the composed picture, which
+        it reads. The ground is a picture of the output's blocks of 8 by 8 that the window meets, whole: the card raises it a block at a time
+        (gpu_rise), and a block is fixed to the output, so the picture begins at the block of the window's first pixel (up to 7 pixels and rows
+        before it) and compositor_glass_ground is where the window's first pixel is in it, the pitch compositor_glass_pitch.
+*/
+static inline unsigned int *compositor_glass_ground_base(int row)
+{
+        positive after = (positive)(compositor.composed[row] + compositor_glass_pitch(row) * (unsigned long)compositor.h[row]);
+
+        return compositor.composed[row] ? (unsigned int *)((after + 65535) & ~(positive)65535) : null;
+}
+static inline unsigned long compositor_glass_ground_bytes(int row)
+{
+        return compositor_glass_pitch(row) * ((unsigned long)compositor.h[row] + COMPOSITOR_GLASS_PAD + 2) * 4;
+}
 static inline unsigned int *compositor_glass_ground(int row)
 {
-        return compositor.composed[row] ? compositor.composed[row] + compositor_glass_pitch(row) * (unsigned long)compositor.h[row] : null;
+        unsigned int *base = compositor_glass_ground_base(row);
+
+        return base ? base + (unsigned long)(compositor.y[row] & 7) * compositor_glass_pitch(row) + (unsigned long)(compositor.x[row] & 7) : null;
 }
 static void compositor_glass_settle(int row);
 static void compositor_glass_settle_rect(int row, const int *c);

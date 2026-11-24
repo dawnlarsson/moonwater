@@ -542,6 +542,16 @@ static positive compositor_gpu_output(void)
         return compositor_gpu_state.out;
 }
 
+// A glass row's ground as the card has it: the card's address of its first byte (compositor_glass_ground_base), through a map the card writes,
+// made the first time it is asked for. 0 when the card cannot have it.
+static positive compositor_gpu_glass_ground_va(int row)
+{
+        unsigned int *base = compositor_glass_ground_base(row);
+        positive bytes = compositor_glass_ground_bytes(row);
+
+        return base ? gpu_host_va_written(base, bytes, bytes, 0) : 0;
+}
+
 // A frame's picture, wholly, reachable by the GPU: mapped the first time it is asked for.
 static int compositor_gpu_picture(const struct compositor_frame *f)
 {
@@ -549,13 +559,18 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
 
         if (f->builtin || f->width <= 0 || f->height <= 0) // no area: no picture to map
                 return 1;
-        if (f->glass_under) // glass: the program's picture, and the composed picture with the ground after it (one buffer: one map of both)
+        if (f->glass_under) // glass: the program's picture, the composed picture, and the ground kept after it from a 64 KiB of its own on (a map the card writes: it raises it)
         {
                 struct compositor_frame over = *f;
-                positive both = 8ull * f->pitch * (positive)f->height;
+                positive composed = 4ull * f->pitch * (positive)f->height;
+                int row = (int)f->row_plus1 - 1;
 
                 over.pixels = f->glass_over, over.pitch = f->glass_over_pitch, over.glass_under = 0, over.glass_over = 0, over.gpu_base = 0;
-                return compositor_gpu_picture(&over) && (gpu_va_bytes(f->pixels, both) || (gpu_map(f->pixels, both) && gpu_va_bytes(f->pixels, both)));
+                if (!compositor_gpu_picture(&over) || !(gpu_va_bytes(f->pixels, composed) || (gpu_map(f->pixels, composed) && gpu_va_bytes(f->pixels, composed))))
+                        return 0;
+                if (row < 0 || !compositor_glass_ground_base(row)) // (a frame of no row has its layers in one picture of its own: read where it is)
+                        return gpu_va_bytes(f->glass_under, composed) || (gpu_map(f->glass_under, composed) && gpu_va_bytes(f->glass_under, composed));
+                return compositor_gpu_glass_ground_va(row) != 0;
         }
         if (!f->pixels) // a frame with no picture is its line and corners only (a grid's border), and nothing to map
                 return 1;
@@ -1455,7 +1470,7 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
             compositor.width > 16384 || compositor.height > 16384)
                 return null;
         fw = (unsigned int)(compositor.width & ~3);
-        fpitch = ((unsigned int)compositor.width + 15u) & ~15u;
+        fpitch = ((unsigned int)compositor.width + 63u) & ~63u; // (whole threads of the halve: eight blocks of 8 pixels, compositor_gpu_frost_small)
         if (x0 < 0)
                 x0 = 0;
         if (y0 < 0)
@@ -1503,9 +1518,9 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
                         return g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0, null;
         }
         bytes = 4ull * (positive)fpitch * (positive)compositor.height;
-        if (compositor_gpu_frost_buf.bytes < (unsigned long)bytes)
+        if (compositor_gpu_frost_buf.bytes < (unsigned long)bytes + 4096)
         {
-                unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
+                unsigned long grown = ((unsigned long)bytes + 4096 + (1ul << 20) - 1) & ~((1ul << 20) - 1); // (a page past the last row: the halve's last thread reads on)
                 long memfd, mapped;
                 void *old = compositor_gpu_frost_buf.memory, *p = old;
 
@@ -1555,6 +1570,111 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
         }
         *pitch = (unsigned long)fpitch;
         return compositor_gpu_frost_buf.memory;
+}
+
+/*
+        Glass on the card, its two passes at full size (gpu.c's gpu_halve and gpu_rise, Intel's sets so far): what is left to the processor of a
+        glass window's backdrop is its small picture, a sixty-fourth of it (the blur, the tint, the mean the program is told), and the blocks the
+        screen's edge cuts.
+
+        compositor_gpu_frost_small: the small picture of what compositor_gpu_frost_scene just drew (the picture at fpitch pixels a row), the
+        blocks bx0, by0, bw by bh of the output, each wholly on the screen (the caller's), a pixel a block. Answers the pixel of block bx0, by0
+        and the pitch, in a buffer the card writes and the processor reads; null when the set has no halve or the card refuses (the processor
+        then halves the scene, as it did).
+
+        compositor_gpu_glass_rise: a row's ground raised from its small tinted picture over the blocks that hold the rectangle c of the output
+        (inside the window), with the grain. The small pixels it reads (the blocks and one round them) are copied to a picture on whole lines
+        first, a sixty-fourth of what is made. False when the set has no rise or the card refuses (the processor then raises the rectangle).
+        Both wait for their job (gpu_run), as the frost's scene does: the pass that makes a glass window's ground reads it at once (its corners,
+        a composed picture), and the present built after it reads it on the card.
+*/
+static struct
+{
+        unsigned int *memory;
+        unsigned long bytes;
+} compositor_gpu_small_buf, compositor_gpu_rise_buf;
+
+// Whether the card makes a glass window's backdrop: it is up and its set has the halve and the rise.
+static int compositor_gpu_glass_passes(void)
+{
+        return compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !compositor_gpu_held() && gpu_has(GPU_OP_HALVE) && gpu_has(GPU_OP_RISE);
+}
+
+static const unsigned int *compositor_gpu_frost_small(unsigned long fpitch, int bx0, int by0, int bw, int bh, unsigned long *pitch)
+{
+        int first = bx0 & ~1; // the source begins on a 64-byte line: a block is 32 bytes
+        unsigned int cols, sp;
+        positive bytes, src, dst;
+        const unsigned int *from;
+        b32 was_hold, ok;
+
+        if (bw <= 0 || bh <= 0 || bx0 < 0 || by0 < 0 || !compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held() ||
+            !gpu_has(GPU_OP_HALVE) || !gpu_idle() || compositor_card.on || !compositor_gpu_frost_buf.memory)
+                return null;
+        cols = (unsigned int)(bx0 + bw - first + 7) / 8, sp = (cols * 8 + 15) & ~15u;
+        if ((fpitch & 15) || 64ul * cols > fpitch)
+                return null;
+        bytes = 4ull * sp * (positive)bh;
+        if (!compositor_scratch(&compositor_gpu_small_buf.memory, &compositor_gpu_small_buf.bytes, (unsigned long)bytes + 4096))
+                return null;
+        from = compositor_gpu_frost_buf.memory + (unsigned long)by0 * 8 * fpitch + (unsigned long)first * 8;
+        if (!(dst = gpu_host_va_written(compositor_gpu_small_buf.memory, bytes, compositor_gpu_small_buf.bytes, 1)) ||
+            !(src = gpu_va_bytes(from, 4ull * (fpitch * (8ull * (positive)bh - 1) + 64ull * cols))))
+                return null;
+        was_hold = gpu_handed_hold, gpu_handed_hold = 1;
+        ok = gpu_halve(src, (unsigned int)fpitch, dst, sp, cols * 8, (unsigned int)bh);
+        gpu_handed_hold = was_hold;
+        if (!ok)
+        {
+                compositor_gpu_fail(0);
+                return null;
+        }
+        *pitch = sp;
+        return compositor_gpu_small_buf.memory + (bx0 - first);
+}
+
+static int compositor_gpu_glass_rise(int row, const int *c)
+{
+        const int *blocks = compositor.glass_blocks[row];
+        unsigned long pitch = compositor_glass_pitch(row);
+        int gx0 = compositor.x[row] & ~7, gy0 = compositor.y[row] & ~7; // the ground's first pixel: the block of the window's
+        int x0 = c[0] & ~7, y0 = c[1] & ~7, x1 = (c[2] + 7) & ~7, y1 = (c[3] + 7) & ~7, w, h;
+        unsigned int cols, sp;
+        positive ground, src;
+        b32 was_hold, ok;
+
+        if (c[2] <= c[0] || c[3] <= c[1] || !compositor.tinted[row] || !compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead ||
+            compositor_gpu_held() || !gpu_has(GPU_OP_RISE) || !gpu_idle() || compositor_card.on)
+                return 0;
+        if ((x0 - gx0) & 8) // the blocks' first byte on a 64-byte line of the ground: two blocks a line
+                x0 -= 8;
+        w = (x1 - x0) / 8, h = (y1 - y0) / 8;
+        // (the blocks are the window's, and the small picture has them and three round them: compositor_glass_room)
+        if (x0 < gx0 || y0 < gy0 || w <= 0 || h <= 0 || w > 512 || h > 2048 || (unsigned long)(x1 - gx0) > pitch || x0 / 8 - 1 < blocks[0] || y0 / 8 - 1 < blocks[1] ||
+            x1 / 8 + 1 > blocks[0] + blocks[2] || y1 / 8 + 1 > blocks[1] + blocks[3])
+                return 0;
+        cols = (unsigned int)(w + 5) / 6, sp = (6 * cols + 2 + 15) & ~15u;
+        if (!compositor_scratch(&compositor_gpu_rise_buf.memory, &compositor_gpu_rise_buf.bytes, 4ul * sp * (unsigned long)(h + 2) + 4096))
+                return 0;
+        for (int by = 0; by < h + 2; by++)
+                memory_copy(compositor_gpu_rise_buf.memory + (unsigned long)by * sp,
+                            compositor.tinted[row] + (long)(y0 / 8 - 1 + by - blocks[1]) * blocks[2] + (x0 / 8 - 1 - blocks[0]), (positive)(w + 2) * 4);
+        if (!(ground = compositor_gpu_glass_ground_va(row)))
+                return 0;
+        if (!gpu_va_bytes(compositor_gpu_rise_buf.memory, 4ull * sp * (positive)(h + 2)) && !gpu_map(compositor_gpu_rise_buf.memory, compositor_gpu_rise_buf.bytes))
+                return 0;
+        if (!(src = gpu_va_bytes(compositor_gpu_rise_buf.memory, 4ull * sp * (positive)(h + 2))))
+                return 0;
+        was_hold = gpu_handed_hold, gpu_handed_hold = 1;
+        ok = gpu_rise(src, sp, ground + 4ull * ((positive)(y0 - gy0) * pitch + (positive)(x0 - gx0)), (unsigned int)pitch, (unsigned int)w, (unsigned int)h,
+                      compositor.glass_side[row]);
+        gpu_handed_hold = was_hold;
+        if (!ok)
+        {
+                compositor_gpu_fail(0);
+                return 0;
+        }
+        return 1;
 }
 
 // The machine slept, or the card was found lost: it is started again before the next present draws on it (compositor_gpu_restart_check).
