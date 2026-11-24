@@ -10244,6 +10244,92 @@ static void test_sub_root_unmapped(void)
         wayland_stop();
 }
 
+/*
+        WXC-002: DMA-BUF buffers must enforce WAYLAND_POOLS_MAX (preventing unbounded mmap / vm.max_map_count and FD exhaustion),
+        and unconsumed zwp_linux_buffer_params_v1 objects must be capped per client so a client cannot hoard unbounded FDs.
+*/
+static void test_dmabuf_caps(void)
+{
+        struct session s;
+        struct wlc *c;
+        long made, shm_fill = WAYLAND_POOLS_MAX / 2, db_want = WAYLAND_POOLS_MAX - shm_fill;
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* 1. create_immed must stop at WAYLAND_POOLS_MAX live pools (fill half with shm pools so RLIMIT_NOFILE=1024 is never hit) */
+        session_open(&s);
+        c = s.c;
+        for (long i = 0; i < shm_fill && !c->errors; i++)
+        {
+                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1);
+
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pool, wl_file(4096, 0), 4096L);
+        }
+        WLCHECK(c->errors == 0, "dmabuf pool cap setup: %ld shm pools created", shm_fill);
+        made = 0;
+        for (long i = 0; i < db_want + 1 && !c->errors; i++)
+        {
+                unsigned long params = dmabuf_params(&s, dmabuf_file(4, 32, 2, 0), 0, 0, 32, 0);
+                unsigned long buf = wlc_id(c, WLI_wl_buffer, 1);
+
+                wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create_immed, buf, 4L, 2L, DRM_XRGB8888, 0L);
+                wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_destroy);
+                if (!c->errors)
+                        made++;
+        }
+        WLCHECK(c->errors != 0 && made == db_want,
+                "dmabuf create_immed is capped at WAYLAND_POOLS_MAX (%ld+%ld made, errors=%ld)", shm_fill, made, c->errors);
+        wlc_end(c);
+        leak_check("dmabuf pool cap immed");
+        WLCHECK(fds_balanced(), "dmabuf pool cap immed closes all fds (%ld %ld)", fake.fds_open, fake.fds_closed);
+
+        /* 2. async create must fail once WAYLAND_POOLS_MAX live pools are reached */
+        session_open(&s);
+        c = s.c;
+        for (long i = 0; i < shm_fill && !c->errors; i++)
+        {
+                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1);
+
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pool, wl_file(4096, 0), 4096L);
+        }
+        made = 0;
+        for (long i = 0; i < db_want + 1 && !c->errors; i++)
+        {
+                unsigned long params = dmabuf_params(&s, dmabuf_file(4, 32, 2, 0), 0, 0, 32, 0);
+
+                wlc_forget(c);
+                wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 4L, 2L, DRM_XRGB8888, 0L);
+                if (wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_created) == 1)
+                        made++;
+                wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_destroy);
+        }
+        WLCHECK(c->errors == 0 && made == db_want,
+                "dmabuf async create fails at WAYLAND_POOLS_MAX (%ld+%ld made, errors=%ld)", shm_fill, made, c->errors);
+        wlc_end(c);
+        leak_check("dmabuf pool cap async");
+        WLCHECK(fds_balanced(), "dmabuf pool cap async closes all fds (%ld %ld)", fake.fds_open, fake.fds_closed);
+
+        /* 3. unconsumed zwp_linux_buffer_params_v1 objects must be capped per client */
+        session_open(&s);
+        c = s.c;
+        made = 0;
+        for (long i = 0; i < 300 && !c->errors; i++)
+        {
+                (void)dmabuf_params(&s, dmabuf_file(4, 32, 2, 0), 0, 0, 32, 0);
+                if (!c->errors)
+                        made++;
+        }
+        WLCHECK(c->errors != 0 && c->error_code == WLN_wl_display_error_no_memory && made < 300,
+                "unconsumed zwp_linux_buffer_params_v1 is capped with no_memory (%ld made, errors=%ld, code=%lu)",
+                made, c->errors, c->error_code);
+        wlc_end(c);
+        leak_check("dmabuf params cap");
+        WLCHECK(fds_balanced(), "dmabuf params cap closes all fds (%ld %ld)", fake.fds_open, fake.fds_closed);
+
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -10304,6 +10390,7 @@ int main(int argc, char **argv)
         test_budget();
         test_stall_state();
         test_dmabuf();
+        test_dmabuf_caps();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
         test_ids_cap();

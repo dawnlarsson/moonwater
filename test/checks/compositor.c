@@ -65,6 +65,144 @@ static fn check_take(void)
         check("compositor: a window whose program has gone is off the screen and its row is free",
               !compositor.showing[2] && !compositor.stacked && compositor.focus == COMPOSITOR_NONE && !table_at->pid[2] &&
                   table_at->focus == WINDOWS);
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+        /*
+                WXC-001: An XWM peer must not be able to claim a PID owned by another UID (such as a UID 0
+                root process) via XResQueryClientIds, nor escalate _NET_CLOSE_WINDOW client messages into
+                the SIGTERM/SIGKILL path (close_asks >= 2).
+        */
+        {
+                unsigned char addr[110];
+                char sock_path[64];
+                unsigned int self_pid = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+                unsigned int self_uid = (unsigned int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
+                long srv = -1, cli = -1;
+                unsigned long plen;
+
+                string_copy((string_address)sock_path, (string_address) "/tmp/mw-xwm-wxc001-");
+                plen = string_length((string_address)sock_path);
+                plen += positive_into_string((string_address)sock_path + plen, (positive)self_pid);
+                sock_path[plen] = 0;
+
+                memory_zero(addr, sizeof addr);
+                addr[0] = 1; // AF_UNIX
+                memory_copy(addr + 2, sock_path, (positive)plen);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)sock_path, 0, 0, 0, 0);
+                srv = compositor_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0);
+                cli = compositor_call(syscall(socket), 1, 1 | 0x80000, 0, 0, 0, 0);
+                {
+                        int connected = srv >= 0 && cli >= 0 &&
+                                        compositor_call(syscall(bind), (positive)srv, (positive)addr, (positive)(2 + plen + 1), 0, 0, 0) == 0 &&
+                                        compositor_call(syscall(listen), (positive)srv, 2, 0, 0, 0, 0) == 0 &&
+                                        compositor_call(syscall(connect), (positive)cli, (positive)addr, (positive)(2 + plen + 1), 0, 0, 0) == 0;
+                        check("xwm WXC-001: test socket connected", connected);
+                        if (connected)
+                        {
+                                struct compositor_xwm *x = 0;
+                                struct compositor_xwm_window *w = 0;
+                                unsigned char reply[48];
+                                struct xwm_event ev;
+                                unsigned int target_pid = 2u; // kthreadd (UID 0 on Linux)
+
+                                compositor_zero();
+                                windows_scratch_zero(table_at);
+                                compositor.table = table_at;
+                                compositor.width = compositor.height = 256;
+                                compositor.scale = 100;
+                                compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+                                compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+                                compositor_xwm_listen_fd = (int)srv;
+                                compositor_xwm_uid = (int)self_uid;
+                                compositor_xwm_accept();
+                                for (int at = 0; at < COMPOSITOR_XWM_SLOTS && !x; at++)
+                                        if (compositor_xwm_slots[at].fd >= 0)
+                                                x = &compositor_xwm_slots[at];
+                                check("xwm WXC-001: simulated peer accepted via SO_PEERCRED", x != 0);
+                                if (x)
+                                {
+                                        x->ready = 1;
+                                        x->atoms[COMPOSITOR_XWM_A_NET_CLOSE] = 42u;
+                                        x->atoms[COMPOSITOR_XWM_A_DELETE] = 43u;
+                                        x->atoms[COMPOSITOR_XWM_A_PROTOCOLS] = 44u;
+                                        w = xwm_find(x, 0x100u, 1);
+                                        check("xwm WXC-001: window allocated", w != 0);
+                                        if (w)
+                                        {
+                                                unsigned char dummy_req[4] = {0, 0, 1, 0};
+
+                                                w->row = 2;
+                                                w->state = COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_ADOPTED;
+                                                w->protocols = COMPOSITOR_XWM_PROTO_DELETE;
+                                                compositor.showing[2] = 1;
+                                                table_at->pid[2] = 7777u;
+
+                                                // Queue a pending COMPOSITOR_XWM_PROP_OWNER and feed an XResQueryClientIds reply claiming UID-0 PID 2
+                                                compositor_xwm_wait(x, dummy_req, sizeof dummy_req, w->id, COMPOSITOR_XWM_PROP_OWNER, 0);
+                                                memory_zero(reply, sizeof reply);
+                                                reply[0] = XWM_REPLY;
+                                                reply[2] = (unsigned char)(x->seq & 0xffu);
+                                                reply[3] = (unsigned char)((x->seq >> 8) & 0xffu);
+                                                reply[4] = 4; // 4 units (16 bytes) after 32-byte header
+                                                reply[8] = 1; // num_ids = 1
+                                                reply[32 + 4] = XWM_XRES_LOCAL_CLIENT_PID;
+                                                reply[32 + 8] = 4; // length = 4 bytes
+                                                reply[32 + 12] = (unsigned char)(target_pid & 0xffu);
+                                                reply[32 + 13] = (unsigned char)((target_pid >> 8) & 0xffu);
+                                                reply[32 + 14] = (unsigned char)((target_pid >> 16) & 0xffu);
+                                                reply[32 + 15] = (unsigned char)((target_pid >> 24) & 0xffu);
+                                                compositor_xwm_message(x, reply, (long)sizeof reply, XWM_REPLY);
+
+                                                if (self_uid != 0)
+                                                {
+                                                        check("xwm WXC-001: non-root peer cannot spoof UID-0 PID via XResQueryClientIds",
+                                                              w->owner == 0 && table_at->pid[2] == 7777u);
+                                                }
+
+                                                // Positive check: a same-UID process (our parent) IS accepted and records owner_start
+                                                {
+                                                        unsigned int ppid = (unsigned int)compositor_call(syscall(getppid), 0, 0, 0, 0, 0, 0);
+                                                        if (ppid > 1 && ppid != self_pid && xwm_owner_uid_ok(x, ppid))
+                                                        {
+                                                                compositor_xwm_wait(x, dummy_req, sizeof dummy_req, w->id, COMPOSITOR_XWM_PROP_OWNER, 0);
+                                                                reply[2] = (unsigned char)(x->seq & 0xffu);
+                                                                reply[3] = (unsigned char)((x->seq >> 8) & 0xffu);
+                                                                reply[32 + 12] = (unsigned char)(ppid & 0xffu);
+                                                                reply[32 + 13] = (unsigned char)((ppid >> 8) & 0xffu);
+                                                                reply[32 + 14] = (unsigned char)((ppid >> 16) & 0xffu);
+                                                                reply[32 + 15] = (unsigned char)((ppid >> 24) & 0xffu);
+                                                                compositor_xwm_message(x, reply, (long)sizeof reply, XWM_REPLY);
+                                                                check("xwm WXC-001: same-UID PID is accepted and records owner_start",
+                                                                      w->owner == ppid && w->owner_start != 0 && table_at->pid[2] == ppid);
+                                                        }
+                                                }
+
+                                                // Send three _NET_CLOSE_WINDOW client messages and run xwm_window_turn after each
+                                                xwm_event_clear(&ev);
+                                                ev.kind = XWM_EV_CLIENT_MESSAGE;
+                                                ev.window = w->id;
+                                                ev.atom = x->atoms[COMPOSITOR_XWM_A_NET_CLOSE];
+                                                ev.format = XWM_FORMAT_32;
+                                                for (int k = 0; k < 3; k++)
+                                                {
+                                                        xwm_event(x, &ev);
+                                                        xwm_window_turn(x, w);
+                                                }
+                                                check("xwm WXC-001: repeated _NET_CLOSE_WINDOW cannot escalate close_asks to SIGTERM/SIGKILL",
+                                                      compositor.close_asks[2] <= 1 && w->closes <= 1);
+                                        }
+                                        xwm_drop(x, "wxc001 test done");
+                                }
+                                compositor_xwm_listen_fd = -1;
+                        }
+                }
+                if (cli >= 0)
+                        system_close((int)cli);
+                if (srv >= 0)
+                        system_close((int)srv);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)sock_path, 0, 0, 0, 0);
+        }
+#endif
 }
 
 /*

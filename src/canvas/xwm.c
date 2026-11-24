@@ -163,6 +163,7 @@ struct compositor_xwm_window
 {
         unsigned int id, state, protocols, transient, owner, asking, dirty;
         unsigned long long serial, sync_present;
+        unsigned long owner_start;
         int row, x, y, sent_x, sent_y;
         unsigned int width, height, sent_w, sent_h, restore_w, restore_h, min_w, min_h, max_w, max_h;
         unsigned char closes, placed, no_input;
@@ -228,7 +229,7 @@ struct compositor_xwm_xdrag
 
 struct compositor_xwm
 {
-        int fd, ready, broken, claimed, composite, peer_pid, poll_at, focus_row;
+        int fd, ready, broken, claimed, composite, peer_pid, peer_uid, poll_at, focus_row;
         unsigned int xtest, xres, resource_base, resource_mask, root, seq, atoms[COMPOSITOR_XWM_ATOMS];
         unsigned int atoms_seen, refused, errors, last_stack_gen, focus_window;
         unsigned int pending_at, pending_count, pending_room, xfixes_opcode, xfixes_event, setting, next_requestor;
@@ -258,7 +259,7 @@ struct compositor_xwm
 };
 struct compositor_xwm_bound { long at; unsigned int id; };
 
-#define COMPOSITOR_XWM_FRESH {.fd = -1, .poll_at = -1, .focus_row = -2, .client = -1, .client_pid = -1, .walk_all = 1, \
+#define COMPOSITOR_XWM_FRESH {.fd = -1, .peer_uid = -1, .poll_at = -1, .focus_row = -2, .client = -1, .client_pid = -1, .walk_all = 1, \
                               .sel = {{0, 0, 0, 0, 0, -1}, {0, 0, 0, 0, 0, -1}, {0, 0, 0, 0, 0, -1}}, \
                               .xdrag = {.proxy_row = -1}}
 static const struct compositor_xwm compositor_xwm_fresh = COMPOSITOR_XWM_FRESH;
@@ -522,6 +523,59 @@ static void compositor_xwm_origin(int *ox, int *oy)
 
 static int compositor_xwm_to_x(int place, int vertical) { int ox, oy; compositor_xwm_origin(&ox, &oy); return place - (vertical ? oy : ox); }
 static int compositor_xwm_from_x(int place, int vertical) { int ox, oy; compositor_xwm_origin(&ox, &oy); return place + (vertical ? oy : ox); }
+
+/* Verify that target `pid` belongs to the XWM peer's UID (real, effective, saved, and fs UIDs) via /proc/<pid>/status. */
+static int xwm_owner_uid_ok(const struct compositor_xwm *x, unsigned int pid)
+{
+        char path[48] = "/proc/", buf[1024];
+        long fd, got;
+
+        if (!x || x->peer_uid < 0 || pid <= 1 || pid > 0x7fffffffu)
+                return 0;
+        positive_into_string((p8 *)path + 6, (positive)pid);
+        string_append_bounded((p8 *)path, "/status", sizeof path);
+        fd = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0)
+                return 0;
+        got = compositor_call(syscall(read), (positive)fd, (positive)buf, sizeof buf - 1, 0, 0, 0);
+        system_close((int)fd);
+        if (got <= 0)
+                return 0;
+        buf[got] = 0;
+        for (long at = 0; at + 4 < got; at++)
+        {
+                if ((at == 0 || buf[at - 1] == '\n') &&
+                    buf[at] == 'U' && buf[at + 1] == 'i' && buf[at + 2] == 'd' && buf[at + 3] == ':')
+                {
+                        unsigned int uids[4] = {0, 0, 0, 0};
+                        long p = at + 4;
+                        int count = 0;
+
+                        while (count < 4 && p < got && buf[p] != '\n')
+                        {
+                                while (p < got && (buf[p] == ' ' || buf[p] == '\t'))
+                                        p++;
+                                if (p >= got || buf[p] < '0' || buf[p] > '9')
+                                        return 0;
+                                unsigned long val = 0;
+                                while (p < got && buf[p] >= '0' && buf[p] <= '9')
+                                {
+                                        val = val * 10 + (unsigned long)(buf[p++] - '0');
+                                        if (val > 0xfffffffful)
+                                                return 0;
+                                }
+                                uids[count++] = (unsigned int)val;
+                        }
+                        if (count < 4)
+                                return 0;
+                        if (x->peer_uid != 0 && (uids[0] == 0 || uids[1] == 0 || uids[2] == 0 || uids[3] == 0))
+                                return 0;
+                        return uids[0] == (unsigned int)x->peer_uid && uids[1] == (unsigned int)x->peer_uid &&
+                               uids[2] == (unsigned int)x->peer_uid && uids[3] == (unsigned int)x->peer_uid;
+                }
+        }
+        return 0;
+}
 
 static void compositor_xwm_owned(struct compositor_xwm_window *w)
 {
@@ -3460,7 +3514,8 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_CLOSE])
                 {
-                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w))
+                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w) &&
+                            !(compositor.state[w->row] & WINDOW_CLOSING) && !compositor.close_asks[w->row])
                                 compositor_close(w->row);
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_CHANGE_STATE] && e->format == XWM_FORMAT_32 &&
@@ -3533,12 +3588,17 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                 else if (found.what == COMPOSITOR_XWM_PROP_OWNER)
                 {
                         struct compositor_xwm_window *w = xwm_find(x, found.window, 0);
-                        unsigned int pid = 0;
+                        unsigned int pid = 0, parent = 0;
                         if (xwm_parse_xres_client_pid(in, (unsigned long)size, &pid) != XWM_OK)
                                 x->broken = 1;
                         else if (w && pid > 1 && pid <= 0x7fffffffu && pid != (unsigned int)x->peer_pid &&
-                                 pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
-                                w->owner = pid, compositor_xwm_owned(w);
+                                 pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0) &&
+                                 xwm_owner_uid_ok(x, pid))
+                        {
+                                unsigned long start = windows_proc_stat(pid, &parent);
+                                if (start && xwm_owner_uid_ok(x, pid))
+                                        w->owner = pid, w->owner_start = start, compositor_xwm_owned(w);
+                        }
                 }
                 else if (found.what == COMPOSITOR_XWM_PROP_INTERN)
                         xwm_interned(x, in, size, &found);
@@ -3738,6 +3798,7 @@ static void xwm_drop(struct compositor_xwm *x, const char *why)
                 memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
         compositor_xwm_close_rows(x);
         x->ready = x->broken = x->claimed = x->composite = 0;
+        x->peer_pid = 0, x->peer_uid = -1;
         x->in_len = x->out_len = 0, x->seq = x->atoms_seen = 0;
         memory_zero(x->atoms, sizeof x->atoms);
 }
@@ -3772,7 +3833,7 @@ static void compositor_xwm_accept(void)
                 return;
         }
         *x = compositor_xwm_fresh;
-        x->fd = (int)fd, x->peer_pid = credentials[0], x->since = clock_monotonic_nanoseconds();
+        x->fd = (int)fd, x->peer_pid = credentials[0], x->peer_uid = credentials[1], x->since = clock_monotonic_nanoseconds();
         if ((n = xwm_enc_setup_request(setup, sizeof setup)) > 0)
                 memory_copy(x->out, setup, (positive)n), x->out_len = n;
         compositor_xwm_log("xwm: connected\n"), log_flush();
@@ -3913,8 +3974,12 @@ static void xwm_window_turn(struct compositor_xwm *x, struct compositor_xwm_wind
                 else
                 {
                         compositor_xwm_window_op(x, XWM_OP_DESTROY_WINDOW, w->id);
-                        if (w->closes >= 2 && w->owner > 1 && w->owner <= 0x7fffffffu)
-                                compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
+                        if (w->closes >= 2 && w->owner > 1 && w->owner <= 0x7fffffffu && w->owner_start)
+                        {
+                                unsigned int parent = 0;
+                                if (windows_proc_stat(w->owner, &parent) == w->owner_start && xwm_owner_uid_ok(x, w->owner))
+                                        compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
+                        }
                 }
         }
         if (!compositor_xwm_is_popup(w))

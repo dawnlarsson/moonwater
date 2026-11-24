@@ -1692,6 +1692,33 @@ static bipolar audit_refuse_randomness(void)
         return system_call_3(syscall(seccomp), 1, 0,
                              (positive)address_of program);
 }
+
+static bool audit_bash_script_passes(string_address script,
+                                     positive address_to raw_out)
+{
+        bipolar child = system_fork();
+        positive raw = 0;
+
+        if (child < 0)
+                return false;
+        if (child == 0)
+        {
+                shell_argv = null;
+                shell_argv_room = 0;
+                shell_argc = 0;
+                shell_bash_compat = true;
+                shell_dash_compat = false;
+                shell_status = 0;
+                exec_run_nested(script, true, 0);
+                system_call_1(syscall(exit_group), shell_status);
+        }
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child)
+                return false;
+        if (raw_out)
+                address_to raw_out = raw;
+        return raw == 0;
+}
+
 b32 main(void)
 {
         string_address arguments[8] = {0};
@@ -2146,6 +2173,86 @@ b32 main(void)
                         system_close((positive)slave);
                         system_close((positive)master);
                 }
+        }
+
+        /* Security regressions for shell core (SHELL-001, SHELL-002,
+           SHELL-004, SHELL-005, SHELL-006). Each runs in a forked bash-mode
+           child so stack corruption or crashes are caught cleanly. */
+        {
+                positive raw = 0;
+
+                check("SHELL-001: compgen -F isolates shell_argv_room from stack buffer",
+                      audit_bash_script_passes(
+                          (string_address)
+                          ": init; "
+                          "f() { : $1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 "
+                          "17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 "
+                          "33 34 35 36 37 38 39 40; COMPREPLY=(ok); }; "
+                          "out=$(compgen -F f x 2>/dev/null); "
+                          "[ \"$out\" = ok ]",
+                          address_of raw));
+
+                check("SHELL-002: positional slice re-reads live parameter count after bounds eval",
+                      audit_bash_script_passes(
+                          (string_address)
+                          "set -- a b c d e; "
+                          "r1=\"${@:1:${ set --; echo 5; }}\"; "
+                          "[ -z \"$r1\" ] || exit 1; "
+                          "set -- a b c d e; "
+                          "big=$(printf '%070000d' 0); "
+                          "r2=\"${@:3:${ set -- \"$big\"; echo 2; }}\"; "
+                          "[ -z \"$r2\" ] || exit 2",
+                          address_of raw));
+
+                check("SHELL-004: read -a through nameref copies target name before mutating",
+                      audit_bash_script_passes(
+                          (string_address)
+                          "declare -a arr=(x); declare -n ref=arr; "
+                          "read -a ref <<< "
+                          "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbb ccc\"; "
+                          "[ \"${arr[2]}\" = ccc ] && [ -z \"${bbb[2]}\" ]",
+                          address_of raw));
+
+                check("SHELL-005: nameref element unset snapshots target across subscript expansion",
+                      audit_bash_script_passes(
+                          (string_address)
+                          "a=(a0 a1); b=(b0 b1); "
+                          "declare -n ref='a[${ unset -n ref; "
+                          "x=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"; "
+                          "echo 0; }]'; "
+                          "unset ref; "
+                          "[ -z \"${a[0]}\" ] && [ \"${a[1]}\" = a1 ] && [ \"${b[0]}\" = b0 ]",
+                          address_of raw));
+
+                check("SHELL-005: nameref element read snapshots target across subscript expansion",
+                      audit_bash_script_passes(
+                          (string_address)
+                          "a=(a0 a1); b=(b0 b1); "
+                          "declare -n ref='a[${ unset -n ref; "
+                          "x=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"; "
+                          "echo 0; }]'; "
+                          "val=$ref; "
+                          "[ \"$val\" = a0 ]",
+                          address_of raw));
+
+                check("SHELL-006: nested read via subscript funsub isolates outer read state",
+                      audit_bash_script_passes(
+                          (string_address)
+                          "read 'a[${ read y <<< \"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"; echo 0; }]' b "
+                          "<<< \"first_field_long second_field\"; "
+                          "[ \"${a[0]}\" = first_field_long ] && "
+                          "[ \"$b\" = second_field ] && "
+                          "[ \"$y\" = zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz ]",
+                          address_of raw));
+
+                check("SHELL-006: nested printf via %%n subscript funsub isolates outer printf state",
+                      audit_bash_script_passes(
+                          (string_address)
+                          "printf -v out '%s %n %s' hello "
+                          "'a[${ printf -v inner \"X\"; echo 0; }]' world; "
+                          "[ \"$out\" = \"hello  world\" ] && "
+                          "[ \"$inner\" = X ] && [ \"${a[0]}\" = 6 ]",
+                          address_of raw));
         }
 
         return test_report(null);

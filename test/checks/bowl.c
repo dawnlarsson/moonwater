@@ -1520,12 +1520,14 @@ static fn steam_profile(void)
                 check("The session turns the Canvas Vulkan layer on, behind its workaround switch, when the bowl holds it, a game's own MOONWATER_WSI kept, before Steam starts",
                       wsi && wsi < wrapped && wsi < run &&
                           strstr(steam->session[wsi - 1], "wa canvas-wsi && [ -r " BOWL_ROOT_PREFIX "arch/usr/lib/libVkLayer_MOONWATER_canvas.so ] && "));
+#if X64
                 check("Each architecture's manifest names its own library by its path, under a layer name of its own, enabled by MOONWATER_WSI=1 and off by MOONWATER_WSI_OFF",
                       strstr(bowl_canvas_wsi_json_64, "\"library_path\": \"/usr/lib/libVkLayer_MOONWATER_canvas.so\"") &&
                           strstr(bowl_canvas_wsi_json_32, "\"library_path\": \"/usr/lib32/libVkLayer_MOONWATER_canvas.so\"") &&
                           strstr(bowl_canvas_wsi_json_64, "VK_LAYER_MOONWATER_canvas_x86_64") && strstr(bowl_canvas_wsi_json_32, "VK_LAYER_MOONWATER_canvas_i686") &&
                           strstr(bowl_canvas_wsi_json_64, "\"enable_environment\": {\"MOONWATER_WSI\": \"1\"}") &&
                           strstr(bowl_canvas_wsi_json_32, "\"disable_environment\": {\"MOONWATER_WSI_OFF\": \"1\"}"));
+#endif
         }
         {
                 const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
@@ -4676,10 +4678,340 @@ static fn prewarm_rows(void)
                   bowl_prewarm_common((const p8 *)"/a/steamapps/common/Game", 24) == 24 && bowl_prewarm_common((const p8 *)"/a/b/c", 6) == 0);
 }
 
+static fn security_remediation_rows(void)
+{
+        positive self = (positive)system_call_1(syscall(getpid), 0);
+
+        /* BOWL-001: bowl_extract_nix must not follow a symlink /store to chmod host files. */
+        {
+                static const p8 script[] =
+                    "#!/bin/sh\n"
+                    "nix=\"/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nix-9.9\"\n"
+                    "cacert=\"/nix/store/zyxwvsrqpnmlkjihgfdcba9876543210-nss-cacert-1.0\"\n";
+                static string_address members[] = {
+                    "nix-sym/install", "nix-sym/.reginfo", "nix-sym/store", null};
+                p8 victim[128] = "/tmp/moonwater-bowl-check-nix-victim-";
+                p8 base[256], root[256], archive[256], linkpath[256];
+                positive vlen = string_length((string_address)victim);
+                bipolar vfd;
+
+                vlen += positive_into_string((string_address)victim + vlen, self);
+                victim[vlen] = 0;
+                system_remove_at(AT_FDCWD, (string_address)victim, 0);
+                vfd = system_open_at_mode(AT_FDCWD, (string_address)victim,
+                                          FILE_WRITE | FILE_CREATE | FILE_TRUNCATE | O_CLOEXEC, 0600);
+                if (vfd >= 0)
+                {
+                        system_call_2(syscall(fchmod), (positive)vfd, 0600);
+                        system_close(vfd);
+                }
+
+                unpack_path(base, "nixsymwork", "");
+                unpack_path(root, "nixsymroot", "");
+                bowl_forget_path(base);
+                bowl_forget_path(root);
+                unpack_directory(base, "/nix-sym");
+                string_copy_bounded(archive, base, sizeof archive);
+                string_append_bounded(archive, "/sym.tar", sizeof archive);
+                string_copy_bounded(linkpath, base, sizeof linkpath);
+                string_append_bounded(linkpath, "/nix-sym/store", sizeof linkpath);
+                system_remove_at(AT_FDCWD, (string_address)linkpath, 0);
+                p8 made = vfd >= 0 &&
+                            unpack_write(base, "/nix-sym/install", script, 0755) &&
+                            unpack_write(base, "/nix-sym/.reginfo", "registered\n", 0644) &&
+                            system_symbolic_link_at((string_address)victim, AT_FDCWD, (string_address)linkpath) == 0 &&
+                            unpack_tar(archive, base, false, members);
+                b32 landed = 0;
+                if (made)
+                {
+                        bowl_quiet = true;
+                        landed = bowl_land(archive, root, "/nix/.reginfo", bowl_extract_nix);
+                        bowl_quiet = false;
+                }
+                positive victim_mode = unpack_mode((string_address)victim, "");
+                check("BOWL-001: bowl_extract_nix rejects symlink /store and does not chmod host target",
+                      made && landed != 0 && victim_mode == 0600);
+                system_remove_at(AT_FDCWD, (string_address)victim, 0);
+                bowl_forget_path(base);
+                bowl_forget_path(root);
+        }
+
+        /* BOWL-002: bowl_accounts_add must reject non-canonical UID 0 / 1000 spellings, CR, and NUL. */
+        {
+                static const char host[] =
+                    "root:x:0:0:root:/root:/bin/sh\n"
+                    "user:x:1000:1000:user:/root:/bin/sh\n";
+                static const char evil[] =
+                    "evil0:x:00:0::/root:/bin/sh\n"
+                    "evil1000:x:01000:1000::/:/bin/sh\n"
+                    "plus0:x:+0:0::/:/bin/sh\n"
+                    "wrap0:x:4294967296:0::/:/bin/sh\n"
+                    "cruser:x:200:200::/:/bin/sh\r\n";
+                static const p8 nul_line[] = "nuluser:x:201:201:\0:/:/bin/sh\n";
+                static const char good[] = "polkitd:x:102:102::/:/sbin/nologin\n";
+                p8 text[512];
+                positive init_used = sizeof(host) - 1;
+                positive after_evil, after_nul, after_good;
+
+                memory_copy(text, host, init_used);
+                after_evil = bowl_accounts_add(text, init_used, sizeof text,
+                                               (string_address)evil, sizeof(evil) - 1, "guest");
+                after_nul = bowl_accounts_add(text, init_used, sizeof text,
+                                              (string_address)nul_line, sizeof(nul_line) - 1, "guest");
+                after_good = bowl_accounts_add(text, init_used, sizeof text,
+                                               (string_address)good, sizeof(good) - 1, "guest");
+                check("BOWL-002: bowl_accounts_add rejects non-canonical UID 0/1000, overflow, CR, and NUL",
+                      after_evil == init_used && after_nul == init_used && after_good > init_used);
+        }
+
+        /* BOWL-003: bowl_prewarm must reject '..' traversal, intermediate symlinks, deep recursion, and FIFOs. */
+        {
+                p8 base[128] = "/tmp/moonwater-bowl-check-prewarm-sec-";
+                p8 proc[192], proc_pid[224], path[512], line[1024];
+                positive blen = string_length((string_address)base);
+                positive seen_dotdot, seen_sym, seen_deep;
+
+                blen += positive_into_string((string_address)base + blen, self);
+                base[blen] = 0;
+                bowl_forget_path((string_address)base);
+                system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)base, 0700);
+
+                bowl_root_path(proc, sizeof proc, (string_address)base, "/proc");
+                system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)proc, 0700);
+                memory_copy(proc_pid, proc, string_length((string_address)proc));
+                positive plen = string_length((string_address)proc);
+                proc_pid[plen++] = '/';
+                plen += positive_into_string((string_address)proc_pid + plen, self);
+                proc_pid[plen] = 0;
+                system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)proc_pid, 0700);
+                bowl_root_path(path, sizeof path, (string_address)proc_pid, "/root");
+                system_call_3(syscall(symlinkat), (positive)"/", (positive)AT_FDCWD, (positive)path);
+
+                /* Subcase A: '..' traversal out of steamapps/common/ */
+                prewarm_tree_file((string_address)base, "/lib1/steamapps/secret", 200);
+                prewarm_tree_file((string_address)base, "/lib1/steamapps/common/placeholder", 10);
+                {
+                        positive sz = 0;
+                        static const char prefix[] = "reaper\0SteamLaunch\0AppId=1\0";
+                        static const char suffix[] = "/lib1/steamapps/common/..";
+
+                        memory_copy(line + sz, prefix, sizeof(prefix) - 1);
+                        sz += sizeof(prefix) - 1;
+                        memory_copy(line + sz, base, blen);
+                        sz += blen;
+                        memory_copy(line + sz, suffix, sizeof(suffix));
+                        sz += sizeof(suffix);
+                        bowl_root_path(path, sizeof path, (string_address)proc_pid, "/cmdline");
+                        shaders_file((string_address)path, (const char *)line, sz);
+                }
+                seen_dotdot = bowl_prewarm_launch((string_address)proc, self, 1);
+
+                /* Subcase B: intermediate symlink steamapps/common -> outside */
+                prewarm_tree_file((string_address)base, "/outside/Game/game.exe", 300);
+                prewarm_tree_file((string_address)base, "/lib2/steamapps/marker", 10);
+                {
+                        p8 target[256];
+                        bowl_root_path(target, sizeof target, (string_address)base, "/outside");
+                        bowl_root_path(path, sizeof path, (string_address)base, "/lib2/steamapps/common");
+                        system_call_3(syscall(symlinkat), (positive)target, (positive)AT_FDCWD, (positive)path);
+
+                        positive sz = 0;
+                        static const char prefix[] = "reaper\0SteamLaunch\0AppId=2\0";
+                        static const char suffix[] = "/lib2/steamapps/common/Game/game.exe";
+
+                        memory_copy(line + sz, prefix, sizeof(prefix) - 1);
+                        sz += sizeof(prefix) - 1;
+                        memory_copy(line + sz, base, blen);
+                        sz += blen;
+                        memory_copy(line + sz, suffix, sizeof(suffix));
+                        sz += sizeof(suffix);
+                        bowl_root_path(path, sizeof path, (string_address)proc_pid, "/cmdline");
+                        shaders_file((string_address)path, (const char *)line, sz);
+                }
+                seen_sym = bowl_prewarm_launch((string_address)proc, self, 2);
+
+                /* Subcase C: deep recursion > 32 levels */
+                {
+                        p8 deep_leaf[256] = "/lib3/steamapps/common/Deep";
+                        positive dlen = string_length((string_address)deep_leaf);
+                        for (positive lvl = 0; lvl < 40; lvl++)
+                        {
+                                deep_leaf[dlen++] = '/';
+                                deep_leaf[dlen++] = 'd';
+                        }
+                        memory_copy(deep_leaf + dlen, "/deep.bin", sizeof("/deep.bin"));
+                        prewarm_tree_file((string_address)base, (string_address)deep_leaf, 400);
+
+                        positive sz = 0;
+                        static const char prefix[] = "reaper\0SteamLaunch\0AppId=3\0";
+                        static const char suffix[] = "/lib3/steamapps/common/Deep/entry";
+
+                        memory_copy(line + sz, prefix, sizeof(prefix) - 1);
+                        sz += sizeof(prefix) - 1;
+                        memory_copy(line + sz, base, blen);
+                        sz += blen;
+                        memory_copy(line + sz, suffix, sizeof(suffix));
+                        sz += sizeof(suffix);
+                        bowl_root_path(path, sizeof path, (string_address)proc_pid, "/cmdline");
+                        shaders_file((string_address)path, (const char *)line, sz);
+                }
+                seen_deep = bowl_prewarm_launch((string_address)proc, self, 3);
+
+                /* Subcase D: FIFO must not block bowl_prewarm_file */
+                p8 fifo_ok = false;
+                {
+                        p8 fdir[256], fpath[256];
+                        bowl_root_path(fdir, sizeof fdir, (string_address)base, "/fifodir");
+                        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)fdir, 0700);
+                        bowl_root_path(fpath, sizeof fpath, (string_address)fdir, "/pipe");
+                        if (system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)fpath, 0010600, 0) == 0)
+                        {
+                                bipolar dirfd = system_open_at(AT_FDCWD, (string_address)fdir, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                                if (dirfd >= 0)
+                                {
+                                        bipolar child = system_fork();
+                                        if (child == 0)
+                                        {
+                                                struct bowl_prewarm w;
+                                                memory_fill(address_of w, 0, sizeof w);
+                                                w.reaper = self;
+                                                w.budget = 1 << 20;
+                                                bowl_prewarm_file(address_of w, dirfd, "pipe");
+                                                exit(0);
+                                        }
+                                        if (child > 0)
+                                        {
+                                                positive status = 0;
+                                                for (positive tries = 0; tries < 25; tries++)
+                                                {
+                                                        bipolar got = system_call_4(syscall(wait4), (positive)child,
+                                                                                    (positive)address_of status, 1 /* WNOHANG */, 0);
+                                                        if (got == child)
+                                                        {
+                                                                fifo_ok = !wait_status_code(status);
+                                                                break;
+                                                        }
+                                                        struct { bipolar sec; bipolar nsec; } ts = {0, 10000000};
+                                                        system_call_2(syscall(nanosleep), (positive)address_of ts, 0);
+                                                }
+                                                if (!fifo_ok)
+                                                {
+                                                        system_call_2(syscall(kill), (positive)child, 9);
+                                                        system_wait4_retry(child, address_of status, 0, null);
+                                                }
+                                        }
+                                        system_close(dirfd);
+                                }
+                        }
+                }
+
+                check("BOWL-003: bowl_prewarm refuses '..', intermediate symlinks, deep recursion, and FIFO blocking",
+                      seen_dotdot == 0 && seen_sym == 0 && seen_deep == 0 && fifo_ok);
+                bowl_forget_path((string_address)base);
+        }
+
+        /* BOWL-004: bowl_guest_install must pin dirfd and reject paths escaping directory_path. */
+        {
+                static const struct bowl_component comps[] = {{"arch", null, 0, null}, {null, null, 0, null}};
+                struct bowl_profile prof;
+                p8 host_dir[128] = "/tmp/moonwater-bowl-check-install-host-";
+                p8 pwn1[192], pwn2[192], sym1[256], sym2[256], good[256];
+                positive hlen = string_length((string_address)host_dir);
+                const struct bowl_distro address_to arch = bowl_find_distro("arch");
+                p8 had_arch = arch && bowl_has(arch->root, arch->marker);
+
+                memory_fill(address_of prof, 0, sizeof prof);
+                prof.components = comps;
+
+                hlen += positive_into_string((string_address)host_dir + hlen, self);
+                host_dir[hlen] = 0;
+                bowl_forget_path((string_address)host_dir);
+                system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)host_dir, 0700);
+
+                if (arch)
+                {
+                        if (!had_arch)
+                        {
+                                unpack_directory(arch->root, "/usr/bin");
+                                unpack_write(arch->root, "/usr/bin/pacman", "#!/bin/sh\n", 0755);
+                        }
+                        unpack_directory(arch->root, "/sec_real_dir");
+                        bowl_root_path(sym1, sizeof sym1, arch->root, "/sec_sym_escape");
+                        bowl_root_path(sym2, sizeof sym2, arch->root, "/sec_sym_dir");
+                        system_remove_at(AT_FDCWD, (string_address)sym1, 0);
+                        system_remove_at(AT_FDCWD, (string_address)sym2, 0);
+                        system_symbolic_link_at((string_address)host_dir, AT_FDCWD, (string_address)sym1);
+                        system_symbolic_link_at((string_address)host_dir, AT_FDCWD, (string_address)sym2);
+
+                        bowl_guest_install(address_of prof, "/sec_real_dir", "/sec_sym_escape/pwn1",
+                                           (const p8 address_to)"evil", 4, 0, null, 0);
+                        bowl_guest_install(address_of prof, "/sec_sym_dir", "/sec_sym_dir/pwn2",
+                                           (const p8 address_to)"evil", 4, 0, null, 0);
+                        bowl_guest_install(address_of prof, "/sec_real_dir", "/sec_real_dir/good.so",
+                                           (const p8 address_to)"ok", 2, 0, null, 0);
+
+                        bowl_root_path(pwn1, sizeof pwn1, (string_address)host_dir, "/pwn1");
+                        bowl_root_path(pwn2, sizeof pwn2, (string_address)host_dir, "/pwn2");
+                        bowl_root_path(good, sizeof good, arch->root, "/sec_real_dir/good.so");
+
+                        check("BOWL-004: bowl_guest_install anchors to pinned dirfd and rejects symlink escape",
+                              system_access_at(AT_FDCWD, (string_address)pwn1, 0) < 0 &&
+                                  system_access_at(AT_FDCWD, (string_address)pwn2, 0) < 0 &&
+                                  system_access_at(AT_FDCWD, (string_address)good, 0) == 0 &&
+                                  unpack_mode(arch->root, "/sec_real_dir/good.so") == 0755);
+
+                        system_remove_at(AT_FDCWD, (string_address)sym1, 0);
+                        system_remove_at(AT_FDCWD, (string_address)sym2, 0);
+                        bowl_root_path(sym1, sizeof sym1, arch->root, "/sec_real_dir");
+                        bowl_forget_path((string_address)sym1);
+                        if (!had_arch)
+                                bowl_forget_path(arch->root);
+                }
+                bowl_forget_path((string_address)host_dir);
+        }
+
+        /* BOWL-005: bowl_graphics_stamp, bowl_profile_held, and bowl_profile_expose_dir must not follow symlinks out of root. */
+        {
+                p8 host_dir[128] = "/tmp/moonwater-bowl-check-escape-host-";
+                p8 root[256], path[256], stamp[256];
+                positive hlen = string_length((string_address)host_dir);
+                static string_address pkgs[] = {"mesa", null};
+                bool held[2] = {false, false};
+
+                hlen += positive_into_string((string_address)host_dir + hlen, self);
+                host_dir[hlen] = 0;
+                bowl_forget_path((string_address)host_dir);
+                unpack_directory((string_address)host_dir, "/mesa-24.0-1");
+                unpack_write((string_address)host_dir, "/escapeprog", "#!/bin/sh\n", 0755);
+
+                unpack_path(root, "symescape", "");
+                bowl_forget_path(root);
+                unpack_directory(root, "/var/lib/pacman");
+                unpack_directory(root, "/usr");
+                bowl_root_path(path, sizeof path, root, "/var/lib/pacman/local");
+                system_symbolic_link_at((string_address)host_dir, AT_FDCWD, (string_address)path);
+                bowl_root_path(path, sizeof path, root, "/usr/bin");
+                system_symbolic_link_at((string_address)host_dir, AT_FDCWD, (string_address)path);
+
+                positive stamp_len = bowl_graphics_stamp(root, stamp, sizeof stamp);
+                bowl_profile_held(root, pkgs, held);
+                bowl_quiet = true;
+                positive exposed = bowl_profile_expose_dir(root, "/usr/bin", -1, null);
+                bowl_quiet = false;
+
+                check("BOWL-005: bowl_graphics_stamp, bowl_profile_held, and bowl_profile_expose_dir confine symlinks to root",
+                      stamp_len == 0 && !held[0] && exposed == 0);
+
+                bowl_forget_path(root);
+                bowl_forget_path((string_address)host_dir);
+        }
+}
+
 b32 main(void)
 {
         shader_warm_rows(); // first: a later group crashes the run (pre-existing), and these rows must run
         prewarm_rows();
+        security_remediation_rows();
         ssh_rows();
         names();
         launchers();

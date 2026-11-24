@@ -7125,8 +7125,17 @@ static COLD fn expand_positional_slice(string_address name,
                 return;
         }
 
-        if (count > origin - begin)
-                count = origin - begin;
+        positive live_origin = shell_parameter_count + 1;
+
+        if (begin >= live_origin)
+        {
+                if (form == '@')
+                        expand_name_at_empty = true;
+                return;
+        }
+
+        if (count > live_origin - begin)
+                count = live_origin - begin;
 
         if (!count && form == '@')
                 expand_name_at_empty = true;

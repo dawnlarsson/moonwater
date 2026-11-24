@@ -10995,9 +10995,9 @@ positive shell_function_slot(string_address name)
 b32 shell_call_slot(positive slot, string_address name,
                     string_address address_to arguments, positive count)
 {
-        string_address words[8];
         string_address address_to saved_argv = shell_argv;
         positive saved_argc = shell_argc;
+        positive saved_room = shell_argv_room;
         b32 status;
 
         if (slot == positive_max)
@@ -11006,15 +11006,26 @@ b32 shell_call_slot(positive slot, string_address name,
         if (count > 6)
                 count = 6;
 
-        words[0] = name;
-        memory_copy(words + 1, arguments, count * sizeof(*arguments));
-        words[count + 1] = null;
+        shell_argv = null;
+        shell_argv_room = 0;
+        if (!shell_array_room(shell_argv, shell_argv_room, count + 2))
+        {
+                shell_argv = saved_argv;
+                shell_argc = saved_argc;
+                shell_argv_room = saved_room;
+                return 1;
+        }
 
-        shell_argv = words;
+        shell_argv[0] = name;
+        memory_copy(shell_argv + 1, arguments, count * sizeof(*arguments));
+        shell_argv[count + 1] = null;
         shell_argc = count + 1;
         status = exec_call(slot);
+        if (shell_argv)
+                memory_free(shell_argv, shell_argv_room * sizeof(shell_argv[0]));
         shell_argv = saved_argv;
         shell_argc = saved_argc;
+        shell_argv_room = saved_room;
         return status;
 }
 

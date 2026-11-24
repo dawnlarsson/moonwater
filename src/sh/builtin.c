@@ -4121,41 +4121,67 @@ COLD string_address shell_reference_element_value(
         positive subscript_length;
         positive key_length;
         string_address key;
+        string_address stable_base;
+        string_address stable_subscript;
 
         if (!shell_reference_element(
                 name, length, address_of base, address_of base_length,
                 address_of subscript, address_of subscript_length))
                 return null;
 
+        //      Snapshot the nameref's target name and subscript text before
+        //      evaluating the subscript, which may unset or overwrite the
+        //      nameref cell via a current-shell substitution.
+        stable_base = shell_store_copy(address_of expand_store,
+                                       env_reading(base), base_length);
+        stable_subscript = shell_store_copy(address_of expand_store,
+                                            env_reading(subscript),
+                                            subscript_length);
+        if (!stable_base || !stable_subscript)
+                return null;
+
         //      Inside one braced expansion the text is evaluated once, as
         //      Bash does; anywhere else each read is its own.
-        static const_string kept_subscript;
+        static string_address kept_base;
+        static positive kept_base_length;
+        static string_address kept_subscript;
+        static positive kept_subscript_length;
         static positive kept_generation;
         static positive kept_length;
         static string_address kept_key;
 
-        if (expand_braced_active && kept_key && subscript == kept_subscript &&
-            kept_generation == expand_braced_generation)
+        if (expand_braced_active && kept_key &&
+            kept_generation == expand_braced_generation &&
+            kept_base && kept_base_length == base_length &&
+            !memory_compare(kept_base, stable_base, base_length) &&
+            kept_subscript && kept_subscript_length == subscript_length &&
+            !memory_compare(kept_subscript, stable_subscript, subscript_length))
         {
                 key = kept_key;
                 key_length = kept_length;
         }
         else
         {
+                positive generation = expand_braced_generation;
+
                 key = shell_expand_subscript(
-                    (string_address)base, base_length, (string_address)subscript,
+                    stable_base, base_length, stable_subscript,
                     subscript_length, address_of key_length);
 
-                if (expand_braced_active && key)
+                if (expand_braced_active && key &&
+                    expand_braced_generation == generation)
                 {
-                        kept_subscript = subscript;
-                        kept_generation = expand_braced_generation;
+                        kept_base = stable_base;
+                        kept_base_length = base_length;
+                        kept_subscript = stable_subscript;
+                        kept_subscript_length = subscript_length;
+                        kept_generation = generation;
                         kept_length = key_length;
                         kept_key = key;
                 }
         }
 
-        return key ? shell_array_get(base, base_length, key, key_length,
+        return key ? shell_array_get(stable_base, base_length, key, key_length,
                                      value_length)
                    : null;
 }
@@ -4851,6 +4877,9 @@ static COLD bool shell_array_replace(
 {
         p8 written[32];
         p8 number[32];
+        p8 local_name[256];
+        shell_mark held = shell_store_mark(address_of expand_store);
+        bool used_store = false;
         env_reference resolved = env_reference_span(name, length);
 
         /* Type conversion and clearing are mutations too. Refuse the final
@@ -4859,8 +4888,27 @@ static COLD bool shell_array_replace(
             (protect && env_reference_readonly(resolved)))
                 return false;
 
-        name = resolved.name;
         length = resolved.length;
+        if (length < sizeof(local_name))
+        {
+                memory_copy(local_name, resolved.name, length);
+                local_name[length] = end;
+                name = local_name;
+        }
+        else
+        {
+                string_address copied = shell_store_copy(
+                    address_of expand_store, env_reading(resolved.name),
+                    length);
+                if (!copied)
+                        return false;
+                name = copied;
+                used_store = true;
+        }
+        scope_exit({
+                if (used_store)
+                        shell_store_rewind(address_of expand_store, held);
+        });
         if (!shell_variable_attribute_set(name, length,
                                           SHELL_ARRAY_INDEXED |
                                               SHELL_ARRAY_ASSIGNED,
@@ -5337,15 +5385,27 @@ COLD bool shell_array_forget(const_string name, positive length,
    ordinary wrapper above and refuses the mutation. */
 static COLD bool shell_reference_element_forget(env_reference resolved)
 {
+        shell_mark held = shell_store_mark(address_of expand_store);
+        string_address name = shell_store_copy(
+            address_of expand_store, env_reading(resolved.name),
+            resolved.length);
+        string_address subscript = shell_store_copy(
+            address_of expand_store, env_reading(resolved.subscript),
+            resolved.subscript_length);
+        if (!name || !subscript)
+        {
+                shell_store_rewind(address_of expand_store, held);
+                return false;
+        }
+
         positive key_length;
         string_address key = shell_expand_subscript(
-            (string_address)resolved.name, resolved.length,
-            (string_address)resolved.subscript, resolved.subscript_length,
+            name, resolved.length, subscript, resolved.subscript_length,
             address_of key_length);
-
-        return key && shell_array_forget_mode(
-                          resolved.name, resolved.length, key, key_length,
-                          true);
+        bool ok = key && shell_array_forget_mode(
+                             name, resolved.length, key, key_length, true);
+        shell_store_rewind(address_of expand_store, held);
+        return ok;
 }
 
 positive shell_subshell_depth HOT_STATE;
@@ -14540,10 +14600,49 @@ static fn printf_simple_one(writer write, string_address format)
                 write(room, used);
 }
 
+static positive printf_depth;
+
 fn shell_printf(writer write)
 {
+        bool nested = printf_depth > 0;
+        positive held_argument = printf_argument;
+        bool held_took = printf_took;
+        bool held_cut = printf_cut;
+        bool held_in_b = printf_in_b;
+        b32 held_status = printf_status;
+        byte_store held_hold = printf_hold;
+        byte_store held_kept = printf_kept;
+        writer held_inner = printf_inner;
+        positive held_written = printf_written;
         string_address format;
         string_address into = null;
+
+        printf_depth++;
+        if (nested)
+        {
+                printf_hold = (byte_store){0};
+                printf_kept = (byte_store){0};
+                printf_in_b = false;
+        }
+        scope_exit({
+                if (nested)
+                {
+                        if (printf_hold.bytes)
+                                memory_free(printf_hold.bytes, printf_hold.room);
+                        if (printf_kept.bytes)
+                                memory_free(printf_kept.bytes, printf_kept.room);
+                        printf_argument = held_argument;
+                        printf_took = held_took;
+                        printf_cut = held_cut;
+                        printf_in_b = held_in_b;
+                        printf_status = held_status;
+                        printf_hold = held_hold;
+                        printf_kept = held_kept;
+                        printf_inner = held_inner;
+                        printf_written = held_written;
+                }
+                printf_depth--;
+        });
 
         /* `--` is needed for formats beginning with a dash. Bash also takes
            -vname as well as -v name; both reach the same existing keeper and
@@ -15011,7 +15110,7 @@ static string_address read_field(positive address_to cursor, bool remainder)
         while (at < read_length && read_blank(at))
                 at++;
         *cursor = read_length;
-        if (at == read_length)
+        if (at >= read_length)
                 return null;
         positive begin = at;
         if (remainder)
@@ -15074,8 +15173,20 @@ static COLD b32 read_name_bad(positive name)
         return 1;
 }
 
+static positive read_depth;
+
 COLD fn shell_read(writer write)
 {
+        bool nested = read_depth > 0;
+        p8 address_to held_line = read_line;
+        positive held_line_room = read_line_room;
+        p8 address_to held_literal = read_literal;
+        positive held_literal_room = read_literal_room;
+        positive held_length = read_length;
+        p64 held_ifs_bits[4];
+        p64 held_blank_bits[4];
+        string_address address_to held_words = read_words;
+        positive held_words_room = read_words_room;
         bool raw = false;
         string_address array_name = null;
         positive index = 1;
@@ -15098,6 +15209,43 @@ COLD fn shell_read(writer write)
         b32 descriptor = 0;
         string_address prompt = null;
         p8 ifs_default[] = " \t\n";
+
+        read_depth++;
+        if (nested)
+        {
+                memory_copy(held_ifs_bits, read_ifs_bits, sizeof(held_ifs_bits));
+                memory_copy(held_blank_bits, read_blank_bits, sizeof(held_blank_bits));
+                read_line = null;
+                read_line_room = 0;
+                read_literal = null;
+                read_literal_room = 0;
+                read_length = 0;
+                read_words = null;
+                read_words_room = 0;
+        }
+        scope_exit({
+                if (nested)
+                {
+                        if (read_line)
+                                memory_free(read_line, read_line_room);
+                        if (read_literal)
+                                memory_free(read_literal, read_literal_room);
+                        if (read_words)
+                                memory_free(read_words,
+                                            read_words_room *
+                                                sizeof(read_words[0]));
+                        read_line = held_line;
+                        read_line_room = held_line_room;
+                        read_literal = held_literal;
+                        read_literal_room = held_literal_room;
+                        read_length = held_length;
+                        memory_copy(read_ifs_bits, held_ifs_bits, sizeof(read_ifs_bits));
+                        memory_copy(read_blank_bits, held_blank_bits, sizeof(read_blank_bits));
+                        read_words = held_words;
+                        read_words_room = held_words_room;
+                }
+                read_depth--;
+        });
 
         read_length = 0;
 

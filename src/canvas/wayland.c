@@ -58,7 +58,8 @@
 #define WAYLAND_TABLE_FIRST 64L
 #define WAYLAND_OBJECTS (1L << 17) /* live objects per client */
 #define WAYLAND_CLIENT_IDS_MAX (1UL << 21) /* max client-allocated object id (bounds WLT_INDEX to 8 MiB/client) */
-#define WAYLAND_POOLS_MAX 1024L /* live wl_shm_pools per client (prevents vm.max_map_count exhaustion) */
+#define WAYLAND_POOLS_MAX 1024L /* live wl_shm_pools and dma-buf pools per client (prevents vm.max_map_count exhaustion) */
+#define WAYLAND_PARAMS_MAX 256L /* live zwp_linux_buffer_params_v1 per client (bounds held DMA-BUF FDs) */
 #define WAYLAND_IDS_MAX 4096 /* one seat, device or relative-pointer list per client */
 #define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
@@ -5320,6 +5321,7 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         for (long e = 0; e < wayland.dmabuf.count; e++)
                 found |= wayland.dmabuf.entry[e].format == format && (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[e].modifier == modifier);
         if (!found || (flags & ~1UL) || need < 1 || need > WAYLAND_POOL_BYTES) return -2;
+        if (c->tbl[WLT_POOL].count - c->tbl[WLT_POOL].frees >= WAYLAND_POOLS_MAX) return -2;
         pool = wayland_tbl_alloc(c, WLT_POOL), buffer = pool >= 0 ? wayland_tbl_alloc(c, WLT_BUFFER) : -1;
         at = buffer >= 0 ? wayland.host->dmabuf_map(wayland.host->context, fds[0], modifier && modifier != WAYLAND_MODIFIER_INVALID ? -need : need) : 0;
         if (!at)
@@ -5389,6 +5391,8 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
         {
                 if (op == WLQ_zwp_linux_dmabuf_v1_create_params)
                 {
+                        if (c->tbl[WLT_PARAMS].count - c->tbl[WLT_PARAMS].frees >= WAYLAND_PARAMS_MAX)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many buffer params");
                         long index = wayland_tbl_alloc(c, WLT_PARAMS);
                         if (index < 0) return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for buffer params");
                         c->params[index] = (struct wayland_params){.id = c->objects[a[0].slot].id, .live = 1, .fd = {-1, -1, -1, -1}};

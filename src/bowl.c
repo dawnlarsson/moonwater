@@ -1439,20 +1439,43 @@ static bool bowl_accounts_has(string_address text, positive length,
         return false;
 }
 
-/* Whether a line of the text has this id in its third field. */
-static bool bowl_accounts_has_id(string_address text, positive length,
-                                 string_address id, positive size)
+/* Parse a canonical unsigned decimal 32-bit account id (no sign, no leading zeros except "0"). */
+static bool bowl_accounts_parse_id(string_address text, positive size,
+                                   p32 address_to out)
+{
+        p64 value = 0;
+
+        if (!size || (size > 1 && text[0] == '0'))
+                return false;
+        for (positive at = 0; at < size; at++)
+        {
+                p8 c = (p8)text[at];
+
+                if (c < '0' || c > '9')
+                        return false;
+                value = value * 10 + (p64)(c - '0');
+                if (value > 0xffffffffULL)
+                        return false;
+        }
+        address_to out = (p32)value;
+        return true;
+}
+
+/* Whether a line of the text has this numeric id in its third field. */
+static bool bowl_accounts_has_id(string_address text, positive length, p32 want)
 {
         for (positive at = 0; at < length;)
         {
                 positive stop = at + memory_span_without_byte(text + at, '\n', length - at);
                 positive start;
                 positive found;
+                p32 parsed;
 
                 if (bowl_accounts_field(text + at, stop - at, 2, address_of start,
                                         address_of found) &&
-                    found == size &&
-                    !string_compare_max(text + at + start, id, size))
+                    bowl_accounts_parse_id(text + at + start, found,
+                                           address_of parsed) &&
+                    parsed == want)
                         return true;
                 at = stop + (stop < length);
         }
@@ -1481,16 +1504,26 @@ static positive bowl_accounts_add(p8 address_to text, positive used,
                 positive size;
                 positive id;
                 positive id_size;
+                p32 numeric_id;
+                bool clean = true;
                 bool named;
 
-                if (bowl_accounts_field(from + at, stop - at, 0, address_of id,
+                for (positive k = at; k < stop; k++)
+                        if (!from[k] || from[k] == '\r')
+                        {
+                                clean = false;
+                                break;
+                        }
+
+                if (clean &&
+                    bowl_accounts_field(from + at, stop - at, 0, address_of id,
                                         address_of size) &&
                     size &&
                     bowl_accounts_field(from + at, stop - at, 2, address_of id,
                                         address_of id_size) &&
-                    !(id_size == 1 && from[at + id] == '0') &&
-                    !(id_size == 4 &&
-                      !string_compare_max(from + at + id, "1000", 4)) &&
+                    bowl_accounts_parse_id(from + at + id, id_size,
+                                           address_of numeric_id) &&
+                    numeric_id != 0 && numeric_id != 1000 &&
                     used + (stop - at) + alias_size + 1 <= room)
                 {
                         named = bowl_accounts_has(text, used, from + at, size);
@@ -1501,8 +1534,7 @@ static positive bowl_accounts_add(p8 address_to text, positive used,
                                 text[used++] = '\n';
                         }
                         else if (alias &&
-                                 !bowl_accounts_has_id(text, used,
-                                                       from + at + id, id_size))
+                                 !bowl_accounts_has_id(text, used, numeric_id))
                         {
                                 memory_copy(text + used, from + at, size);
                                 used += size;
@@ -7409,17 +7441,31 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
 
         //      tar makes a directory the archive does not list private, and
         //      the release lists neither its top directory, which is the
-        //      root now, nor store/.
-        failed = system_change_mode_at(AT_FDCWD, root, 0755);
-        return_if(failed, bowl_fail(root, failed));
+        //      root now, nor store/. Pin root and store descriptors with
+        //      O_DIRECTORY | O_NOFOLLOW so symlinks in the archive cannot
+        //      redirect mkdir, rename, or chmod outside root.
+        bipolar root_fd = bowl_open_directory(root, BOWL_MAKE_NONE, null);
+        return_if(root_fd < 0, bowl_fail(root, root_fd));
+        failed = system_call_2(syscall(fchmod), (positive)root_fd, 0755);
+        if (failed)
+        {
+                system_close(root_fd);
+                return bowl_fail(root, failed);
+        }
 
         if (!bowl_root_path(from, sizeof(from), root, "/install"))
+        {
+                system_close(root_fd);
                 return bowl_refuse("bowl path is too long\n");
+        }
         got = bowl_slurp_in_root(root, "/install", script, sizeof(script));
         if (got <= 0 || (positive)got >= sizeof(script) ||
             !bowl_nix_assigned(script, (positive)got, "nix", nix) ||
             !bowl_nix_assigned(script, (positive)got, "cacert", cacert))
+        {
+                system_close(root_fd);
                 return bowl_refuse("archive is not a Nix binary release\n");
+        }
 
         if (!byte_store_append_exact(address_of out, "nix=\"", 5) ||
             !byte_store_append_exact(address_of out, nix, string_length(nix)) ||
@@ -7427,32 +7473,79 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
             !byte_store_append_exact(address_of out, cacert,
                                      string_length(cacert)) ||
             !byte_store_append_exact(address_of out, "\"\n", 2))
+        {
+                system_close(root_fd);
                 return bowl_refuse("Nix store path is too long\n");
+        }
 
         if (!bowl_root_path(to, sizeof(to), root, "/nix"))
+        {
+                system_close(root_fd);
                 return bowl_refuse("bowl path is too long\n");
-        failed = bowl_mkdir(to);
-        return_if(failed < 0, bowl_fail(to, failed));
+        }
+        failed = system_make_directory_at(root_fd, "nix", 0755);
+        if (failed < 0 && failed != -ERROR_EXISTS)
+        {
+                system_close(root_fd);
+                return bowl_fail(to, failed);
+        }
+        bipolar nix_fd = system_open_at(root_fd, "nix",
+                                        FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (nix_fd < 0)
+        {
+                system_close(root_fd);
+                return bowl_fail(to, nix_fd);
+        }
 
-        if (!bowl_root_path(from, sizeof(from), root, "/store") ||
-            !bowl_root_path(to, sizeof(to), root, "/nix/store"))
+        if (!bowl_root_path(to, sizeof(to), root, "/nix/store"))
+        {
+                system_close(nix_fd);
+                system_close(root_fd);
                 return bowl_refuse("bowl path is too long\n");
-        failed = system_rename_at(AT_FDCWD, from, AT_FDCWD, to, 0);
+        }
+        bipolar store_fd = system_open_at(root_fd, "store",
+                                          FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (store_fd < 0)
+        {
+                system_close(nix_fd);
+                system_close(root_fd);
+                return bowl_fail(to, store_fd);
+        }
+        failed = system_rename_at(root_fd, "store", nix_fd, "store", 0);
         if (!failed)
-                failed = system_change_mode_at(AT_FDCWD, to, 0755);
-        return_if(failed, bowl_fail(to, failed));
+                failed = system_call_2(syscall(fchmod), (positive)store_fd, 0755);
+        system_close(store_fd);
+        if (failed)
+        {
+                system_close(nix_fd);
+                system_close(root_fd);
+                return bowl_fail(to, failed);
+        }
 
         if (!bowl_root_path(to, sizeof(to), root, BOWL_NIX_SEED))
+        {
+                system_close(nix_fd);
+                system_close(root_fd);
                 return bowl_refuse("bowl path is too long\n");
+        }
         failed = bowl_write_bytes(to, seed, out.used);
         if (failed)
+        {
+                system_close(nix_fd);
+                system_close(root_fd);
                 return failed;
+        }
 
         // Last: /nix/.reginfo is the marker that the store is in place.
-        if (!bowl_root_path(from, sizeof(from), root, "/.reginfo") ||
-            !bowl_root_path(to, sizeof(to), root, "/nix/.reginfo"))
+        if (!bowl_root_path(to, sizeof(to), root, "/nix/.reginfo"))
+        {
+                system_close(nix_fd);
+                system_close(root_fd);
                 return bowl_refuse("bowl path is too long\n");
-        failed = system_rename_at(AT_FDCWD, from, AT_FDCWD, to, 0);
+        }
+        failed = system_rename_at(root_fd, ".reginfo", nix_fd, ".reginfo", 0);
+        system_close(nix_fd);
+        system_close(root_fd);
         return_if(failed, bowl_fail(to, failed));
 
         // The installer scripts: this is what they would have done.
@@ -8168,19 +8261,22 @@ static fn bowl_link_in(string_address root, string_address path,
 {
         p8 full[BOWL_PATH_LIMIT];
         positive cut;
+        bipolar dirfd;
 
         if (!bowl_root_path(full, sizeof(full), root, path))
                 return;
         cut = string_length(full);
         while (cut && full[cut - 1] != '/')
                 cut--;
-        if (!cut)
+        if (!cut || !full[cut] || string_equals(full + cut, ".") ||
+            string_equals(full + cut, ".."))
                 return;
         full[cut - 1] = end;
-        if (bowl_mkdir_parents(full) < 0)
+        dirfd = bowl_open_directory(full, BOWL_MAKE_CHAIN, null);
+        if (dirfd < 0)
                 return;
-        full[cut - 1] = '/';
-        system_symbolic_link_at(target, AT_FDCWD, full);
+        system_symbolic_link_at(target, dirfd, full + cut);
+        system_close(dirfd);
 }
 
 static b32 bowl_prime_nix(string_address root)
@@ -10244,42 +10340,62 @@ bowl_guest_install(const struct bowl_profile address_to profile,
                    positive zero_gap, const p8 address_to tail,
                    positive tail_length)
 {
+        positive dir_length = directory_path ? string_length(directory_path) : 0;
+        string_address leaf;
+        positive leaf_length;
+        p8 made[BOWL_PATH_LIMIT];
+
+        if (!dir_length || !file_path ||
+            string_compare_max(file_path, directory_path, dir_length) ||
+            file_path[dir_length] != '/')
+                return;
+        leaf = file_path + dir_length + 1;
+        if (!*leaf || string_first_of(leaf, '/') || string_equals(leaf, ".") ||
+            string_equals(leaf, ".."))
+                return;
+        leaf_length = string_length(leaf);
+        if (leaf_length + sizeof(".new") > sizeof(made))
+                return;
+        memory_copy(made, leaf, leaf_length);
+        memory_copy(made + leaf_length, ".new", sizeof(".new"));
+
         for (const struct bowl_component address_to part = profile->components;
              part->distro; part++)
         {
                 const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
                 p8 directory[BOWL_PATH_LIMIT];
-                p8 path[BOWL_PATH_LIMIT];
-                p8 made[BOWL_PATH_LIMIT];
-                positive length;
+                bipolar dirfd;
                 bipolar handle;
                 bool ok;
 
                 if (!distro || !bowl_has(distro->root, distro->marker) ||
                     !bowl_root_path(directory, sizeof(directory), distro->root,
-                                    directory_path) ||
-                    !bowl_root_path(path, sizeof(path), distro->root, file_path) ||
-                    (length = string_length((string_address)path)) + sizeof(".new") > sizeof(made) ||
-                    bowl_mkdir_parents(directory) < 0)
+                                    directory_path))
                         continue;
-                memory_copy(made, path, length);
-                memory_copy(made + length, ".new", sizeof(".new"));
-                system_remove_at(AT_FDCWD, made, 0);
-                handle = system_open_at_mode(AT_FDCWD, made,
+                dirfd = bowl_open_directory(directory, BOWL_MAKE_CHAIN, null);
+                if (dirfd < 0)
+                        continue;
+                system_remove_at(dirfd, made, 0);
+                handle = system_open_at_mode(dirfd, made,
                                              FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC,
                                              0755);
                 if (handle < 0)
+                {
+                        system_close(dirfd);
                         continue;
+                }
                 ok = (!head_length ||
                       system_write_all((positive)handle, head, head_length) ==
                           (bipolar)head_length) &&
                      bowl_write_zeros((positive)handle, zero_gap) &&
                      (!tail_length ||
                       system_write_all((positive)handle, tail, tail_length) ==
-                          (bipolar)tail_length);
+                          (bipolar)tail_length) &&
+                     system_call_2(syscall(fchmod), (positive)handle, 0755) == 0;
                 system_close(handle);
-                if (!ok || system_rename_at(AT_FDCWD, made, AT_FDCWD, path, 0) < 0)
-                        system_remove_at(AT_FDCWD, made, 0);
+                if (!ok || system_rename_at(dirfd, made, dirfd, leaf, 0) < 0)
+                        system_remove_at(dirfd, made, 0);
+                system_close(dirfd);
         }
 }
 
@@ -23012,12 +23128,11 @@ static int bowl_name_order(const p8 *a, const p8 *b)
 // The graphics driver's identity in root: its packages' installed names, sorted, a line each, into out. Its length; 0 for none (or no room).
 static positive bowl_graphics_stamp(string_address root, p8 *out, positive room)
 {
-        p8 path[BOWL_PATH_LIMIT], buffer[4096], names[32][96];
+        p8 buffer[4096], names[32][96];
         positive count = 0, length = 0;
         bipolar handle, got;
 
-        if (!bowl_root_path(path, sizeof path, root, "/var/lib/pacman/local") ||
-            (handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+        if ((handle = bowl_open_in_root(root, "/var/lib/pacman/local", FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
                 return 0;
         while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
                 for (bipolar at = 0; at < got;)
@@ -23286,9 +23401,11 @@ static b32 bowl_shaders(positive count, string_address address_to arguments)
         - It stops when the launch ends.
 */
 #define BOWL_PREWARM_PIECE ((positive)1 << 20)
+#define BOWL_PREWARM_DEPTH_LIMIT 32
 struct bowl_prewarm
 {
         positive reaper, budget, read, cached;
+        bipolar root_fd;
         p8 cmdline[BOWL_PATH_LIMIT], root[BOWL_PATH_LIMIT]; // PROC/PID/cmdline and PROC/PID/root, the reaper's
 };
 
@@ -23310,11 +23427,19 @@ static b32 bowl_prewarm_on(const struct bowl_prewarm address_to warm)
 
 static fn bowl_prewarm_file(struct bowl_prewarm address_to warm, bipolar directory, string_address name)
 {
-        bipolar handle = system_open_at(directory, name, FILE_READ | O_NOFOLLOW | O_CLOEXEC), size;
+        bipolar handle = system_open_at(directory, name, FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC), size;
+        system_path_identity facts;
         p8 byte;
 
         if (handle < 0)
                 return;
+        if (system_path_identity_at(handle, (string_address)"", SYSTEM_PATH_AT_EMPTY_PATH,
+                                    SYSTEM_PATH_STATX_TYPE, address_of facts) < 0 ||
+            (facts.mode & 0170000) != 0100000)
+        {
+                system_close((positive)handle);
+                return;
+        }
         size = system_call_3(syscall(lseek), (positive)handle, 0, 2); // SEEK_END
         for (bipolar at = 0; at < size && bowl_prewarm_on(warm); at += (bipolar)BOWL_PREWARM_PIECE)
         {
@@ -23335,13 +23460,13 @@ static fn bowl_prewarm_file(struct bowl_prewarm address_to warm, bipolar directo
         system_close((positive)handle);
 }
 
-// Every file under name (a directory of directory's), but skip, a directory of its own: no symbolic link is followed.
-static fn bowl_prewarm_tree(struct bowl_prewarm address_to warm, bipolar directory, string_address name, string_address skip)
+// Every file under handle (an already-opened directory), but skip, a directory of its own: bounded depth, no symlinks followed.
+static fn bowl_prewarm_tree_fd(struct bowl_prewarm address_to warm, bipolar handle, string_address skip, positive depth)
 {
-        bipolar handle = system_open_at(directory, name, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), got;
+        bipolar got;
         p8 buffer[4096];
 
-        if (handle < 0)
+        if (depth >= BOWL_PREWARM_DEPTH_LIMIT)
                 return;
         while (bowl_prewarm_on(warm) && (got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
                 for (bipolar at = 0; at < got && bowl_prewarm_on(warm);)
@@ -23353,26 +23478,47 @@ static fn bowl_prewarm_tree(struct bowl_prewarm address_to warm, bipolar directo
                         if ((entry[0] == '.' && (!entry[1] || (entry[1] == '.' && !entry[2]))) || (skip && string_equals(entry, skip)))
                                 continue;
                         if (type == 4 || type == 0) // DT_DIR, DT_UNKNOWN (a file's open as a directory fails)
-                                bowl_prewarm_tree(warm, handle, entry, null);
+                        {
+                                if (depth + 1 < BOWL_PREWARM_DEPTH_LIMIT)
+                                {
+                                        bipolar child = system_open_at(handle, entry, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+                                        if (child >= 0)
+                                        {
+                                                bowl_prewarm_tree_fd(warm, child, null, depth + 1);
+                                                system_close((positive)child);
+                                        }
+                                }
+                        }
                         if (type == 8 || type == 0) // DT_REG
                                 bowl_prewarm_file(warm, handle, entry);
                 }
-        system_close((positive)handle);
 }
 
-// A directory of the launch's (a path of the reaper's), read in.
+// A directory of the launch's (a path of the reaper's), resolved inside warm->root_fd with no symlinks or magiclinks, read in.
 static fn bowl_prewarm_path(struct bowl_prewarm address_to warm, const p8 address_to path, positive length, string_address tail, string_address skip)
 {
-        p8 full[BOWL_PATH_LIMIT];
-        positive root = string_length(warm->root), more = tail ? string_length(tail) : 0;
+        p8 rel[BOWL_PATH_LIMIT];
+        positive more = tail ? string_length(tail) : 0;
+        bipolar handle;
 
-        if (root + length + more >= sizeof full)
+        if (warm->root_fd < 0 || length + more >= sizeof rel)
                 return;
-        memory_copy(full, warm->root, root), memory_copy(full + root, path, length);
+        memory_copy(rel, path, length);
         if (tail)
-                memory_copy(full + root + length, tail, more);
-        full[root + length + more] = 0;
-        bowl_prewarm_tree(warm, AT_FDCWD, (string_address)full, skip);
+                memory_copy(rel + length, tail, more);
+        rel[length + more] = 0;
+        if (bowl_path_steps((string_address)rel))
+                return;
+        handle = system_open_resolved(warm->root_fd, (string_address)rel,
+                                      FILE_READ | O_DIRECTORY | O_CLOEXEC,
+                                      SYSTEM_RESOLVE_IN_ROOT |
+                                          SYSTEM_RESOLVE_NO_SYMLINKS |
+                                          SYSTEM_RESOLVE_NO_MAGICLINKS);
+        if (handle < 0)
+                return;
+        bowl_prewarm_tree_fd(warm, handle, skip, 0);
+        system_close((positive)handle);
 }
 
 // The steamapps/common/DIR a word of a command line is under (its length in word: up to DIR's end), 0 for none.
@@ -23419,7 +23565,11 @@ static positive bowl_prewarm_dirs(struct bowl_prewarm address_to warm, positive 
                         }
                         dir = length < sizeof word ? bowl_prewarm_common(word, length) : 0;
                         length = 0;
-                        if (!dir || (dir == previous_length && !memory_compare(word, previous, dir)))
+                        if (!dir)
+                                continue;
+                        word[dir] = 0;
+                        if (bowl_path_steps((string_address)word) ||
+                            (dir == previous_length && !memory_compare(word, previous, dir)))
                                 continue;
                         memory_copy(previous, word, dir), previous_length = dir, count++;
                         if (count <= read_before)
@@ -23461,14 +23611,22 @@ static positive bowl_prewarm_launch(string_address proc, positive reaper, positi
         p8 last[BOWL_PATH_LIMIT], tail[64], pid[24];
         positive last_length = 0, count, at, steamapps;
 
-        warm.reaper = reaper, warm.budget = bowl_prewarm_budget(), warm.read = warm.cached = 0;
+        warm.reaper = reaper, warm.budget = bowl_prewarm_budget(), warm.read = warm.cached = 0, warm.root_fd = -1;
         pid[0] = '/', at = 1 + positive_into_string((string_address)pid + 1, reaper), pid[at] = 0;
         if (!bowl_root_path(warm.cmdline, sizeof warm.cmdline, proc, (string_address)pid) ||
             !bowl_root_path(warm.cmdline + string_length(warm.cmdline), sizeof warm.cmdline - string_length(warm.cmdline), "/cmdline", "") ||
             !bowl_root_path(warm.root, sizeof warm.root, proc, (string_address)pid) ||
-            !bowl_root_path(warm.root + string_length(warm.root), sizeof warm.root - string_length(warm.root), "/root", "") ||
-            !(count = bowl_prewarm_dirs(address_of warm, 0, last, address_of last_length)))
+            !bowl_root_path(warm.root + string_length(warm.root), sizeof warm.root - string_length(warm.root), "/root", ""))
                 return 0;
+        warm.root_fd = system_open_at(AT_FDCWD, (string_address)warm.root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (warm.root_fd < 0)
+                return 0;
+        if (!(count = bowl_prewarm_dirs(address_of warm, 0, last, address_of last_length)))
+        {
+                system_close((positive)warm.root_fd);
+                warm.root_fd = -1;
+                return 0;
+        }
         // The game's library: the last DIR's path up to its steamapps/, which has the game's shadercache/N and compatdata/N
         steamapps = bowl_prewarm_common(last, last_length);
         while (steamapps && last[steamapps - 1] != '/')
@@ -23484,6 +23642,8 @@ static positive bowl_prewarm_launch(string_address proc, positive reaper, positi
         if (steamapps)
                 bowl_prewarm_path(address_of warm, last, steamapps, (string_address)tail, null);
         bowl_prewarm_path(address_of warm, last, last_length, null, null);
+        system_close((positive)warm.root_fd);
+        warm.root_fd = -1;
         bowl_prewarm_read = warm.read;
         return warm.read + warm.cached;
 }
@@ -24055,14 +24215,19 @@ bowl_profile_expose_dir(string_address root, string_address dir, bipolar marker,
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
-        p8 where[BOWL_PATH_LIMIT];
         p8 rel[BOWL_PATH_LIMIT];
         p8 launcher[BOWL_PATH_LIMIT];
+        bipolar dirfd;
         positive made = 0;
 
-        if (!bowl_root_path(where, sizeof(where), root, dir) ||
-            !file_walk_open(address_of walk, AT_FDCWD, where))
+        dirfd = bowl_open_in_root(root, dir, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (dirfd < 0)
                 return 0;
+        if (!file_walk_open(address_of walk, dirfd, "."))
+        {
+                system_close(dirfd);
+                return 0;
+        }
 
         while ((entry = file_walk_next(address_of walk)))
         {
@@ -24089,6 +24254,7 @@ bowl_profile_expose_dir(string_address root, string_address dir, bipolar marker,
         }
 
         file_walk_close(address_of walk);
+        system_close(dirfd);
         return made;
 }
 
@@ -24499,11 +24665,16 @@ bowl_profile_held(string_address root, string_address address_to packages,
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
-        p8 where[BOWL_PATH_LIMIT];
+        bipolar dirfd = bowl_open_in_root(root, "/var/lib/pacman/local",
+                                          FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
-        if (!bowl_root_path(where, sizeof(where), root, "/var/lib/pacman/local") ||
-            !file_walk_open(address_of walk, AT_FDCWD, where))
+        if (dirfd < 0)
                 return;
+        if (!file_walk_open(address_of walk, dirfd, "."))
+        {
+                system_close(dirfd);
+                return;
+        }
 
         while ((entry = file_walk_next(address_of walk)))
                 for (positive at = 0; at < BOWL_PROFILE_ARGV && packages[at]; at++)
@@ -24511,6 +24682,7 @@ bowl_profile_held(string_address root, string_address address_to packages,
                                 held[at] = true;
 
         file_walk_close(address_of walk);
+        system_close(dirfd);
 }
 
 /* One marker line for a package: "package NAME added", or "held" for one the bowl already had. */
