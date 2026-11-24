@@ -5429,6 +5429,221 @@ static void check_compositor_glyphs(void)
     }
 }
 
+static void check_compositor_ias_regressions(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        struct windows address_to table;
+        positive t0 = 5000000000ull;
+
+        compositor_zero();
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("ias: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+        table->x[1] = 20, table->y[1] = 20, table->width[1] = 200, table->height[1] = 120;
+        glass_paint(1, 0, 0, 200, 120, 0x404040u, true);
+        compositor_present();
+        compositor_focus(1);
+
+        // COMP-IAS-1: Virtual gamepad repeats and stick events must not inherit physical provenance from another connected physical pad.
+        {
+                b32 repeat_virtual = false, scroll_virtual = false;
+
+                for (unsigned int each = 0; each < COMPOSITOR_ACCESS_PADS; each++)
+                        compositor_access.pad[each].at = -1;
+                for (unsigned int each = 0; each < COMPOSITOR_INPUTS; each++)
+                        compositor_access.of[each] = -1;
+                memory_zero(compositor_access.down, sizeof compositor_access.down);
+                compositor_access.repeat = 0, compositor_access.repeat_at = 0, compositor_access.yields = 0;
+                compositor_access.ticked = 0, compositor_access.scrolled = 0;
+                compositor_access.left_x = compositor_access.left_y = compositor_access.wheel_x = compositor_access.wheel_y = 0;
+
+                // Pad 0: physical pad at slot 0, sticks centered.
+                memory_zero(&compositor_access.pad[0], sizeof compositor_access.pad[0]);
+                compositor_access.pad[0].at = 0, compositor_access.pad[0].physical = 1;
+                memory_copy(compositor_access.pad[0].map, compositor_access_actions, ACCESS_BUTTONS);
+                compositor_access.pad[0].low[ACCESS_LX] = compositor_access.pad[0].low[ACCESS_LY] = -32768;
+                compositor_access.pad[0].high[ACCESS_LX] = compositor_access.pad[0].high[ACCESS_LY] = 32767;
+                compositor_access.pad[0].low[ACCESS_RX] = compositor_access.pad[0].low[ACCESS_RY] = -32768;
+                compositor_access.pad[0].high[ACCESS_RX] = compositor_access.pad[0].high[ACCESS_RY] = 32767;
+                compositor_access.of[0] = 0;
+
+                // Pad 1: virtual pad at slot 1.
+                memory_zero(&compositor_access.pad[1], sizeof compositor_access.pad[1]);
+                compositor_access.pad[1].at = 1, compositor_access.pad[1].physical = 0;
+                memory_copy(compositor_access.pad[1].map, compositor_access_actions, ACCESS_BUTTONS);
+                compositor_access.pad[1].low[ACCESS_LX] = compositor_access.pad[1].low[ACCESS_LY] = -32768;
+                compositor_access.pad[1].high[ACCESS_LX] = compositor_access.pad[1].high[ACCESS_LY] = 32767;
+                compositor_access.pad[1].low[ACCESS_RX] = compositor_access.pad[1].low[ACCESS_RY] = -32768;
+                compositor_access.pad[1].high[ACCESS_RX] = compositor_access.pad[1].high[ACCESS_RY] = 32767;
+                compositor_access.of[1] = 1;
+
+                // Start repeat from virtual pad 1.
+                compositor_post_physical = 0;
+                compositor_access_act(ACCESS_KEY_RIGHT, 1, 1, t0);
+                table->event_tail[1] = table->event_head[1];
+                compositor_access_tick(t0 + COMPOSITOR_ACCESS_DELAY_NS + 1000000ull);
+                for (unsigned int at = table->event_tail[1]; at != table->event_head[1]; at++)
+                {
+                        unsigned int cell = at % WINDOWS_EVENTS;
+                        if (table->event_type[1][cell] == WINDOW_EVENT_KEY && (table->event_flags[1][cell] & WINDOW_KEY_REPEAT))
+                                repeat_virtual = (table->event_flags[1][cell] & WINDOW_EVENT_VIRTUAL) != 0;
+                }
+                compositor_access_act(ACCESS_KEY_RIGHT, 0, 1, t0 + COMPOSITOR_ACCESS_DELAY_NS + 2000000ull);
+
+                // Deflect ONLY virtual pad 1's right stick; physical pad 0's stick is centered.
+                compositor.pointer_x = compositor.real_x = 100, compositor.pointer_y = compositor.real_y = 60;
+                compositor_motion();
+                compositor_access.pad[1].value[ACCESS_RY] = 32767;
+                compositor_access.ticked = 0;
+                table->event_tail[1] = table->event_head[1];
+                compositor_access_tick(t0 + COMPOSITOR_ACCESS_DELAY_NS + 20000000ull);
+                for (unsigned int at = table->event_tail[1]; at != table->event_head[1]; at++)
+                {
+                        unsigned int cell = at % WINDOWS_EVENTS;
+                        if (table->event_type[1][cell] == WINDOW_EVENT_WHEEL)
+                                scroll_virtual = (table->event_flags[1][cell] & WINDOW_EVENT_VIRTUAL) != 0;
+                }
+                compositor_access.pad[1].value[ACCESS_RY] = 0;
+                compositor_access.pad[0].at = compositor_access.pad[1].at = -1;
+                compositor_access.of[0] = compositor_access.of[1] = -1;
+                compositor_access.repeat = 0, compositor_access.scrolled = 0, compositor_access.ticked = 0;
+                check("ias-1: virtual gamepad key repeat and stick scroll stay WINDOW_EVENT_VIRTUAL when a physical pad is connected",
+                      repeat_virtual && scroll_virtual);
+        }
+
+        // COMP-IAS-2: COMPOSITOR_READER_PAD_NOTE must not desynchronize handed_out and reading_out.
+        {
+                struct compositor_input_event note = {1, 2, COMPOSITOR_READER_PAD_NOTE, 0, 0};
+                unsigned long long had_handed = compositor_reader.handed, had_reading = compositor_reader.reading;
+                unsigned long long had_hout = compositor_reader.handed_out, had_rout = compositor_reader.reading_out;
+                unsigned int had_dropped = compositor_reader.dropped, had_knocked = compositor_reader.knocked;
+                b32 synced;
+
+                compositor_reader.handed = compositor_reader.reading = 0;
+                compositor_reader.handed_out = compositor_reader.reading_out = 0;
+                compositor_reader.dropped = 0, compositor_reader.knocked = 0;
+                compositor_reader_put(0, 0, &note);
+                compositor_reader_take();
+                synced = compositor_reader.handed == compositor_reader.reading &&
+                         compositor_reader.handed_out == compositor_reader.reading_out;
+                compositor_reader.handed = had_handed, compositor_reader.reading = had_reading;
+                compositor_reader.handed_out = had_hout, compositor_reader.reading_out = had_rout;
+                compositor_reader.dropped = had_dropped, compositor_reader.knocked = had_knocked;
+                check("ias-2: COMPOSITOR_READER_PAD_NOTE keeps handed_out synchronized with reading_out", synced);
+        }
+
+        // COMP-IAS-3: compositor_inputs_watch ignores zero-length inotify events and checks watch descriptors.
+        {
+                int p[2] = {-1, -1}, old_watch = compositor.watch;
+                unsigned int had_keys = compositor_keys.count;
+                unsigned int ev[6] = {999u, 0x00000008u, 0u, 8u, 0x7379656bu, 0u}; // wd=999, len=8, name="keys\0\0\0\0"
+                unsigned int zero_ev[4] = {999u, 0x00004000u, 0u, 0u};            // wd=999, IN_Q_OVERFLOW, len=0
+
+                if (system_call_2(syscall(pipe2), (positive)p, O_NONBLOCK | O_CLOEXEC) == 0)
+                {
+                        compositor_keys.count = 1;
+                        compositor.watch = p[0];
+                        for (int k = 0; k < 18; k++)
+                                system_write_once(p[1], zero_ev, sizeof zero_ev);
+                        system_write_once(p[1], ev, sizeof ev);
+                        compositor_inputs_watch();
+                        check("ias-3: compositor_inputs_watch skips zero-length events and rejects wrong-wd keys event",
+                              compositor_keys.count == 1);
+                        compositor.watch = old_watch;
+                        system_close(p[0]), system_close(p[1]);
+                }
+                compositor_keys.count = had_keys;
+        }
+
+        // COMP-IAS-4: compositor_key_word rejects keycodes >= 256 so compositor_wl_direct.keys_refused[32] cannot overflow.
+        {
+                unsigned int code = 0;
+                b32 ok_255 = compositor_key_word("255", 3, &code) == 0u && code == 255;
+                b32 bad_256 = compositor_key_word("256", 3, &code) == ~0u;
+                b32 bad_300 = compositor_key_word("300", 3, &code) == ~0u;
+                check("ias-4: compositor_key_word accepts < 256 and rejects >= 256", ok_255 && bad_256 && bad_300);
+        }
+
+        // COMP-IAS-5: compositor_access_open rejects virtual input devices without trusting UI_SET_PHYS.
+        {
+                p8 keys[96];
+                b32 rejected;
+
+                memory_zero(keys, sizeof keys);
+                keys[0x130 / 8] = (p8)(1u << (0x130 % 8));
+                rejected = !compositor_access_open(0, -1, keys, 3ul, 0, "../../devices/virtual/input/input9/event99", 99);
+                check("ias-5: compositor_access_open rejects virtual uinput pads", rejected);
+        }
+
+        // COMP-IAS-6: compositor_input_gone cleans up Mouse Keys, Slow Keys, and Sticky Keys state for disconnected keyboard.
+        {
+                int p[2] = {-1, -1};
+                if (system_call_2(syscall(pipe2), (positive)p, O_NONBLOCK | O_CLOEXEC) == 0)
+                {
+                        compositor.inputs[0] = p[0];
+                        compositor.input_kinds[0] = WINDOWS_INPUT_KEYBOARD;
+                        compositor.devices[0].number = -1;
+                        compositor.input_count = 1;
+                        compositor_access_aid_set(ACCESS_MOUSE | ACCESS_SLOW | ACCESS_STICKY, 300000000ull, 0, 0);
+                        compositor_access_key(0, 30, 1, t0);          // pending slow key on slot 0
+                        compositor_access_given(0, 77, 1, t0);        // mouse keys KP6 arrow held on slot 0
+                        compositor_access_sticky(0, 42, 1, t0);       // latch shift
+                        compositor_access_sticky(0, 42, 0, t0);
+                        compositor_access_sticky(0, 31, 1, t0);       // rider key 31 holding sticky shift on slot 0
+                        compositor_input_gone(0);
+                        check("ias-6: keyboard disconnect clears Mouse Keys, Slow Keys, and Sticky Keys state",
+                              compositor_access_aid.arrows == 0 && compositor_access_aid.waits == 0 &&
+                              compositor_access_aid.riding == 0 && compositor_access_aid.pressed == 0 &&
+                              compositor_access_aid_due() == 0);
+                        compositor_access_aid_set(0, 0, 0, 0);
+                        system_close(p[1]);
+                }
+        }
+
+        // COMP-IAS-7: compositor_access_tick does not read uninitialized share or clobber left_x when reader thread is active.
+        {
+                unsigned int was_on = compositor_reader.on;
+
+                for (unsigned int each = 0; each < COMPOSITOR_ACCESS_PADS; each++)
+                        compositor_access.pad[each].at = -1;
+                memory_zero(&compositor_access.pad[0], sizeof compositor_access.pad[0]);
+                compositor_access.pad[0].at = 0;
+                compositor_access.of[0] = 0;
+                compositor_access.yields = 0, compositor_access.repeat = 0;
+                compositor_access.left_x = 12345;
+                compositor_reader.on = 1;
+                compositor_access_tick(t0 + 100000000ull);
+                compositor_reader.on = was_on;
+                compositor_access.pad[0].at = -1, compositor_access.of[0] = -1;
+                check("ias-7: compositor_access_tick leaves left_x intact when reader thread is active",
+                      compositor_access.left_x == 12345);
+        }
+
+        // COMP-IAS-8: compositor_pad_report guards zero per_mm_x/per_mm_y against division by zero.
+        {
+                struct compositor_pad pad;
+                int dx = 0, dy = 0, ret;
+
+                memory_zero(&pad, sizeof pad);
+                pad.touching = 1, pad.fingers = 1, pad.moving = 1;
+                pad.next_x = 10, pad.next_y = 10;
+                pad.per_mm_x = 0, pad.per_mm_y = 0;
+                ret = compositor_pad_report(&pad, &dx, &dy);
+                check("ias-8: compositor_pad_report guards zero per_mm_x/per_mm_y against division by zero",
+                      ret == 1 && dx != 0 && dy != 0);
+        }
+}
+
 /*
         The loop's wait (compositor_loop_wait) answers as ppoll would, from its epoll set kept between waits: the entry that is ready
         and no other, the same list again (no sync), nothing once read, a number closed and opened again as another file between two
@@ -5490,5 +5705,6 @@ static void check_compositor_loop_wait(void)
         check("loop: a descriptor that is not open is said POLLNVAL, as ppoll says it", closed);
         check("loop: an entry the list no longer names is not said", dropped);
         system_close(a[0]), system_close(a[1]), system_close(c[0]), system_close(c[1]), system_close(d[1]);
+        check_compositor_ias_regressions();
 }
 

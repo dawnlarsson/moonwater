@@ -1175,6 +1175,8 @@ static void compositor_input_add(unsigned int number)
         compositor_input_publish(at);
 }
 
+static int compositor_watch_wd[3] = {-1, -1, -1};
+
 static void compositor_inputs_open(void)
 {
         static const struct { const char *path; unsigned int mask; } watches[3] = {
@@ -1184,12 +1186,13 @@ static void compositor_inputs_open(void)
         };
 
         (void)system_remove_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, 0);
+        compositor_watch_wd[0] = compositor_watch_wd[1] = compositor_watch_wd[2] = -1;
         compositor.watch = (int)compositor_call(syscall(inotify_init1), COMPOSITOR_CLOEXEC | COMPOSITOR_NONBLOCK, 0, 0, 0, 0, 0);
         if (compositor.watch >= 0 &&
-            compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive)watches[0].path, watches[0].mask, 0, 0, 0) < 0)
+            (compositor_watch_wd[0] = (int)compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive)watches[0].path, watches[0].mask, 0, 0, 0)) < 0)
                 system_close(compositor.watch), compositor.watch = -1;
         for (int i = 1; compositor.watch >= 0 && i < 3; i++)
-                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive)watches[i].path, watches[i].mask, 0, 0, 0);
+                compositor_watch_wd[i] = (int)compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive)watches[i].path, watches[i].mask, 0, 0, 0);
         for (unsigned int number = 0; number < COMPOSITOR_DEVICES; number++)
                 compositor_input_add(number);
 }
@@ -1408,41 +1411,60 @@ static void compositor_inputs_watch(void)
 
                 for (long at = 0; at + 16 <= got;)
                 {
-                        const char *name = (const char *)(buffer + (at + 16) / 4);
-                        unsigned int length = buffer[(at + 12) / 4], number = 0;
+                        const p8 *entry = (const p8 *)buffer + at;
+                        int wd = 0;
+                        unsigned int length = 0, number = 0;
+                        const char *name = (const char *)(entry + 16);
 
+                        memory_copy(address_of wd, entry, 4);
+                        memory_copy(address_of length, entry + 12, 4);
                         if (at + 16 + (long)length > got)
                                 break;
-
-                        // Canvas's word for which mode a screen is driven at (moonwater canvas modes, kept after the kernel took
-                        // it): the screens taken again at it, every size refused before asked again (compositor_modes_pick).
-                        if (string_equals((string_address)name, (string_address)COMPOSITOR_MODES_KEPT + sizeof("/root/") - 1))
+                        if (!length || name[length - 1] != '\0')
                         {
-                                compositor_modes_forget();
-                                compositor_space_retake();
+                                at += 16 + (long)length;
+                                continue;
                         }
-                        else if (compositor_setting_mask(name))
-                                compositor_settings_sync(name);
-                        else if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
-                                compositor_dark_look();
-                        //      What the command asks of each Scene's wallpaper (wallpaper.c), a file of its own in /run/moonwater.
-                        else if (compositor_wall_ask_name(name))
-                                compositor_walls_asks();
-                        //      The rules' chords, written again at every load of the rules: read again, so a chord a load
-                        //      added is heard without the compositor starting again.
-                        else if (string_equals((string_address)name, (string_address) "keys"))
-                                compositor_keys_read();
-                        else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
-                                 !compositor.layout_given)
-                                compositor_layout_read();
-                        else if (length > 5 && name[0] == 'e' && name[1] == 'v' && name[2] == 'e' &&
-                            name[3] == 'n' && name[4] == 't')
+
+                        // Dispatch strictly by watch descriptor: /root (1), /run/moonwater (2), /dev/input (0).
+                        if (compositor_watch_wd[1] >= 0 && wd == compositor_watch_wd[1])
                         {
-                                for (unsigned int digit = 5; digit < length && name[digit] >= '0' &&
-                                                             name[digit] <= '9' && number < 1000;
-                                     digit++)
-                                        number = number * 10 + (unsigned int)(name[digit] - '0');
-                                compositor_input_add(number);
+                                // Canvas's word for which mode a screen is driven at (moonwater canvas modes, kept after the kernel took
+                                // it): the screens taken again at it, every size refused before asked again (compositor_modes_pick).
+                                if (string_equals((string_address)name, (string_address)COMPOSITOR_MODES_KEPT + sizeof("/root/") - 1))
+                                {
+                                        compositor_modes_forget();
+                                        compositor_space_retake();
+                                }
+                                else if (compositor_setting_mask(name))
+                                        compositor_settings_sync(name);
+                                else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
+                                         !compositor.layout_given)
+                                        compositor_layout_read();
+                        }
+                        else if (compositor_watch_wd[2] >= 0 && wd == compositor_watch_wd[2])
+                        {
+                                if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
+                                        compositor_dark_look();
+                                //      What the command asks of each Scene's wallpaper (wallpaper.c), a file of its own in /run/moonwater.
+                                else if (compositor_wall_ask_name(name))
+                                        compositor_walls_asks();
+                                //      The rules' chords, written again at every load of the rules: read again, so a chord a load
+                                //      added is heard without the compositor starting again.
+                                else if (string_equals((string_address)name, (string_address) "keys"))
+                                        compositor_keys_read();
+                        }
+                        else if (compositor_watch_wd[0] >= 0 && wd == compositor_watch_wd[0])
+                        {
+                                if (length > 5 && name[0] == 'e' && name[1] == 'v' && name[2] == 'e' &&
+                                    name[3] == 'n' && name[4] == 't')
+                                {
+                                        for (unsigned int digit = 5; digit < length && name[digit] >= '0' &&
+                                                                     name[digit] <= '9' && number < 1000;
+                                             digit++)
+                                                number = number * 10 + (unsigned int)(name[digit] - '0');
+                                        compositor_input_add(number);
+                                }
                         }
 
                         at += 16 + (long)length;
@@ -1465,9 +1487,13 @@ static void compositor_inputs_watch(void)
 static void compositor_root_again(void)
 {
         if (compositor.watch >= 0)
-                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
-                                COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
-                                0, 0, 0);
+        {
+                int wd = (int)compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
+                                              COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
+                                              0, 0, 0);
+                if (wd >= 0)
+                        compositor_watch_wd[1] = wd;
+        }
         compositor_settings_sync(null);
         if (!compositor.layout_given)
                 compositor_layout_read();

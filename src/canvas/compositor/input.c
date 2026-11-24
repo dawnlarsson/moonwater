@@ -1101,7 +1101,7 @@ static unsigned int compositor_key_word(const char *word, unsigned int length, u
                         return ~0u;
                 number = number * 10 + (unsigned int)(word[at] - '0');
         }
-        return number && number < 0x300 ? (*code = number, 0u) : ~0u;
+        return number && number < 256 ? (*code = number, 0u) : ~0u;
 }
 
 static void compositor_keys_read(void)
@@ -1138,7 +1138,7 @@ static void compositor_keys_read(void)
                         flag = compositor_key_word(text + word, stop - word, &code);
                         bad = flag == ~0u, modifiers |= bad ? 0 : flag, word = stop + 1;
                 }
-                if (bad || !code || close - start >= sizeof(compositor_keys.chord[0]))
+                if (bad || !code || code >= 256 || close - start >= sizeof(compositor_keys.chord[0]))
                 {
                         p8 name[48];
                         positive length = close - start < sizeof(name) - 1 ? close - start : sizeof(name) - 1;
@@ -2951,8 +2951,8 @@ static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
                         return *y = pad->swipe_dy > 0 ? 1 : -1, pad->swipe_fired = 1, 3;
                 return 0;
         }
-        *x = compositor_scale_rem_i(dx, per, pad->per_mm_x, &pad->left_x);
-        *y = compositor_scale_rem_i(kind == 2 ? -dy : dy, per, pad->per_mm_y, &pad->left_y);
+        *x = compositor_scale_rem_i(dx, per, pad->per_mm_x > 0 ? pad->per_mm_x : 1, &pad->left_x);
+        *y = compositor_scale_rem_i(kind == 2 ? -dy : dy, per, pad->per_mm_y > 0 ? pad->per_mm_y : 1, &pad->left_y);
         return *x || *y ? kind : 0;
 }
 
@@ -4317,6 +4317,7 @@ struct compositor_access_pad;
 static struct compositor_access_pad *compositor_access_pad_of(unsigned int at);
 static void compositor_access_take(unsigned int at, const struct compositor_input_event *raw, bipolar got);
 static void compositor_access_close(unsigned int at);
+static void compositor_access_aid_gone(unsigned int at);
 
 #define COMPOSITOR_INPUT_READS 16
 #define COMPOSITOR_EVIOCGKEY(bytes) (0x80000000u | (bytes) << 16 | 0x4518u)
@@ -4502,7 +4503,8 @@ HOT static void compositor_reader_put(unsigned int at, unsigned int generation, 
         record->raw = *raw, record->at = at, record->generation = generation;
         record->read = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_read : 0;
         record->sent = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_sent : 0;
-        compositor_reader.handed_out += (raw->type != COMPOSITOR_READER_NOTE && raw->type != COMPOSITOR_READER_BTN_NOTE);
+        compositor_reader.handed_out += (raw->type != COMPOSITOR_READER_NOTE && raw->type != COMPOSITOR_READER_BTN_NOTE &&
+                                         raw->type != COMPOSITOR_READER_PAD_NOTE);
         __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_RELEASE);
 }
 
@@ -5060,6 +5062,7 @@ static void compositor_input_gone(unsigned int at)
         compositor.held[at] = 0;
         if (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)
         {
+                compositor_access_aid_gone(at);
                 compositor.held[COMPOSITOR_INPUTS] = 0, compositor_keys_release();
                 if (compositor.cycle)
                 {
