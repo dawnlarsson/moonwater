@@ -2501,6 +2501,8 @@ static void dbus_request_close(struct dbus_client *from, const char *path)
                 }
 }
 
+#include "screencast.c" // the ScreenCast portal: a share asked, picked by the person, and its stream's socket
+
 /*
         The desktop's notifications: org.freedesktop.Notifications (Chromium, Electron, libnotify, GLib's GNotification outside a
         sandbox) and the portal's org.freedesktop.portal.Notification (GLib's inside one), served by the bus into DBUS_NOTICES
@@ -3053,6 +3055,8 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 return;
         }
         if (dbus_common(from, m, dbus.service.unique, dbus_introspect_portal))
+                return;
+        if (dbus_cast_call(from, m))
                 return;
         if (!dbus_equal(m->path, DBUS_PATH_PORTAL))
         {

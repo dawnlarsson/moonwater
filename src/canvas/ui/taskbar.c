@@ -32,7 +32,7 @@ static struct taskbar_state
         int tray_chars, launcher, hide_fullscreen;
         b64 shift, slide_from, slide_to;
         positive slide_at;
-        int volume_item, volume_percent, volume_muted, volume_flash, mic_item, mic_muted, notices_item, keyboard_item;
+        int volume_item, volume_percent, volume_muted, volume_flash, mic_item, mic_muted, notices_item, keyboard_item, share_item;
         unsigned int notices_severity;
         int scale, padding, glides, moon_zone, tasks_zone, tasks_right;
         unsigned int tray_before;
@@ -203,6 +203,7 @@ static int taskbar_tab_length(int high, int pad, int scale, int characters)
 }
 
 #define TASKBAR_TRAY_CELLS(CELL)                                                                                          \
+        CELL(TASKBAR_SHARE, taskbar.share_item, (UI_DOT * scale + 50) / 100, taskbar_share_cell(view, t, n))             \
         CELL(TASKBAR_KEYBOARD, taskbar.keyboard_item, glyph, taskbar_keyboard_cell(view, t, n, ink))                     \
         CELL(TASKBAR_NOTICES, taskbar.notices_item, (UI_DOT * scale + 50) / 100, taskbar_notices_cell(view, t, n))       \
         CELL(TASKBAR_MIC, taskbar.mic_item, glyph, taskbar_mic_cell(view, t, n))                                         \
@@ -467,7 +468,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         int sp_add = sp > 0 && sp < TASKBAR_SPACE_MAX ? 1 : 0;
                         int xt = taskbar_tray_items_count();
                         if (xt > TASKBAR_TRAY_ITEM_MAX) xt = TASKBAR_TRAY_ITEM_MAX;
-                        int items = (taskbar.notices_item != 0) + (taskbar.mic_item != 0) + (taskbar.volume_item != 0) +
+                        int items = (taskbar.share_item != 0) + (taskbar.notices_item != 0) + (taskbar.mic_item != 0) + (taskbar.volume_item != 0) +
                                     (taskbar.battery_item && !taskbar.tray_custom) + (taskbar.tray_custom != 0) + (taskbar.clock_tray != 0) +
                                     sp + sp_add + (xt > 0 ? xt : 0);
                         M.square = M.cell = M.text_w = M.clocked = items ? most / items : 0;
@@ -1632,6 +1633,16 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct ui_tr
         ui_microphone(&ui, x, y, mark->w, taskbar.mic_muted, compositor_ink_role(UI_ERROR) | 0xff000000u);
 }
 
+// The share cell: a dot in the error's ink, as a recording's is, while anything of the screen is seen by a program or asked for.
+static void taskbar_share_cell(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n)
+{
+        struct ui ui;
+        int x, y;
+
+        taskbar_ui(&ui, view, t, n, &x, &y);
+        ui_kit_dot(&ui, x, y, compositor_ink_role(UI_ERROR) | 0xff000000u);
+}
+
 // The keyboard cell: the keyboard's mark in the band's ink.
 static void taskbar_keyboard_cell(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, unsigned int ink)
 {
@@ -1928,6 +1939,14 @@ static int taskbar_mic_set(int present, int muted)
         present = present != 0, muted = muted != 0;
         int changed = present != taskbar.mic_item || (present && muted != taskbar.mic_muted);
         taskbar.mic_item = present, taskbar.mic_muted = muted;
+        return taskbar.stale |= changed, changed;
+}
+
+// The share cell there or not: while a share is asked, picked or live (compositor_cast_look).
+static int taskbar_share_set(int present)
+{
+        int changed = (present != 0) != taskbar.share_item;
+        taskbar.share_item = present != 0;
         return taskbar.stale |= changed, changed;
 }
 

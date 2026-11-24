@@ -10093,6 +10093,7 @@ static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const 
 #include "checks/canvas.c" // the text engine and the canvas's cells
 #include "checks/wayland.c" // the Wayland shim and the X window manager's wire
 #include "checks/dbus.c" // the session bus
+#include "checks/cast.c" // the capture engine: the PipeWire of a screen cast and the rings' slots
 #include "checks/audiolib.c" // the audio library's routines
 #include "checks/audio.c" // the sound server: its mixer, ALSA, PulseAudio, the service, control and state
 #include "checks/native.c" // the stdio buffer and the native routines built against generated headers

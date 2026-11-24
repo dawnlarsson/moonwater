@@ -892,6 +892,159 @@ static void db_test_portal(void)
 
 /* ---- hostile messages ---- */
 
+/* ---- the ScreenCast portal (src/dbus/screencast.c) ---- */
+
+static int db_holds(const struct db_seen *s, const char *text); // below, with the Settings' rows
+
+static long db_cast_picks, db_cast_unpicks, db_cast_remotes, db_cast_last;
+static unsigned db_cast_types, db_cast_cursor;
+static int db_cast_refuse;
+
+static int db_cast_pick(void *context, const struct dbus_cast_ask *ask)
+{
+        (void)context;
+        db_cast_picks++, db_cast_last = ask->ticket, db_cast_types = ask->types, db_cast_cursor = ask->cursor;
+        return db_cast_refuse ? -1 : 0;
+}
+
+static void db_cast_unpick(void *context, long ticket)
+{
+        (void)context;
+        db_cast_unpicks++, db_cast_last = ticket;
+}
+
+static int db_cast_remote(void *context, long ticket)
+{
+        (void)context, (void)ticket;
+        db_cast_remotes++;
+        return -1;
+}
+
+static const struct dbus_cast_host db_cast_host = {0, db_cast_pick, db_cast_unpick, db_cast_remote};
+
+// A ScreenCast call: its session path (or none), then options of a token and up to two u values.
+static void db_cast_call(long slot, const char *member, const char *session, const char *token, const char *key, unsigned value)
+{
+        struct db_call call;
+        const char *sig = !session ? "a{sv}" : !strcmp(member, "Start") ? "osa{sv}" : "oa{sv}";
+        struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.ScreenCast", member, "", DBUS_NAME_PORTAL, "", sig, 0, 0};
+        long length, first;
+
+        db_begin(&call, DBUS_CALL, 0, &f);
+        if (session)
+        {
+                // an object path is written as a string is
+                dbus_o_string(&call.w, session);
+                if (!strcmp(member, "Start"))
+                        dbus_o_string(&call.w, "");
+        }
+        dbus_o_u32(&call.w, 0);
+        length = call.w.length - 4;
+        dbus_o_pad(&call.w, 8);
+        first = call.w.length;
+        if (token)
+        {
+                dbus_o_pad(&call.w, 8), dbus_o_string(&call.w, "handle_token"), dbus_o_sig(&call.w, "s"), dbus_o_string(&call.w, token);
+                if (!session)
+                        dbus_o_pad(&call.w, 8), dbus_o_string(&call.w, "session_handle_token"), dbus_o_sig(&call.w, "s"), dbus_o_string(&call.w, "share1");
+        }
+        if (key)
+                dbus_o_pad(&call.w, 8), dbus_o_string(&call.w, key), dbus_o_sig(&call.w, "u"), dbus_o_u32(&call.w, value);
+        dbus_o_patch32(&call.w, length, (unsigned long)(call.w.length - first));
+        db_send(slot, &call);
+}
+
+// Whether the bytes of a message hold a u32 of value v at a 4-byte boundary of its body.
+static int db_cast_holds(const struct db_seen *s, unsigned long v)
+{
+        for (long at = s->m.body_at; at + 4 <= s->size; at += 4)
+                if (dbus_get32(s->bytes + at) == v)
+                        return 1;
+        return 0;
+}
+
+static void db_test_screencast(void)
+{
+        long a, b;
+        struct db_seen s;
+        char text[200], session[200];
+        const char *found;
+
+        db_reset();
+        dbus_cast_set_host(&db_cast_host);
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a), db_hello(b);
+        db_drain(a), db_drain(b);
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "GetAll", "s", "org.freedesktop.portal.ScreenCast", 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "a{sv}") && db_holds(&s, "AvailableSourceTypes") &&
+                    db_holds(&s, "AvailableCursorModes") && db_holds(&s, "version"),
+                "ScreenCast's properties are all there: the source types, the cursor modes and its version");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.ScreenCast", "version");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_cast_holds(&s, 5), "its version is 5");
+        db_cast_call(a, "CreateSession", 0, "t1", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_string_arg(&s, 0, text, sizeof text) && strstr(text, "/request/") && strstr(text, "/t1"),
+                "CreateSession answers its request's path");
+        DBCHECK(db_find(a, &s, DBUS_SIGNAL, "Response") && db_u32_body(&s) == 0 && db_holds(&s, "session_handle"),
+                "and its Response carries the session's handle");
+        found = 0;
+        for (long at = s.m.body_at; at + 9 < s.size && !found; at++)
+                if (!memcmp(s.bytes + at, "/org/freedesktop/portal/desktop/session/", 40))
+                        found = (const char *)s.bytes + at;
+        DBCHECK(found && strstr(found, "/share1"), "the session's path is the specification's, with the program's token");
+        snprintf(session, sizeof session, "%s", found ? found : "");
+        db_cast_call(a, "SelectSources", session, "t2", "types", 2);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_find(a, &s, DBUS_SIGNAL, "Response") && db_u32_body(&s) == 0, "SelectSources is answered done");
+        db_cast_call(b, "SelectSources", session, "t9", "types", 1);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0) && dbus_equal(s.m.error, "org.freedesktop.portal.Error.NotFound"),
+                "another program's session is not found");
+        db_cast_call(a, "Start", session, "t3", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_cast_picks == 1 && db_cast_types == 2, "Start asks the person, with what the program may be shown");
+        DBCHECK(!db_find(a, &s, DBUS_SIGNAL, "Response"), "and nothing is answered before the person picks");
+        db_cast_call(a, "OpenPipeWireRemote", session, 0, 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && db_cast_remotes == 0, "no stream's socket before the person picks");
+        dbus_cast_picked(db_cast_last, 1, 102, 2, 0, 0, 640, 480);
+        DBCHECK(db_find(a, &s, DBUS_SIGNAL, "Response") && db_u32_body(&s) == 0 && db_holds(&s, "streams") && db_cast_holds(&s, 102) &&
+                    db_cast_holds(&s, 640) && db_cast_holds(&s, 480),
+                "the pick is Start's Response: the stream's node and size");
+        db_cast_call(a, "OpenPipeWireRemote", session, 0, 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && db_cast_remotes == 1, "a stream's socket is asked of the host (none here, and no descriptors on this connection)");
+        db_call(a, DBUS_NAME_PORTAL, session, "org.freedesktop.portal.Session", "Close", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_cast_unpicks == 1, "Session.Close lets the share go");
+        // refused by the person, and the host that cannot ask
+        db_cast_call(a, "CreateSession", 0, "t4", 0, 0);
+        db_find(a, &s, DBUS_SIGNAL, "Response");
+        db_cast_call(a, "SelectSources", session, "t5", 0, 0);
+        db_cast_call(a, "Start", session, "t6", 0, 0);
+        db_drain(a);
+        dbus_cast_picked(db_cast_last, 0, 0, 0, 0, 0, 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_SIGNAL, "Response") && db_u32_body(&s) == 1, "the person's no is Response 1");
+        db_cast_call(a, "Start", session, "t7", 0, 0);
+        db_drain(a);
+        dbus_cast_ended(db_cast_last);
+        DBCHECK(db_find(a, &s, DBUS_SIGNAL, "Closed") && dbus_equal(s.m.path, session), "a share stopped from the tray is the session's Closed");
+        db_cast_refuse = 1;
+        db_cast_call(a, "CreateSession", 0, "t8", 0, 0);
+        db_find(a, &s, DBUS_SIGNAL, "Response");
+        db_cast_call(a, "SelectSources", session, "t9", 0, 0);
+        db_cast_call(a, "Start", session, "t10", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_SIGNAL, "Response") && db_find(a, &s, DBUS_SIGNAL, "Response") && db_u32_body(&s) == 2,
+                "a Start the host cannot ask is Response 2 at once");
+        db_cast_refuse = 0;
+        for (int k = 0; k < 6; k++)
+                db_cast_call(a, "CreateSession", 0, 0, 0, 0);
+        db_drain(a);
+        db_cast_call(a, "CreateSession", 0, "t11", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0), "one program holds DBUS_CAST_PER sessions");
+        db_cast_call(a, "Start", session, "t12", 0, 0);
+        db_drain(a);
+        db_cast_unpicks = 0;
+        dbus_drop(a);
+        dbus_cast_sweep();
+        DBCHECK(db_cast_unpicks == 1, "a program gone lets its share go");
+        dbus_cast_set_host(0);
+}
+
 static void db_test_hostile(void)
 {
         long slot;
@@ -4580,6 +4733,7 @@ int main(int argc, char **argv)
         db_test_hello_and_names();
         db_test_routing();
         db_test_portal();
+        db_test_screencast();
         db_test_hostile();
         db_test_caps();
         db_test_queue();

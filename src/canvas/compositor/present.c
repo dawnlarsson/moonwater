@@ -26,6 +26,11 @@
 */
 static void compositor_present_frames(void);
 static void compositor_dark_set(void); // kms.c: the screens put out again after a mode set, while display-off holds
+// cast.c: the capture engine's rings, composed into after a present; while a screen is shared every present is composed
+static int compositor_cast_screens(void);
+static void compositor_cast_look(int always);
+static void compositor_cast_present(const struct compositor_frame *frames, unsigned int count, const unsigned int *rows, unsigned int windows,
+                                    const int (*damage)[4], unsigned int damages);
 
 // A present: a dma-buf a window shows is read by the card or the processor, and its reads are bracketed by the kernel's sync for the
 // processor's (compositor_wl_lent_sync: the bracket for each window's dma-buf picture read in place, as a copy of one is).
@@ -236,6 +241,8 @@ static void compositor_loop_tick(unsigned long long now, b32 idle)
                         table->metric_loop_by[k] = windows_metric_rate(compositor_loop_by[k] - compositor_loop_by_second[k], span),
                         compositor_loop_by_second[k] = compositor_loop_by[k];
                 compositor_loop_since = now, compositor_loop_then = compositor_loop_turns, compositor_loop_idle_then = compositor_loop_idle;
+                compositor_cast_look(1); // a share's window gone, or a doorbell missed: once a second
+
         }
 }
 
@@ -1646,7 +1653,7 @@ static void compositor_present_frames(void)
             (compositor_space_is_fs_row(compositor.direct_row) ||
              (compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row)) &&
             !compositor.overlay_on && !compositor_overlays_shown() && !compositor_overview_drawn() && taskbar_shift() >= UI_ONE &&
-            !compositor_record_until)
+            !compositor_record_until && !compositor_cast_screens())
         {
                 int row = compositor.direct_row, menu[4];
 
@@ -1672,10 +1679,11 @@ static void compositor_present_frames(void)
         compositor_record_scene(frames, windows);
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
-        direct = turning || compositor_overview_drawn() ? -1 : compositor_direct_candidate(frames, rows, windows);
+        direct = turning || compositor_overview_drawn() || compositor_cast_screens() ? -1 : compositor_direct_candidate(frames, rows, windows);
         // None at the top: a fullscreen window under pop-ups is shown straight, they on the overlay's band over it (compositor_direct_under).
         over = windows;
-        if (direct < 0 && !turning && !compositor_overview_drawn() && (direct = compositor_direct_under(frames, rows, windows, &over)) >= 0)
+        if (direct < 0 && !turning && !compositor_overview_drawn() && !compositor_cast_screens() &&
+            (direct = compositor_direct_under(frames, rows, windows, &over)) >= 0)
         {
                 // The glass of what is over it is made from it before the band is composed: its rows under the band and the blur's reach
                 // read by the card into the table first, where its picture is straight (tiled) and not read by the processor.
@@ -1751,7 +1759,8 @@ static void compositor_present_frames(void)
         compositor.screen_stale = 0;
 
         // No window is lifted onto a plane while Scenes roll: the plane shows a window where it is, and the roll draws it on its way.
-        plane = !back && !turning && !compositor_overview_drawn() && !compositor_roll.on ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
+        plane = !back && !turning && !compositor_overview_drawn() && !compositor_roll.on && !compositor_cast_screens()
+                    ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
         if (plane < 0 && compositor.table)
                 compositor.table->unscanned_by[compositor.table->unscanned < WINDOWS_UNSCANNED ? compositor.table->unscanned : 0]++;
         if (back || turning || !compositor_gpu_tiled_ready())
@@ -1839,14 +1848,21 @@ static void compositor_present_frames(void)
         // goes to the other plate at the next swap and is joined there: with two screens every present after the first composed the whole space.
         if (flip_own || (compositor_output_count() < 2 && compositor.plane_row < 0))
                 compositor_front_stale_any = 0;
+        // The present's damage, for the shares' rings after the flip is told (the frames' pictures are still this present's).
+        static int cast_damage[COMPOSITOR_DAMAGE][4];
+        unsigned int cast_damages = compositor.damages < COMPOSITOR_DAMAGE ? compositor.damages : COMPOSITOR_DAMAGE;
+
+        memory_copy(cast_damage, compositor.damage, (positive)cast_damages * sizeof(cast_damage[0]));
         compositor.damages = 0;
 #ifdef MOONWATER_GPU_C
         if (gpu_drawn && compositor_card.on)
         {
                 compositor_card_after((const unsigned short (*)[4])clip, clips, turning, gpu_composed, flip_own, back, plane_off, rows, windows);
+                compositor_cast_present(frames, count, rows, windows, (const int (*)[4])cast_damage, cast_damages);
                 return;
         }
 #endif
         compositor_present_tell((const unsigned short (*)[4])clip, clips, turning, gpu_composed, flip_own, back, plane_off);
+        compositor_cast_present(frames, count, rows, windows, (const int (*)[4])cast_damage, cast_damages);
 }
 

@@ -969,6 +969,7 @@ SHELL_OPTIMIZE_OS_POP
 #endif
 #if MOONWATER_UI_NOTICES
 #include "../canvas/ui/notices.c"
+#include "../canvas/ui/share.c" // the share app: what a program may share, picked by the person, and the shares stopped
 #endif
 #if MOONWATER_UI_SOFTWARE
 #include "../canvas/ui/software.c"

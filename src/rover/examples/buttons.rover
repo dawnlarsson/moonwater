@@ -20,6 +20,11 @@ rule notices-button
 	on button notices
 	do open notices -a
 
+# The tray's share cell, or a program asking to share the screen: the share app, which asks the person, or lists what is shared to stop it.
+rule share-button
+	on button share
+	do open share -a
+
 # The clock and the battery pressed twice: Settings.
 rule settings-button
 	on button tray-double

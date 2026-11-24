@@ -808,6 +808,8 @@ static void sessionbus_drain_watch(void)
                 sessionbus.dirty = 1;
 }
 
+#include "../cast/service.c" // the capture engine's half of this process: the ScreenCast portal's host and its PipeWire
+
 static b32 sessionbus_main()
 {
         unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1);
@@ -858,6 +860,7 @@ static b32 sessionbus_main()
                 log_flush();
                 return 1;
         }
+        castbus_start();
         sessionbus_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
         sessionbus.signals = (int)sessionbus_call(syscall(signalfd4), (positive)-1, (positive)address_of mask, 8, 0x800 | 0x80000, 0, 0);
         system_signal_install(13, 1, 0, 0, null); // SIGPIPE: a write to a program that went is an error to see, not an end
@@ -886,9 +889,9 @@ static b32 sessionbus_main()
         sessionbus_settings();
         for (;;)
         {
-                struct sessionbus_poll watch[3 + 2 * DBUS_CLIENTS];
-                long owner[3 + 2 * DBUS_CLIENTS], count = 0;
-                long wait = dbus_wait(1000); // a second, or less when the bus has a deadline sooner (a portal Response it holds)
+                struct sessionbus_poll watch[3 + 2 * DBUS_CLIENTS + CASTBUS_POLLS];
+                long owner[3 + 2 * DBUS_CLIENTS + CASTBUS_POLLS], count = 0;
+                long wait = castbus_wait(dbus_wait(1000)); // a second, or less when the bus has a deadline sooner (a portal Response it holds)
                 positive timeout[2] = {(positive)(wait / 1000), (positive)(wait % 1000) * 1000000};
                 long now;
 
@@ -919,6 +922,7 @@ static b32 sessionbus_main()
                                 watch[count] = (struct sessionbus_poll){sessionbus_chooser[slot].out, SESSIONBUS_POLLIN, 0};
                                 owner[count++] = -4 - slot;
                         }
+                count += castbus_watch(watch + count, owner + count, CASTBUS_OWNER);
                 sessionbus_call(syscall(ppoll), (positive)watch, (positive)count, (positive)timeout, 0, 0, 0);
                 for (long at = 0; at < count; at++)
                 {
@@ -930,6 +934,8 @@ static b32 sessionbus_main()
                                 goto stop;
                         else if (owner[at] == -3)
                                 sessionbus_drain_watch();
+                        else if (owner[at] <= CASTBUS_OWNER)
+                                castbus_event(CASTBUS_OWNER, owner[at], watch[at].returned);
                         else if (owner[at] <= -4)
                         {
                                 if (sessionbus_chooser[-4 - owner[at]].out >= 0)
@@ -951,6 +957,7 @@ static b32 sessionbus_main()
                     (sessionbus.inotify < 0 && now - sessionbus.last_settings > 1000))
                         sessionbus_settings();
                 dbus_tick();
+                castbus_tick();
                 for (long slot = 0; slot < DBUS_CLIENTS; slot++)
                         sessionbus_flush(slot);
         }

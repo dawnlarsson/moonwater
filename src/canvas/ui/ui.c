@@ -914,6 +914,8 @@ static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop
 #define TASKBAR_NOTICES (-8)
 // The keyboard on the screen, a cell of its own first in the tray while one can be asked for by touch or a controller (taskbar_keyboard_set):
 #define TASKBAR_KEYBOARD (-14)
+// The share cell, before every other in the tray while the screen or a window is shared or a program asks to (taskbar_share_set):
+#define TASKBAR_SHARE (-15)
 // The plate the windows' tabs float on:
 #define TASKBAR_TABS (-10)
 // The tray's items that are set before the tasks (`taskbar tray ITEM before`), a pill of their own on that side:
@@ -1119,7 +1121,8 @@ enum taskbar_cell_act
         TASKBAR_ACT_MIC_MUTE,    // the microphone cell's middle press
         TASKBAR_ACT_SETTINGS,    // the tray: a double press opens the settings
         TASKBAR_ACT_NOTICES_OPEN, // the notices dot: the notices popup beside it
-        TASKBAR_ACT_KEYBOARD     // the keyboard cell: the keyboard on the screen asked for, or put away
+        TASKBAR_ACT_KEYBOARD,    // the keyboard cell: the keyboard on the screen asked for, or put away
+        TASKBAR_ACT_SHARE_OPEN   // the share cell: what is shared, and its Stop, beside it
 };
 
 struct taskbar_cell_rule
@@ -1139,6 +1142,7 @@ static const struct taskbar_cell_rule taskbar_cell_rules[] = {
         {TASKBAR_MIC, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_MIC_MUTE, 0},
         {TASKBAR_NOTICES, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_NOTICES_OPEN, 0},
         {TASKBAR_KEYBOARD, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_KEYBOARD, 0},
+        {TASKBAR_SHARE, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_SHARE_OPEN, 0},
         {TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_SETTINGS, 1},
 };
 
@@ -6970,6 +6974,13 @@ LANGUAGE_ID(settings_unknown, "unknown") \
 LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
+LANGUAGE_ID(share_asks, "%s asks to see:") \
+LANGUAGE_ID(share_refuse, "Don't share") \
+LANGUAGE_ID(share_screen, "Entire screen") \
+LANGUAGE_ID(share_screen_of, "Screen %1$d, %2$s") \
+LANGUAGE_ID(share_stop, "Stop sharing %1$s with %2$s") \
+LANGUAGE_ID(share_stop_all, "Stop all sharing") \
+LANGUAGE_ID(share_the_screen, "the screen") \
 LANGUAGE_ID(software_cannot_start, "The command could not start") \
 LANGUAGE_ID(software_confirm_remove, "remove %s") \
 LANGUAGE_ID(software_confirm_take_away, "take away the %s bowl and everything in it") \

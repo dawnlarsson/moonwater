@@ -5,7 +5,7 @@
         78 types, 102 states, 60 events, 20 primitives, 60 functions (25 of them in the kernel), 203 tools.
 */
 
-#define ROVER_SCHEMA_HASH 0x5b6e9b66u
+#define ROVER_SCHEMA_HASH 0xc373a661u
 #define ROVER_TYPES 78
 #define ROVER_STATES 102
 #define ROVER_EVENT_ROWS 60
@@ -37,7 +37,7 @@ static const struct rover_type_row rover_types[ROVER_TYPES] = {
         {ROVER_T_ENUM, 13, 0ll, 0ll, "other,audio,comm,hid,image,printer,storage,hub,data,smartcard,video,wireless,vendor"},
         {ROVER_T_INT, 0, 0ll, 65535ll, ""},
         {ROVER_T_ENUM, 8, 0ll, 0ll, "keyboard,mouse,touchpad,touchscreen,pad,tablet,switch,other"},
-        {ROVER_T_ENUM, 6, 0ll, 0ll, "launcher,volume,mic,notices,tray-double,pin"},
+        {ROVER_T_ENUM, 7, 0ll, 0ll, "launcher,volume,mic,notices,tray-double,pin,share"},
         {ROVER_T_INT, 0, 0ll, 63ll, ""},
         {ROVER_T_ENUM, 3, 0ll, 0ll, "live,disk,ask"},
         {ROVER_T_ENUM, 3, 0ll, 0ll, "wifi,bluetooth,all"},
@@ -1031,7 +1031,7 @@ static const char rover_schema_text[] =
         "event id=68 name=\"window closed\" source=desktop fields=app:word\n"
         "event id=69 name=\"display added\" source=desktop fields=connector:word\n"
         "event id=70 name=\"display removed\" source=desktop fields=connector:word\n"
-        "event id=71 name=button source=desktop fields=name:enum:launcher,volume,mic,notices,tray-double,pin;slot:int:0:63;app:word\n"
+        "event id=71 name=button source=desktop fields=name:enum:launcher,volume,mic,notices,tray-double,pin,share;slot:int:0:63;app:word\n"
         "event id=96 name=cue source=runner fields=name:word\n"
         "event id=97 name=\"service up\" source=runner fields=name:word\n"
         "event id=98 name=\"service down\" source=runner fields=name:word\n"

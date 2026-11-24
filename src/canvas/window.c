@@ -330,6 +330,40 @@ enum
         WINDOWS_COPY_TABLE = 0, WINDOWS_COPY_CARD, WINDOWS_COPY_CPU, WINDOWS_COPY_WHOLE
 };
 
+/*
+        A capture of the engine (src/cast/cast.h): one row a share, asked by a sink (the session bus's portal: WINDOWS_CAST_ASKED,
+        with the program that asks and what it may be shown), answered by the person in the share app (PICKED with what to share,
+        or REFUSED), made by the compositor (LIVE: a ring of `slots` frames in a sealed memfd of its own, ring_fd in ring_pid,
+        each slot_bytes, the frames composed at its presents), and ended by any of them (STOPPED: the person pressed Stop, the
+        window went; FREE: the sink let it go). The slots are written by the compositor alone and read by the sinks: a slot
+        written is seq odd, then even and the newest (latest); a sink holds a slot (held) while its consumer may read it, and the
+        compositor never writes a held one or the newest. Root's, as the table is: a bowl's program reaches it through a sink.
+*/
+#define WINDOWS_CASTS 16
+#define WINDOWS_CAST_SLOTS 4
+#define WINDOWS_CAST_DAMAGE 16
+enum
+{
+        WINDOWS_CAST_FREE = 0u, WINDOWS_CAST_ASKED, WINDOWS_CAST_PICKED, WINDOWS_CAST_LIVE, WINDOWS_CAST_REFUSED, WINDOWS_CAST_STOPPED,
+        WINDOWS_CAST_SCREEN = 1u, WINDOWS_CAST_WINDOW = 2u, WINDOWS_CAST_SCENE = 3u,
+        WINDOWS_CAST_MONITOR = 1u, WINDOWS_CAST_TOPLEVEL = 2u, WINDOWS_CAST_VIRTUAL = 4u, // the portal's source types, asked
+        WINDOWS_CAST_CURSOR_HIDDEN = 1u, WINDOWS_CAST_CURSOR_EMBEDDED = 2u
+};
+
+struct windows_cast
+{
+        unsigned int state, ticket, pid, uid, types, cursor;
+        char app[WINDOWS_APP_ID];
+        unsigned int kind, target, target_pid, sound, said;
+        unsigned int width, height, stride, slots, rate, ring_pid;
+        int ring_fd;
+        unsigned long slot_bytes;
+        unsigned int latest, frames, dropped;
+        unsigned int seq[WINDOWS_CAST_SLOTS], held[WINDOWS_CAST_SLOTS], damages[WINDOWS_CAST_SLOTS];
+        unsigned long long stamp[WINDOWS_CAST_SLOTS];
+        int damage[WINDOWS_CAST_SLOTS][WINDOWS_CAST_DAMAGE][4];
+};
+
 struct windows
 {
         unsigned int output_width, output_height, scale, period, stride, focus, scanned, refused, refused_error, unscanned;
@@ -496,6 +530,10 @@ struct windows
            modifiers sticky keys holds for the next key and keeps held (WINDOW_KEY_* bits), for the taskbar or the keyboard on
            the screen to show. The compositor's (access.c), written when they change. */
         unsigned int input_modality, access_latched, access_locked;
+        /* The capture engine's rows (src/cast/cast.h): what is shared, and with whom. cast_serial moves with every change of a row,
+           and the clipboard's door rings the compositor after one. */
+        unsigned int cast_serial;
+        struct windows_cast casts[WINDOWS_CASTS];
 };
 
 enum
@@ -503,7 +541,7 @@ enum
         WINDOWS_MODALITY_NONE = 0u, WINDOWS_MODALITY_KEYS = 1u, WINDOWS_MODALITY_POINTER = 2u, WINDOWS_MODALITY_TOUCH = 3u
 };
 
-#define WINDOWS_ABI 15u
+#define WINDOWS_ABI 16u
 #define WINDOWS_CLIP_NO 0x80000000u
 #define WINDOWS_CLIP_MOST (64ul << 20)
 #define WINDOWS_CLIP_DOOR "/run/moonwater/clip"

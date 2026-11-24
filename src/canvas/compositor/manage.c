@@ -4462,6 +4462,7 @@ static void compositor_clip_cli(void)
         else
                 compositor_door_drain(compositor_clip.door);
         compositor_clip_cli_read();
+        compositor_cast_look(0); // the clipboard's door rings for the shares too
 }
 
 static int compositor_clip_start(void)
@@ -4710,5 +4711,5 @@ HOT static void compositor_doors_done(void)
                         compositor_door_gone(row);
         }
         if (rows_has(&drained, COMPOSITOR_DOOR_MISC))
-                compositor_clip_cli_read();
+                compositor_clip_cli_read(), compositor_cast_look(0);
 }

@@ -1561,6 +1561,12 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                         return;
                 }
         }
+        // The share cell, or a program asking to share the screen (the compositor says it for both): the share app.
+        if (rover_bytes_are(line, length, "share_button"))
+        {
+                (void)rover_runner_post(71, null, 0, 6);
+                return;
+        }
         if (length > 10 && !memory_compare(line, "pin_start_", 10))
         {
                 p8 slot_text[ROVER_PIN_DIGITS + 1], path[48];

@@ -1062,6 +1062,8 @@ static struct windows_owner windows_owner_held[WINDOWS];
 #include "compositor/wallpaper.c" // each Scene's wallpaper: its word kept and asked for, the miniatures of the words, the editor over a Scene
 #include "compositor/input.c" // what a person does: the keys and the chords, the volume, the hand's motion and buttons, the prediction, the wheel and the pad, the marks and touch
 #include "compositor/access.c" // the desktop with no mouse to hand: a controller (and next a switch, the keys as a pointer, dwell) as the pointer and the actions
+#include "../cast/cast.h"
+#include "compositor/cast.c" // the capture engine's video: the shares' rings, made when the person picks and composed into at the presents
 
 /* Sealed memfd for the window table (udmabuf zero-copy scanout; symlinked at WINDOWS_TABLE). */
 static long compositor_table_memfd(unsigned long bytes)

@@ -77,8 +77,8 @@ event 68 desktop "window closed" app:word
 event 69 desktop "display added" connector:word
 event 70 desktop "display removed" connector:word
 # A press of the desktop's own: the panel's launcher button, the tray's volume, microphone and notices cells,
-# its clock pressed twice, and a pinned program's task, whose slot and program the compositor says.
-event 71 desktop button name:enum:launcher,volume,mic,notices,tray-double,pin slot:int:0:63 app:word
+# its clock pressed twice, a pinned program's task, whose slot and program the compositor says, and the share cell (or a program asking to share).
+event 71 desktop button name:enum:launcher,volume,mic,notices,tray-double,pin,share slot:int:0:63 app:word
 
 # The rules' own event, which emit posts.
 event 96 runner cue name:word

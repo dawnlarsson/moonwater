@@ -1344,6 +1344,7 @@ static void compositor_popup_trigger(const char *named, const char *say, int x, 
 static void compositor_volume_open(int x, int y) { compositor_popup_trigger("mixer-quick", "volume_button", x, y, TASKBAR_VOLUME); }
 static void compositor_mic_open(int x, int y) { compositor_popup_trigger("mixer-quick", "mic_button", x, y, TASKBAR_MIC); }
 static void compositor_notices_open(int x, int y) { compositor_popup_trigger("notices", "notices_button", x, y, TASKBAR_NOTICES); }
+static void compositor_share_open(int x, int y) { compositor_popup_trigger("share", "share_button", x, y, TASKBAR_SHARE); }
 
 static struct windows_issues compositor_notices_copy;
 static unsigned int compositor_notices_seq;
@@ -2698,7 +2699,7 @@ static int compositor_button_band(int tab, unsigned int code, int up)
                         compositor_tray_click(TASKBAR_TRAY_ITEM_BASE - tab, code == COMPOSITOR_BTN_RIGHT ? 3 : 1);
                 return 1;
         }
-        if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == TASKBAR_NOTICES || tab == COMPOSITOR_TRAY)
+        if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == TASKBAR_NOTICES || tab == TASKBAR_SHARE || tab == COMPOSITOR_TRAY)
         {
                 switch (taskbar_cell_press(&compositor.cells, tab, code - COMPOSITOR_BTN_LEFT, clock_monotonic_nanoseconds(), px, py, compositor.scale))
                 {
@@ -2714,6 +2715,7 @@ static int compositor_button_band(int tab, unsigned int code, int up)
                 case TASKBAR_ACT_MIC_MUTE: compositor_mic_step(); break;
                 case TASKBAR_ACT_SETTINGS: compositor_settings_open(); break;
                 case TASKBAR_ACT_NOTICES_OPEN: compositor_notices_open(px, py); break;
+                case TASKBAR_ACT_SHARE_OPEN: compositor_share_open(px, py); break;
                 case TASKBAR_ACT_KEYBOARD: compositor_osk_toggle(); break;
                 default: break;
                 }
