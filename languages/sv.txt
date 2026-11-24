@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language sv
 @name Svenska
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Å&terställ zoom
 menu_save_as	7bbe	Spara som...
 menu_select_all	f6f6	&Markera allt
 menu_set_wallpaper	1a27	Använd som &skrivbordsbild
-menu_set_wallpaper_of	aa60	Använd som skrivbordsbild för %s
 menu_show_hidden	37bd	Visa &dolda filer
 menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	ihopparad: ansluter när den vaknar; Delete glömme
 settings_bt_pairing	da7b	parar ihop: håll enheten i parkopplingsläge
 settings_busy	34e0	moonwater är upptaget: ändringarna före den här är inte klara
 settings_button_discover	c0ee	Upptäck
+settings_button_edit	6cb1	Redigera
 settings_button_end	adad	Avsluta alla
 settings_button_open	10e9	Öppna
 settings_button_pair	f1d1	Para ihop
@@ -514,9 +515,6 @@ settings_unknown	9fb9	okänt
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENT]
 settings_virtual_refused	4202	en virtuell enhet kan inte slå på detta: använd ett tangentbord eller en mus som är ansluten till datorn, eller moonwater ssh i en root-terminal
-settings_wall_hint	ccf0	Välj en PNG i Filer och sedan Använd som skrivbordsbild för den här skärmen
-settings_wall_own	2b4f	Egen bild
-settings_wall_same	d736	Samma som alla skärmar
 taskbar_tab_exit	44a5	Avsluta
 taskbar_tab_pin	d57f	Fäst i aktivitetsfältet
 taskbar_tab_stop	3684	Tvinga stopp
@@ -596,6 +594,7 @@ ui_field_full	fe02	mer ryms inte
 =Caret blink speed	4085	Textmarkörens blinkhastighet
 =Caret thickness	1e9a	Textmarkörens tjocklek
 =Charge limit (20 to 100, or off)	c92d	Laddningsgräns (20 till 100, eller off)
+=Choose each Scene's wallpaper on the desktop	25bd	Välj varje scens skrivbordsbild på skrivbordet
 =Clipboard	99b1	Urklipp
 =Clipboard history (copies kept)	7423	Urklippshistorik (sparade kopior)
 =Clock	80fd	Klocka
@@ -800,11 +799,6 @@ ui_field_full	fe02	mer ryms inte
 =Variable refresh rate	06a4	Variabel uppdateringsfrekvens
 =Volume (percent, or default)	f6e3	Volym (procent eller default)
 =Wallpaper	0da9	Skrivbordsbild
-=Wallpaper glow	57c6	Skrivbordsbildens sken
-=Wallpaper in the dark theme	a6dc	Skrivbordsbild i mörkt tema
-=Wallpaper of this screen	2c92	Skrivbordsbild för den här skärmen
-=Wallpaper picture (a PNG file, or none)	8e9d	Skrivbordsbild (en PNG-fil, eller ingen)
-=Wallpaper seas (percent grey)	6836	Skrivbordsbildens hav (procent grått)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Vad ett svep in från den här kanten gör
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Var Canvas ritar: på GPU:n eller processorn. Vad kortet gör nu står under
@@ -832,7 +826,6 @@ ui_field_full	fe02	mer ryms inte
 =default	5bde	standard
 =deny	6367	neka
 =desktop	87b3	skrivbord
-=dimmed	bded	dämpad
 =dmy	2a79	dmy
 =dynamic	96ae	dynamisk
 =edge	d83c	kant
@@ -841,15 +834,12 @@ ui_field_full	fe02	mer ryms inte
 =forest	2a60	skog
 =full	b33c	full
 =games	2b9c	spel
-=glow	27bc	sken
-=glow-and-edges	540f	sken-och-kanter
 =graphite	dc8d	grafit
 =green	ecbc	grön
 =grouped	8b7d	grupperade
 =high	b9fd	hög
 =hinted	c039	på begäran
 =ink	8faf	bläck
-=inverted	8038	inverterad
 =kernel log	415a	kärnlogg
 =kernel log klog dmesg messages	1a8d	kärnlogg klog dmesg meddelanden
 =late	4d21	sena
@@ -874,8 +864,6 @@ ui_field_full	fe02	mer ryms inte
 =per second	4f98	per sekund
 =percent	fa5a	procent
 =performance	8ca5	prestanda
-=picture	d389	bild
-=plain	3f67	enkel
 =plum	b06b	plommon
 =powersave	2283	strömsparläge
 =primary	5fd9	primär

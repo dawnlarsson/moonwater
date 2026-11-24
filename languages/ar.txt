@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language ar
 @name العربية
 @translated machine
@@ -259,7 +260,6 @@ menu_reset_zoom	1b0f	إعادة تعيين التكبير
 menu_save_as	7bbe	حفظ باسم...
 menu_select_all	f6f6	تحديد الكل
 menu_set_wallpaper	1a27	تعيين خلفية لسطح المكتب
-menu_set_wallpaper_of	aa60	تعيين خلفية لـ %s
 menu_show_hidden	37bd	إظهار الملفات المخفية
 menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
@@ -314,6 +314,7 @@ settings_bt_paired_keys	6d99	مقترن: يتصل عندما يستيقظ؛ Dele
 settings_bt_pairing	da7b	جارٍ الإقران: أبقِ الجهاز في وضع الإقران
 settings_busy	34e0	moonwater مشغول: لم تكتمل التغييرات السابقة بعد
 settings_button_discover	c0ee	اكتشف
+settings_button_edit	6cb1	تحرير
 settings_button_end	adad	إنهاء الكل
 settings_button_open	10e9	فتح
 settings_button_pair	f1d1	إقران
@@ -515,9 +516,6 @@ settings_unknown	9fb9	غير معروف
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	الفعل [الوسائط]
 settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
-settings_wall_hint	ccf0	اختر ملف PNG في الملفات، ثم عيّنه خلفية لهذه الشاشة
-settings_wall_own	2b4f	صورتها الخاصة
-settings_wall_same	d736	مثل كل الشاشات
 taskbar_tab_exit	44a5	خروج
 taskbar_tab_pin	d57f	تثبيت في شريط المهام
 taskbar_tab_stop	3684	إيقاف إجباري
@@ -597,6 +595,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Caret blink speed	4085	سرعة وميض مؤشر النص
 =Caret thickness	1e9a	سماكة مؤشر النص
 =Charge limit (20 to 100, or off)	c92d	حد الشحن (من 20 إلى 100 أو off)
+=Choose each Scene's wallpaper on the desktop	25bd	اختر خلفية كل مشهد على سطح المكتب
 =Clipboard	99b1	الحافظة
 =Clipboard history (copies kept)	7423	سجل الحافظة (النسخ المحفوظة)
 =Clock	80fd	الساعة
@@ -801,11 +800,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Variable refresh rate	06a4	معدل التحديث المتغير
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
 =Wallpaper	0da9	خلفية سطح المكتب
-=Wallpaper glow	57c6	توهج خلفية سطح المكتب
-=Wallpaper in the dark theme	a6dc	خلفية سطح المكتب في السمة الداكنة
-=Wallpaper of this screen	2c92	خلفية هذه الشاشة
-=Wallpaper picture (a PNG file, or none)	8e9d	صورة الخلفية (ملف PNG أو لا شيء)
-=Wallpaper seas (percent grey)	6836	بحار خلفية سطح المكتب (نسبة الرمادي)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	ما يفعله السحب من هذه الحافة
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	أين يرسم Canvas: على GPU أو المعالج. ما تفعله البطاقة الآن تحته
@@ -833,7 +827,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =default	5bde	افتراضي
 =deny	6367	منع
 =desktop	87b3	سطح المكتب
-=dimmed	bded	خافتة
 =dmy	2a79	dmy
 =dynamic	96ae	ديناميكي
 =edge	d83c	الحافة
@@ -842,15 +835,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =forest	2a60	أخضر الغابة
 =full	b33c	كامل
 =games	2b9c	الألعاب
-=glow	27bc	توهج
-=glow-and-edges	540f	توهج-وحواف
 =graphite	dc8d	جرافيت
 =green	ecbc	أخضر
 =grouped	8b7d	مجمّعة
 =high	b9fd	مرتفع
 =hinted	c039	عند الطلب
 =ink	8faf	حبر
-=inverted	8038	معكوسة
 =kernel log	415a	سجل النواة
 =kernel log klog dmesg messages	1a8d	سجل النواة klog dmesg رسائل
 =late	4d21	عند التأخر
@@ -875,8 +865,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =per second	4f98	في الثانية
 =percent	fa5a	نسبة مئوية
 =performance	8ca5	الأداء
-=picture	d389	صورة
-=plain	3f67	بسيطة
 =plum	b06b	برقوقي
 =powersave	2283	توفير الطاقة
 =primary	5fd9	الرئيسية

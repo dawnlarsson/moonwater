@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language it
 @name Italiano
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Rei&mposta zoom
 menu_save_as	7bbe	Salva con nome...
 menu_select_all	f6f6	Seleziona t&utto
 menu_set_wallpaper	1a27	Imposta come &sfondo
-menu_set_wallpaper_of	aa60	Imposta come sfondo di %s
 menu_show_hidden	37bd	Mostra file &nascosti
 menu_toggle_comment	92ac	Attiva/disattiva co&mmento
 menu_undo	b9d3	&Annulla
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	abbinato: si connette quando si risveglia; Delete l
 settings_bt_pairing	da7b	abbinamento: tieni il dispositivo in modalità di abbinamento
 settings_busy	34e0	moonwater è occupato: le modifiche precedenti non sono finite
 settings_button_discover	c0ee	Rileva
+settings_button_edit	6cb1	Modifica
 settings_button_end	adad	Termina tutte
 settings_button_open	10e9	Apri
 settings_button_pair	f1d1	Abbina
@@ -514,9 +515,6 @@ settings_unknown	9fb9	sconosciuto
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBO [ARGOMENTI]
 settings_virtual_refused	4202	un dispositivo virtuale non può attivarlo: usare una tastiera o un mouse collegati alla macchina, oppure moonwater ssh in un terminale root
-settings_wall_hint	ccf0	Scegli un PNG in File, poi Imposta come sfondo di questo schermo
-settings_wall_own	2b4f	La sua immagine
-settings_wall_same	d736	Come tutti gli schermi
 taskbar_tab_exit	44a5	Esci
 taskbar_tab_pin	d57f	Blocca sulla barra delle applicazioni
 taskbar_tab_stop	3684	Forza arresto
@@ -596,6 +594,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Caret blink speed	4085	Velocità di lampeggio del cursore di testo
 =Caret thickness	1e9a	Spessore del cursore di testo
 =Charge limit (20 to 100, or off)	c92d	Limite di carica (da 20 a 100, oppure off)
+=Choose each Scene's wallpaper on the desktop	25bd	Scegli lo sfondo di ogni scena sulla scrivania
 =Clipboard	99b1	Appunti
 =Clipboard history (copies kept)	7423	Cronologia degli appunti (copie conservate)
 =Clock	80fd	Orologio
@@ -800,11 +799,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Variable refresh rate	06a4	Frequenza di aggiornamento variabile
 =Volume (percent, or default)	f6e3	Volume (percentuale o default)
 =Wallpaper	0da9	Immagine di sfondo
-=Wallpaper glow	57c6	Bagliore dell'immagine di sfondo
-=Wallpaper in the dark theme	a6dc	Immagine di sfondo nel tema scuro
-=Wallpaper of this screen	2c92	Sfondo di questo schermo
-=Wallpaper picture (a PNG file, or none)	8e9d	Immagine di sfondo (un file PNG, o nessuna)
-=Wallpaper seas (percent grey)	6836	Mari dell'immagine di sfondo (percentuale di grigio)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Cosa fa uno scorrimento da questo bordo
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Dove disegna Canvas: sulla GPU o sul processore. Cosa fa ora la scheda è sotto
@@ -832,7 +826,6 @@ ui_field_full	fe02	non ce ne sta di più
 =default	5bde	predefinito
 =deny	6367	nega
 =desktop	87b3	desktop
-=dimmed	bded	attenuato
 =dmy	2a79	dmy
 =dynamic	96ae	dinamico
 =edge	d83c	bordo
@@ -841,15 +834,12 @@ ui_field_full	fe02	non ce ne sta di più
 =forest	2a60	foresta
 =full	b33c	completo
 =games	2b9c	giochi
-=glow	27bc	bagliore
-=glow-and-edges	540f	bagliore-e-bordi
 =graphite	dc8d	grafite
 =green	ecbc	verde
 =grouped	8b7d	raggruppate
 =high	b9fd	alto
 =hinted	c039	su richiesta
 =ink	8faf	inchiostro
-=inverted	8038	invertito
 =kernel log	415a	registro del kernel
 =kernel log klog dmesg messages	1a8d	registro kernel klog dmesg messaggi
 =late	4d21	in ritardo
@@ -874,8 +864,6 @@ ui_field_full	fe02	non ce ne sta di più
 =per second	4f98	al secondo
 =percent	fa5a	percentuale
 =performance	8ca5	prestazioni
-=picture	d389	immagine
-=plain	3f67	semplice
 =plum	b06b	prugna
 =powersave	2283	risparmio energetico
 =primary	5fd9	principale

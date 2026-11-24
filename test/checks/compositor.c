@@ -3416,36 +3416,37 @@ static void check_bar_options(void)
 }
 
 /*
-        The wallpaper as the ground: once the rows are read, `canvas wallpaper moon` makes it for the space, and what the ground was
-        filled with is copied from it (a rectangle, a pixel under a blended picture); made again only when a row, the theme or the space
-        changes, the whole space damaged then and nothing at a present after; `plain` lets it go and the ground is the colour again.
+        The wallpaper as the ground: once the words are read, the moon is made for the space, and what the ground was filled with is
+        copied from it (a rectangle, a pixel under a blended picture); made again only when a word, the theme or the space changes, the
+        whole space damaged then and nothing at a present after. Each Scene's word (wallpaper.c): auto with no file, kept by the screen
+        and the Scene's number, a white one another wallpaper; a word asked by the command; a picture's word whose picture is remembered
+        no more auto again; a Scene added takes the word of the one shown, and one taken away takes its word with it, the Scenes after it a
+        number less.
 */
 static void check_wallpaper_ground(void)
 {
     static unsigned int target_pixels[320 * 200];
     static struct windows *table_scratch;
+    static char scenes_path[64], pictures_path[64];
     struct windows *const table_at = windows_scratch_table(&table_scratch);
     struct compositor_target t;
     unsigned int damages;
-    b32 made, copied, kept, plain, glow;
+    positive length;
+    b32 made, copied, kept, white, asked, forgotten, added, removed;
 
+    length = positive_into_string((p8 address_to)scenes_path + 23, (positive)system_call(syscall(getpid)));
+    memory_copy(scenes_path, "/tmp/moonwater-walls-s.", 23), scenes_path[23 + length] = 0;
+    memory_copy(pictures_path, scenes_path, 24 + length), pictures_path[21] = 'p';
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path;
     compositor_zero();
     windows_scratch_zero(table_at);
     table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u;
     compositor.table = table_at, compositor.width = 320, compositor.height = 200;
-    // With no file of any row (a live boot), the rows read are the standards: the moon, dimmed, 45 percent seas, the glow.
-    compositor_wall_rows.moon = 0, compositor_wall_rows.ready = 0;
-    {
-        bipolar any = system_open_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_PATH, O_RDONLY | O_CLOEXEC);
-
-        if (any >= 0)
-            system_close(any);
-        compositor_wall_read();
-        check("wallpaper: with no file of its rows the ground is the moon, dimmed, its seas 45 percent, with the glow",
-              any >= 0 || (compositor_wall_rows.ready && compositor_wall_rows.moon && compositor_wall_rows.dimmed && compositor_wall_rows.maria == 45 &&
-                           compositor_wall_rows.glow == 1));
-    }
-    compositor_wall_rows.moon = 1, compositor_wall_rows.dimmed = 1, compositor_wall_rows.maria = 45, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 1;
+    compositor_wall_rows.ready = 0;
+    compositor_wall_read();
+    check("wallpaper: with no file of the Scenes' words every Scene is auto", compositor_wall_rows.ready && !compositor_walls.lines &&
+                                                                               string_equals((string_address)compositor_wall_shown(0), "auto"));
     compositor_wall_keep();
     // Made on its thread: nothing shown till it is done, then taken.
     made = !compositor_wall && compositor_wall_making();
@@ -3461,26 +3462,67 @@ static void check_wallpaper_ground(void)
     damages = compositor.damages;
     compositor_wall_keep();
     kept = compositor.damages == damages;
-    // The glow along the edges too: another wallpaper.
+    // The first Scene white: another wallpaper, the paper's, and the word kept in the file, read again the same.
     {
-        unsigned int before = compositor_wall[2 * 320 + 160];
+        unsigned int before = compositor_wall[5 * 320 + 5];
 
-        compositor_wall_rows.glow = 2;
+        compositor_wall_put(0, 1, "white");
         compositor_wall_keep();
         compositor_wall_finish();
-        glow = compositor_wall && compositor.damages > 0 && compositor_wall[2 * 320 + 160] != before;
+        white = compositor_wall && compositor.damages > 0 && compositor_wall[5 * 320 + 5] != before &&
+                (compositor_wall[5 * 320 + 5] & 0xffu) > (before & 0xffu);
+        compositor_walls_read();
+        white &= compositor_walls.lines == 1 && string_equals((string_address)compositor_wall_shown(0), "white");
     }
-    compositor_wall_rows.moon = 0;
-    compositor_wall_keep();
-    compositor_ground_fill(&t, 40, 30, 200, 150);
-    plain = !compositor_wall && target_pixels[100 * 320 + 160] == compositor_ground && compositor_ground_at(10, 10) == compositor_ground;
-    compositor_wall_rows.moon = 1, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 0;
+    // Asked by the command: a Scene of the screen you are on, then the one you are on.
+    {
+        char line[2][32] = {"scene - 2 dark", "current auto"};
+
+        compositor_wall_ask_line(line[0]);
+        asked = string_equals((string_address)compositor_wall_word(0, 2), "dark");
+        compositor_wall_ask_line(line[1]);
+        asked &= string_equals((string_address)compositor_wall_word(0, 1), "auto") && compositor_walls.lines == 1;
+    }
+    // A picture's word, and the picture remembered no more: auto again, and the file says so.
+    {
+        static const char listed[] = "sea\n";
+
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)pictures_path, listed, sizeof(listed) - 1, 0644);
+        compositor_walls_read();
+        compositor_wall_put(0, 1, "picture:sea");
+        forgotten = string_equals((string_address)compositor_wall_word(0, 1), "picture:sea");
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)pictures_path, "", 0, 0644);
+        compositor_walls_read();
+        forgotten &= string_equals((string_address)compositor_wall_word(0, 1), "auto") && compositor_walls.lines == 1;
+        compositor_walls_read();
+        forgotten &= compositor_walls.lines == 1;
+    }
+    // A Scene added from the first (white) is white; the first taken away takes its word, and the second (dark) is the first.
+    {
+        unsigned int second;
+
+        compositor_wall_put(0, 1, "white"), compositor_wall_put(0, 2, "auto");
+        compositor_spaces_ensure();
+        second = compositor_space_add_id(0, 0);
+        added = second && string_equals((string_address)compositor_wall_word_of(compositor_space_find(second)), "white");
+        compositor_wall_put(0, 2, "dark");
+        compositor_space_remove_index(0, 0);
+        removed = string_equals((string_address)compositor_wall_word_of(compositor_space_find(second)), "dark") &&
+                  compositor_wall_find("-", 2) < 0 && compositor_walls.lines == 1;
+    }
+    compositor_walls.lines = compositor_walls.names = 0;
+    compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    compositor_wall_rows.ready = 0;
     compositor_zero();
-    check("wallpaper: once the rows are read the moon is made for the space and the space damaged", made);
+    check("wallpaper: once the words are read the moon is made for the space and the space damaged", made);
     check("wallpaper: the ground is copied from it, a rectangle and a pixel alike", copied);
     check("wallpaper: kept: a present after makes nothing and damages nothing", kept);
-    check("wallpaper: a row changed makes it again (the glow along the edges)", glow);
-    check("wallpaper: plain lets it go, the ground the colour again", plain);
+    check("wallpaper: a Scene's word white is the paper's moon, kept in the file and read again the same", white);
+    check("wallpaper: the command's asks set a Scene by its number and the Scene you are on, auto taking the line away", asked);
+    check("wallpaper: a picture's word whose picture the list has no more is auto again, the file written so", forgotten);
+    check("wallpaper: a Scene added takes the word of the Scene shown", added);
+    check("wallpaper: a Scene taken away takes its word, and the Scenes after it are a number less", removed);
 }
 
 /*
@@ -3622,7 +3664,8 @@ static void check_wallpaper_turn(void)
     windows_scratch_zero(table_at);
     table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u;
     compositor.table = table_at, compositor.width = 320, compositor.height = 200;
-    compositor_wall_rows.moon = 1, compositor_wall_rows.dimmed = 1, compositor_wall_rows.maria = 45, compositor_wall_rows.glow = 1, compositor_wall_rows.ready = 1;
+    compositor_wall_rows.ready = 1;
+    compositor.direct_row = -1; // no window shown straight: a zeroed table says row 0 is (the step waits while one covers the wallpaper)
     taskbar.glides = 1, taskbar.moon_at = 0;
     taskbar_moon_seen(now);
     compositor_wall_keep();
@@ -3644,9 +3687,8 @@ static void check_wallpaper_turn(void)
     rest = compositor_wall_job.pixels == null && compositor.damages == 0;
     quiet = compositor_wall_due(now) == 0;
     taskbar.glides = 1;
-    compositor_wall_rows.moon = 0;
-    compositor_wall_keep();
-    compositor_wall_rows.moon = 1, compositor_wall_rows.ready = 0;
+    compositor_wall_drop();
+    compositor_wall_rows.ready = 0;
     compositor_zero();
     check("wallpaper turn: with the motion on and a hand about, the clock's next step turns the moon", stepped);
     check("wallpaper turn: a step damages the moon's square alone, the rest of the picture as it was", square);

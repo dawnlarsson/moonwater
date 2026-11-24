@@ -932,29 +932,27 @@ HOT static void compositor_present(void)
 
 /*
         The wallpaper kept for the space (compositor_wall): made again only when the space's size, the screens, the theme, the accent or
-        a row of `canvas wallpaper` changed. It is made on a thread of its own (compositor_wall_run), never on the loop: until it is
-        done the screen keeps what it showed (the last wallpaper, or the colour), and when it is the loop takes it at its next pass
+        the word of a Scene shown changed (wallpaper.c). It is made on a thread of its own (compositor_wall_run), never on the loop: until it
+        is done the screen keeps what it showed (the last wallpaper, or the colour), and when it is the loop takes it at its next pass
         (compositor_wall_keep), lets the old one go and damages the space once. A change while one is being made waits for it and is
-        made after. With no thread to be had it is made on the loop, as it was. Each screen has its own moon over its sky, in the dark
-        theme dimmed (the moon as it is, its seas `canvas wallpaper maria` of its highlands) or inverted (chalk on charcoal), in the light
-        one ink on paper, with the accent's glow round it and along the edges as `canvas wallpaper glow` says.
+        made after. With no thread to be had it is made on the loop, as it was. Each screen has the wallpaper of the Scene it shows: the
+        moon over its sky, dimmed in the dark look (the moon as it is, its seas 45 percent of its highlands) and ink on paper in the white
+        one, with the accent's glow round it; or a picture.
 */
 static struct
 {
-        int moon, dimmed, maria, glow; // the rows: the moon or plain, dimmed or inverted, the seas' grey (percent), none, glow or edges too
-        int ready;                     // the rows were read
-        int picture;                   // canvas wallpaper picture: every screen with no picture of its own shows COMPOSITOR_WALL_ALL
-        unsigned int stamp;            // COMPOSITOR_WALL_DIR's change time when the rows were read, 0 with no such directory
-} compositor_wall_rows = {1, 1, 45, 1, 0, 0, 0};
+        int ready;          // the words were read
+        unsigned int stamp; // COMPOSITOR_WALL_DIR's change time when they were read, 0 with no such directory
+} compositor_wall_rows;
 
 /*
-        A picture wallpaper (`canvas wallpaper picture FILE [SCREEN]`, which puts a copy of the PNG here): a screen's own,
-        COMPOSITOR_WALL_DIR/NAME.png by its connector's name, else the one for every screen, COMPOSITOR_WALL_ALL, while canvas
-        wallpaper is picture. It covers the screen, cut at its long sides to the screen's shape, and is made on the wallpaper's
-        thread as the moon is; a file that is not a PNG the kit reads, or larger than the limits, is the moon (or the colour).
+        A picture wallpaper (`canvas wallpaper picture FILE`, which puts a copy of the PNG in COMPOSITOR_WALL_DIR, or one of the feed's): the
+        file of the word of the Scene a screen shows (registry.c's setting_wallpaper_file). It covers the screen, cut at its long sides to the
+        screen's shape, and is made on the wallpaper's thread as the moon is; a file that is not a PNG the kit reads, or larger than the
+        limits, is the moon.
 */
-#define COMPOSITOR_WALL_DIR "/root/wallpapers"
-#define COMPOSITOR_WALL_ALL COMPOSITOR_WALL_DIR "/all.png"
+#define COMPOSITOR_WALL_DIR SETTING_WALLPAPER_DIR
+#define COMPOSITOR_WALL_KEY 9
 #define COMPOSITOR_WALL_FILE_MOST (64ul << 20)       // the bytes of a picture's file
 #define COMPOSITOR_WALL_PIXELS_MOST (48ul << 20)     // and its pixels, 8K by 4K and more
 #define COMPOSITOR_WALL_SIDE_MOST 16384u
@@ -967,18 +965,17 @@ static struct compositor_wall_job
         b32 done;                // the thread has made it (written last, with release)
         unsigned int *pixels;    // what it makes into, as large as the space
         positive bytes;
-        int width, height, count, dark, dimmed, maria, glow;
+        int width, height, count;
         unsigned int accent;
         int screens[COMPOSITOR_WALL_SCREENS][4];
-        unsigned int key[8];     // what it is made from
+        int dark[COMPOSITOR_WALL_SCREENS]; // each screen's moon: the dark look, or the white
+        unsigned int key[COMPOSITOR_WALL_KEY]; // what it is made from
         positive began, took;    // when it was begun, and how long it took (ns)
         b64 turn;                // the moon's turn it is made at
         int step;                // a step of the turn: the wallpaper as it was with each moon's square made again, and those squares its damage
         const unsigned int *from; // a step's: the wallpaper shown, which it starts from
         int squares[COMPOSITOR_WALL_SCREENS][4]; // each screen's moon's square, in the space
-        int moon;                // the moon where a screen has no picture, else the colour
-        unsigned int ground;     // the colour
-        char picture[COMPOSITOR_WALL_SCREENS][64]; // each screen's picture's file, "" for none
+        char picture[COMPOSITOR_WALL_SCREENS][sizeof(SETTING_WALLPAPER_DIR "/curated/") + SETTING_WALLPAPER_WORD + 4]; // each screen's picture's file, "" for the moon
 } compositor_wall_job;
 
 /*
@@ -1000,7 +997,7 @@ static void compositor_kmsg(string_address text, positive value, string_address 
         "compositor: wallpaper plain because ...", once for each change, so a screen with no wallpaper says why.
 */
 static int compositor_wall_pictured;
-static unsigned int compositor_wall_key[8];
+static unsigned int compositor_wall_key[COMPOSITOR_WALL_KEY];
 static positive compositor_wall_bytes;
 
 static void compositor_wall_drop(void)
@@ -1048,18 +1045,13 @@ static unsigned int compositor_wall_look(const char *path, unsigned int *stamp)
         return memory_load_unaligned(p16, info + 28) & 0170000u;
 }
 
-static int compositor_wall_picture_of(const char *name, int every, char *path, positive room)
+// The words of the Scenes shown (wallpaper.c), and a word's picture's file into path ("" for the moon's words).
+static const char *compositor_wall_shown(int screen);
+static unsigned int compositor_walls_gen(void);
+static int compositor_wall_picture_of(const char *word, char *path, positive room)
 {
-        if (name && name[0] && string_length((string_address)COMPOSITOR_WALL_DIR "/") + string_length((string_address)name) + 5 <= room)
-        {
-                string_copy((string_address)path, (string_address)COMPOSITOR_WALL_DIR "/");
-                string_append_bounded((string_address)path, (string_address)name, room);
-                string_append_bounded((string_address)path, (string_address) ".png", room);
-                if (compositor_wall_look(path, null) == 0100000u)
-                        return 1;
-        }
-        if (every && sizeof(COMPOSITOR_WALL_ALL) <= room && compositor_wall_look(COMPOSITOR_WALL_ALL, null) == 0100000u)
-                return string_copy((string_address)path, (string_address)COMPOSITOR_WALL_ALL), 1;
+        if (setting_wallpaper_file(word, ".png", path, room) && compositor_wall_look(path, null) == 0100000u)
+                return 1;
         return path[0] = 0, 0;
 }
 
@@ -1150,20 +1142,15 @@ static void compositor_wall_make(struct compositor_wall_job *job)
 
                 if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > job->width || y + h > job->height)
                         continue;
-                if (job->picture[at][0] || !job->moon)
+                if (job->picture[at][0])
                 {
                         unsigned int *corner = job->pixels + (long)y * job->width + x;
 
                         memory_zero(job->squares[at], sizeof(job->squares[at]));
-                        if (job->step || (job->picture[at][0] && compositor_wall_picture(job->picture[at], corner, job->width, w, h)))
+                        if (job->step || compositor_wall_picture(job->picture[at], corner, job->width, w, h))
                                 continue;
-                        if (!job->moon)
-                        {
-                                memory_fill_u32_rect(corner, (positive)job->width, (positive)w, (positive)h, job->ground | 0xff000000u);
-                                continue;
-                        }
                 }
-                taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark, job->dimmed, job->maria, job->glow, job->accent,
+                taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark[at], 1, 45, 1, job->accent,
                                   job->turn, job->step, job->squares[at < COMPOSITOR_WALL_SCREENS ? at : 0]);
                 job->squares[at][0] += x, job->squares[at][1] += y;
         }
@@ -1270,12 +1257,13 @@ static void compositor_wall_start(b64 turn, int step)
         job->width = compositor.width, job->height = compositor.height, job->count = count < COMPOSITOR_WALL_SCREENS ? (int)count : COMPOSITOR_WALL_SCREENS;
         for (int at = 0; at < job->count; at++)
                 memory_copy(job->screens[at], screens[at], sizeof(job->screens[at]));
-        job->dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
-        job->dimmed = compositor_wall_rows.dimmed, job->maria = compositor_wall_rows.maria, job->glow = compositor_wall_rows.glow;
-        job->moon = compositor_wall_rows.moon, job->ground = compositor_ground;
         for (int at = 0; at < (job->count ? job->count : 1) && at < COMPOSITOR_WALL_SCREENS; at++)
-                compositor_wall_picture_of(job->count && compositor.outputs ? compositor.output[at].name : "", compositor_wall_rows.picture,
-                                           job->picture[at], sizeof(job->picture[at]));
+        {
+                const char *word = compositor_wall_shown(at);
+
+                job->dark[at] = setting_wallpaper_dark(word, !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT));
+                compositor_wall_picture_of(word, job->picture[at], sizeof(job->picture[at]));
+        }
         job->accent = taskbar_wall_accent(), job->done = 0, job->began = clock_monotonic_nanoseconds(), job->took = 0;
         job->turn = turn, job->step = step;
         if (!(job->worker = thread_start(compositor_wall_run, (address_any)job)))
@@ -1285,7 +1273,7 @@ static void compositor_wall_start(b64 turn, int step)
 static void compositor_wall_keep(void)
 {
         struct compositor_wall_job *job = &compositor_wall_job;
-        unsigned int count = 0, now[8];
+        unsigned int count = 0, now[COMPOSITOR_WALL_KEY], words = 2166136261u;
         const int (*screens)[4] = compositor_screens(&count);
         int dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
 
@@ -1305,9 +1293,15 @@ static void compositor_wall_keep(void)
         }
         now[0] = (unsigned int)compositor.width, now[1] = (unsigned int)compositor.height, now[2] = count, now[3] = (unsigned int)dark;
         now[4] = taskbar_wall_accent();
-        now[5] = (unsigned int)(compositor_wall_rows.moon | compositor_wall_rows.dimmed << 1 | compositor_wall_rows.glow << 2 |
-                                compositor_wall_rows.picture << 4) ^ compositor_wall_rows.stamp << 5 ^ compositor_ground << 7;
-        now[6] = (unsigned int)compositor_wall_rows.maria, now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0;
+        // The words of the Scenes shown, a screen's after another's: a Scene switched to with another word is another wallpaper.
+        for (unsigned int at = 0; at < (count ? count : 1) && at < COMPOSITOR_WALL_SCREENS; at++)
+        {
+                const char *word = compositor_wall_shown((int)at);
+
+                words = hash_fnv1a(words * 16777619u, word, string_length((string_address)word));
+        }
+        now[5] = compositor_wall_rows.stamp ^ compositor_ground << 7, now[6] = compositor_walls_gen();
+        now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0, now[8] = words;
         if (!memory_compare(compositor_wall_key, now, sizeof(now)))
         {
                 if (compositor_wall)
@@ -1322,9 +1316,9 @@ static void compositor_wall_keep(void)
                 }
                 return;
         }
-        if ((!compositor_wall_rows.moon && !compositor_wall_rows.picture && !compositor_wall_rows.stamp) || compositor.width <= 0 || compositor.height <= 0)
+        if (compositor.width <= 0 || compositor.height <= 0)
         {
-                compositor_wall_say(!compositor_wall_rows.moon ? "canvas wallpaper is plain" : "the space has no screen yet", 0, 0, 0);
+                compositor_wall_say("the space has no screen yet", 0, 0, 0);
                 memory_copy(compositor_wall_key, now, sizeof(now));
                 compositor_wall_drop();
                 compositor_damage(0, 0, compositor.width, compositor.height);

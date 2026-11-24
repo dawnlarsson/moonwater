@@ -303,17 +303,15 @@ static p8 compositor_setting_num(const char *path, long *value)
         return compositor_setting_kept(path, word, value);
 }
 
+static void compositor_walls_read(void); // wallpaper.c: each Scene's word, and the pictures remembered
+static int compositor_wall_ask_name(const char *name);
+static void compositor_walls_asks(void);
+
 static void compositor_wall_read(void)
 {
-        long mode = 0, dark = 0;
         unsigned int stamp = 0;
 
-        compositor_setting_num(SETTING_WALLPAPER_PATH, &mode);
-        compositor_setting_num(SETTING_WALLPAPER_DARK_PATH, &dark);
-        compositor_setting_apply_binds(1u << 2); // COMPOSITOR_SET_WALL: maria & glow
-        compositor_wall_rows.picture = mode == 2;
-        compositor_wall_rows.moon = mode == 0 || compositor_wall_rows.picture;
-        compositor_wall_rows.dimmed = dark == 0;
+        compositor_walls_read();
         compositor_wall_rows.stamp = compositor_wall_look(COMPOSITOR_WALL_DIR, &stamp) == 0040000u ? stamp | 1u : 0;
         compositor_wall_rows.ready = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
@@ -1241,9 +1239,7 @@ static const struct compositor_setting_spec compositor_setting_specs[] = {
         CS_G(SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP), CS_G(SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP),
         CS_G(SETTING_GPU_PATH, COMPOSITOR_SET_GPU),
         {"/root/canvas.gpu.tiled", COMPOSITOR_SET_GPU, COMPOSITOR_BIND_INT_EQ, 0, 0, 0, &compositor_tiled_on}, // the opt-in: a switch, on is 0
-        CS_G(SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL),
-        {SETTING_WALLPAPER_MARIA_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, 20, 80, 45, &compositor_wall_rows.maria},
-        {SETTING_WALLPAPER_GLOW_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, -1000, 1000, 0, &compositor_wall_rows.glow},
+        CS_G(SETTING_WALLPAPER_SCENES_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_PICTURES_PATH, COMPOSITOR_SET_WALL),
         CS_G(SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK),
         CS_G(SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK),
         CS_G(SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK),
@@ -1428,6 +1424,9 @@ static void compositor_inputs_watch(void)
                                 compositor_settings_sync(name);
                         else if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
                                 compositor_dark_look();
+                        //      What the command asks of each Scene's wallpaper (wallpaper.c), a file of its own in /run/moonwater.
+                        else if (compositor_wall_ask_name(name))
+                                compositor_walls_asks();
                         //      The rules' chords, written again at every load of the rules: read again, so a chord a load
                         //      added is heard without the compositor starting again.
                         else if (string_equals((string_address)name, (string_address) "keys"))

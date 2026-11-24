@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language pl
 @name Polski
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	&Resetuj powiększenie
 menu_save_as	7bbe	Zapisz jako...
 menu_select_all	f6f6	&Zaznacz wszystko
 menu_set_wallpaper	1a27	Ustaw jako &tapetę
-menu_set_wallpaper_of	aa60	Ustaw jako tapetę %s
 menu_show_hidden	37bd	Pokaż &ukryte pliki
 menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	sparowano: łączy się, gdy się obudzi; Delete za
 settings_bt_pairing	da7b	parowanie: trzymaj urządzenie w trybie parowania
 settings_busy	34e0	moonwater jest zajęty: poprzednie zmiany nie są jeszcze gotowe
 settings_button_discover	c0ee	Wykryj
+settings_button_edit	6cb1	Edytuj
 settings_button_end	adad	Zakończ wszystkie
 settings_button_open	10e9	Otwórz
 settings_button_pair	f1d1	Sparuj
@@ -514,9 +515,6 @@ settings_unknown	9fb9	nieznane
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	CZASOWNIK [ARGUMENTY]
 settings_virtual_refused	4202	urządzenie wirtualne nie może tego włączyć: użyj klawiatury lub myszy podłączonej do komputera albo moonwater ssh w terminalu roota
-settings_wall_hint	ccf0	Wybierz plik PNG w Plikach, a potem Ustaw jako tapetę tego ekranu
-settings_wall_own	2b4f	Własny obraz
-settings_wall_same	d736	Jak na każdym ekranie
 taskbar_tab_exit	44a5	Zakończ
 taskbar_tab_pin	d57f	Przypnij do paska zadań
 taskbar_tab_stop	3684	Wymuś zatrzymanie
@@ -596,6 +594,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Caret blink speed	4085	Szybkość migania kursora tekstowego
 =Caret thickness	1e9a	Grubość kursora tekstowego
 =Charge limit (20 to 100, or off)	c92d	Limit ładowania (od 20 do 100 lub off)
+=Choose each Scene's wallpaper on the desktop	25bd	Wybierz tapetę każdej sceny na pulpicie
 =Clipboard	99b1	Schowek
 =Clipboard history (copies kept)	7423	Historia schowka (zachowane kopie)
 =Clock	80fd	Zegar
@@ -800,11 +799,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Variable refresh rate	06a4	Zmienna częstotliwość odświeżania
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
 =Wallpaper	0da9	Tapeta
-=Wallpaper glow	57c6	Poświata tapety
-=Wallpaper in the dark theme	a6dc	Tapeta w ciemnym motywie
-=Wallpaper of this screen	2c92	Tapeta tego ekranu
-=Wallpaper picture (a PNG file, or none)	8e9d	Obraz tapety (plik PNG lub brak)
-=Wallpaper seas (percent grey)	6836	Morza tapety (procent szarości)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Co robi przesunięcie od tej krawędzi
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Gdzie Canvas rysuje: na GPU czy na procesorze. Co karta robi teraz, jest poniżej
@@ -832,7 +826,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =default	5bde	domyślny
 =deny	6367	odmów
 =desktop	87b3	pulpit
-=dimmed	bded	przyciemniona
 =dmy	2a79	dmy
 =dynamic	96ae	dynamiczny
 =edge	d83c	krawędź
@@ -841,15 +834,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =forest	2a60	leśny
 =full	b33c	pełny
 =games	2b9c	gry
-=glow	27bc	poświata
-=glow-and-edges	540f	poświata-i-krawędzie
 =graphite	dc8d	grafitowy
 =green	ecbc	zielony
 =grouped	8b7d	zgrupowane
 =high	b9fd	wysoko
 =hinted	c039	na żądanie
 =ink	8faf	tusz
-=inverted	8038	odwrócona
 =kernel log	415a	dziennik jądra
 =kernel log klog dmesg messages	1a8d	dziennik jądro klog dmesg komunikaty
 =late	4d21	spóźnione
@@ -874,8 +864,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =per second	4f98	na sekundę
 =percent	fa5a	procent
 =performance	8ca5	wydajność
-=picture	d389	obraz
-=plain	3f67	zwykła
 =plum	b06b	śliwkowy
 =powersave	2283	oszczędzanie energii
 =primary	5fd9	główny

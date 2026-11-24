@@ -6703,7 +6703,6 @@ LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
 LANGUAGE_ID(menu_save_as, "Save As...") \
 LANGUAGE_ID(menu_select_all, "Select &All") \
 LANGUAGE_ID(menu_set_wallpaper, "Set as &Wallpaper") \
-LANGUAGE_ID(menu_set_wallpaper_of, "Set as Wallpaper of %s") \
 LANGUAGE_ID(menu_show_hidden, "Show &Hidden Files") \
 LANGUAGE_ID(menu_toggle_comment, "Toggle Co&mment") \
 LANGUAGE_ID(menu_undo, "&Undo") \
@@ -6758,6 +6757,7 @@ LANGUAGE_ID(settings_bt_paired_keys, "paired: it connects when it wakes; Delete 
 LANGUAGE_ID(settings_bt_pairing, "pairing: keep the device in its pairing mode") \
 LANGUAGE_ID(settings_busy, "moonwater is busy: the changes before this one are not done") \
 LANGUAGE_ID(settings_button_discover, "Discover") \
+LANGUAGE_ID(settings_button_edit, "Edit") \
 LANGUAGE_ID(settings_button_end, "End all") \
 LANGUAGE_ID(settings_button_open, "Open") \
 LANGUAGE_ID(settings_button_pair, "Pair") \
@@ -6960,9 +6960,6 @@ LANGUAGE_ID(settings_unknown, "unknown") \
 LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
-LANGUAGE_ID(settings_wall_hint, "Choose a PNG in Files, then Set as Wallpaper of this screen") \
-LANGUAGE_ID(settings_wall_own, "Its own picture") \
-LANGUAGE_ID(settings_wall_same, "Same as every screen") \
 LANGUAGE_ID(taskbar_tab_exit, "Exit") \
 LANGUAGE_ID(taskbar_tab_pin, "Pin to taskbar") \
 LANGUAGE_ID(taskbar_tab_stop, "Force stop") \

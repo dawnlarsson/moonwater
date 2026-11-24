@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language he
 @name עברית
 @translated machine
@@ -259,7 +260,6 @@ menu_reset_zoom	1b0f	אפס זום
 menu_save_as	7bbe	שמירה בשם...
 menu_select_all	f6f6	בחר הכול
 menu_set_wallpaper	1a27	הגדר כרקע
-menu_set_wallpaper_of	aa60	הגדר כרקע של %s
 menu_show_hidden	37bd	הצג קבצים מוסתרים
 menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
@@ -314,6 +314,7 @@ settings_bt_paired_keys	6d99	מצומד: מתחבר כשהוא מתעורר; Del
 settings_bt_pairing	da7b	מצמד: השאירו את ההתקן במצב צימוד
 settings_busy	34e0	moonwater עסוק: השינויים שלפני זה טרם הושלמו
 settings_button_discover	c0ee	גלה
+settings_button_edit	6cb1	עריכה
 settings_button_end	adad	סיים הכול
 settings_button_open	10e9	פתיחה
 settings_button_pair	f1d1	צמד
@@ -515,9 +516,6 @@ settings_unknown	9fb9	לא ידוע
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	פעולה [ארגומנטים]
 settings_virtual_refused	4202	התקן וירטואלי אינו יכול להפעיל את זה: השתמשו במקלדת או בעכבר המחוברים למחשב, או ב-moonwater ssh במסוף root
-settings_wall_hint	ccf0	בחרו PNG בקבצים, ואז הגדירו כרקע של מסך זה
-settings_wall_own	2b4f	תמונה משלו
-settings_wall_same	d736	כמו בכל המסכים
 taskbar_tab_exit	44a5	יציאה
 taskbar_tab_pin	d57f	הצמד לשורת המשימות
 taskbar_tab_stop	3684	עצירה כפויה
@@ -597,6 +595,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Caret blink speed	4085	מהירות הבהוב סמן הטקסט
 =Caret thickness	1e9a	עובי סמן הטקסט
 =Charge limit (20 to 100, or off)	c92d	מגבלת טעינה (20 עד 100, או off)
+=Choose each Scene's wallpaper on the desktop	25bd	בחרו את הרקע של כל סצנה על שולחן העבודה
 =Clipboard	99b1	לוח גזירים
 =Clipboard history (copies kept)	7423	היסטוריית לוח הגזירים (עותקים שנשמרו)
 =Clock	80fd	שעון
@@ -801,11 +800,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Variable refresh rate	06a4	קצב רענון משתנה
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
 =Wallpaper	0da9	טפט
-=Wallpaper glow	57c6	זוהר הטפט
-=Wallpaper in the dark theme	a6dc	טפט בערכת הנושא הכהה
-=Wallpaper of this screen	2c92	הרקע של מסך זה
-=Wallpaper picture (a PNG file, or none)	8e9d	תמונת רקע (קובץ PNG, או ללא)
-=Wallpaper seas (percent grey)	6836	ימות הטפט (אחוז אפור)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	מה עושה החלקה פנימה מהקצה הזה
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	היכן Canvas מצייר: על ה-GPU או על המעבד. מה הכרטיס עושה עכשיו מופיע מתחת
@@ -833,7 +827,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =default	5bde	ברירת מחדל
 =deny	6367	חסום
 =desktop	87b3	שולחן עבודה
-=dimmed	bded	מעומעם
 =dmy	2a79	dmy
 =dynamic	96ae	דינמי
 =edge	d83c	קצה
@@ -842,15 +835,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =forest	2a60	ירוק יער
 =full	b33c	מלא
 =games	2b9c	משחקים
-=glow	27bc	זוהר
-=glow-and-edges	540f	זוהר-ושוליים
 =graphite	dc8d	גרפיט
 =green	ecbc	ירוק
 =grouped	8b7d	מקובצות
 =high	b9fd	גבוה
 =hinted	c039	לפי בקשה
 =ink	8faf	דיו
-=inverted	8038	הפוך
 =kernel log	415a	יומן הליבה
 =kernel log klog dmesg messages	1a8d	יומן ליבה klog dmesg הודעות
 =late	4d21	באיחור
@@ -875,8 +865,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =per second	4f98	בשנייה
 =percent	fa5a	אחוזים
 =performance	8ca5	ביצועים
-=picture	d389	תמונה
-=plain	3f67	פשוט
 =plum	b06b	שזיף
 =powersave	2283	חיסכון באנרגיה
 =primary	5fd9	ראשי

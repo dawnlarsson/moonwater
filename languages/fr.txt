@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language fr
 @name Français
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Réinitialiser le &zoom
 menu_save_as	7bbe	Enregistrer sous...
 menu_select_all	f6f6	&Tout sélectionner
 menu_set_wallpaper	1a27	Définir comme &fond d'écran
-menu_set_wallpaper_of	aa60	Définir comme fond d'écran de %s
 menu_show_hidden	37bd	Afficher les fichiers &cachés
 menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	associé : il se connecte à son réveil ; Delete l
 settings_bt_pairing	da7b	association : gardez l'appareil en mode d'association
 settings_busy	34e0	moonwater est occupé : les changements précédents ne sont pas terminés
 settings_button_discover	c0ee	Découvrir
+settings_button_edit	6cb1	Modifier
 settings_button_end	adad	Tout terminer
 settings_button_open	10e9	Ouvrir
 settings_button_pair	f1d1	Associer
@@ -514,9 +515,6 @@ settings_unknown	9fb9	inconnu
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBE [ARGUMENTS]
 settings_virtual_refused	4202	un périphérique virtuel ne peut pas activer ceci : utilisez un clavier ou une souris branchés sur la machine, ou moonwater ssh dans un terminal root
-settings_wall_hint	ccf0	Choisissez un PNG dans Fichiers, puis Définir comme fond d'écran de cet écran
-settings_wall_own	2b4f	Sa propre image
-settings_wall_same	d736	Comme tous les écrans
 taskbar_tab_exit	44a5	Quitter
 taskbar_tab_pin	d57f	Épingler à la barre des tâches
 taskbar_tab_stop	3684	Forcer l'arrêt
@@ -596,6 +594,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Caret blink speed	4085	Vitesse de clignotement du curseur de texte
 =Caret thickness	1e9a	Épaisseur du curseur de texte
 =Charge limit (20 to 100, or off)	c92d	Limite de charge (20 à 100, ou off)
+=Choose each Scene's wallpaper on the desktop	25bd	Choisissez le fond d'écran de chaque scène sur le bureau
 =Clipboard	99b1	Presse-papiers
 =Clipboard history (copies kept)	7423	Historique du presse-papiers (copies gardées)
 =Clock	80fd	Horloge
@@ -800,11 +799,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Variable refresh rate	06a4	Fréquence de rafraîchissement variable
 =Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
 =Wallpaper	0da9	Fond d'écran
-=Wallpaper glow	57c6	Halo du fond d'écran
-=Wallpaper in the dark theme	a6dc	Fond d'écran du thème sombre
-=Wallpaper of this screen	2c92	Fond d'écran de cet écran
-=Wallpaper picture (a PNG file, or none)	8e9d	Image de fond d'écran (un fichier PNG, ou aucune)
-=Wallpaper seas (percent grey)	6836	Mers du fond d'écran (pourcentage de gris)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Ce que fait un balayage depuis ce bord
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Où Canvas dessine : sur le GPU ou le processeur. Ce que fait la carte est indiqué dessous
@@ -832,7 +826,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =default	5bde	par défaut
 =deny	6367	refuser
 =desktop	87b3	bureau
-=dimmed	bded	atténué
 =dmy	2a79	dmy
 =dynamic	96ae	dynamique
 =edge	d83c	bord
@@ -841,15 +834,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =forest	2a60	forêt
 =full	b33c	complète
 =games	2b9c	jeux
-=glow	27bc	halo
-=glow-and-edges	540f	halo-et-bords
 =graphite	dc8d	graphite
 =green	ecbc	vert
 =grouped	8b7d	groupées
 =high	b9fd	élevé
 =hinted	c039	sur demande
 =ink	8faf	encre
-=inverted	8038	inversé
 =kernel log	415a	journal du noyau
 =kernel log klog dmesg messages	1a8d	journal noyau klog dmesg messages
 =late	4d21	en retard
@@ -874,8 +864,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =per second	4f98	par seconde
 =percent	fa5a	pourcentage
 =performance	8ca5	performance
-=picture	d389	image
-=plain	3f67	uni
 =plum	b06b	prune
 =powersave	2283	économie d'énergie
 =primary	5fd9	principal

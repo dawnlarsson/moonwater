@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language tr
 @name Türkçe
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
 menu_save_as	7bbe	Farklı Kaydet...
 menu_select_all	f6f6	&Tümünü Seç
 menu_set_wallpaper	1a27	&Duvar kağıdı yap
-menu_set_wallpaper_of	aa60	%s için duvar kağıdı yap
 menu_show_hidden	37bd	&Gizli dosyaları göster
 menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	eşleşmiş: uyandığında bağlanır; Delete unut
 settings_bt_pairing	da7b	eşleştiriliyor: aygıtı eşleştirme kipinde tutun
 settings_busy	34e0	moonwater meşgul: bundan önceki değişiklikler bitmedi
 settings_button_discover	c0ee	Keşfet
+settings_button_edit	6cb1	Düzenle
 settings_button_end	adad	Tümünü sonlandır
 settings_button_open	10e9	Aç
 settings_button_pair	f1d1	Eşleştir
@@ -514,9 +515,6 @@ settings_unknown	9fb9	bilinmiyor
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
-settings_wall_hint	ccf0	Dosyalar’da bir PNG seçin, sonra bu ekranın duvar kağıdı yapın
-settings_wall_own	2b4f	Kendi resmi
-settings_wall_same	d736	Tüm ekranlarla aynı
 taskbar_tab_exit	44a5	Çık
 taskbar_tab_pin	d57f	Görev çubuğuna sabitle
 taskbar_tab_stop	3684	Zorla durdur
@@ -596,6 +594,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Caret blink speed	4085	Metin imlecinin yanıp sönme hızı
 =Caret thickness	1e9a	Metin imlecinin kalınlığı
 =Charge limit (20 to 100, or off)	c92d	Şarj sınırı (20 ile 100 arası veya off)
+=Choose each Scene's wallpaper on the desktop	25bd	Her sahnenin duvar kâğıdını masaüstünde seçin
 =Clipboard	99b1	Pano
 =Clipboard history (copies kept)	7423	Pano geçmişi (saklanan kopyalar)
 =Clock	80fd	Saat
@@ -800,11 +799,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Variable refresh rate	06a4	Değişken yenileme hızı
 =Volume (percent, or default)	f6e3	Ses düzeyi (yüzde veya default)
 =Wallpaper	0da9	Duvar kâğıdı
-=Wallpaper glow	57c6	Duvar kâğıdının parıltısı
-=Wallpaper in the dark theme	a6dc	Koyu temada duvar kâğıdı
-=Wallpaper of this screen	2c92	Bu ekranın duvar kağıdı
-=Wallpaper picture (a PNG file, or none)	8e9d	Duvar kağıdı resmi (bir PNG dosyası ya da hiçbiri)
-=Wallpaper seas (percent grey)	6836	Duvar kâğıdının denizleri (yüzde gri)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Bu kenardan içeri kaydırmanın ne yaptığı
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas nerede çizer: GPU'da mı işlemcide mi. Kartın şu an ne yaptığı altında
@@ -832,7 +826,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =default	5bde	varsayılan
 =deny	6367	reddet
 =desktop	87b3	masaüstü
-=dimmed	bded	kısık
 =dmy	2a79	dmy
 =dynamic	96ae	dinamik
 =edge	d83c	kenar
@@ -841,15 +834,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =forest	2a60	orman
 =full	b33c	tam
 =games	2b9c	oyunlar
-=glow	27bc	parıltı
-=glow-and-edges	540f	parıltı-ve-kenarlar
 =graphite	dc8d	grafit
 =green	ecbc	yeşil
 =grouped	8b7d	gruplu
 =high	b9fd	yüksek
 =hinted	c039	istenince
 =ink	8faf	mürekkep
-=inverted	8038	ters
 =kernel log	415a	çekirdek günlüğü
 =kernel log klog dmesg messages	1a8d	çekirdek günlüğü klog dmesg iletiler
 =late	4d21	geç kalınca
@@ -874,8 +864,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =per second	4f98	saniyede
 =percent	fa5a	yüzde
 =performance	8ca5	performans
-=picture	d389	resim
-=plain	3f67	düz
 =plum	b06b	erik
 =powersave	2283	güç tasarrufu
 =primary	5fd9	birincil

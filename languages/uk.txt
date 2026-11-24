@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language uk
 @name Українська
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Скинути масштаб
 menu_save_as	7bbe	Зберегти як...
 menu_select_all	f6f6	Вибрати все
 menu_set_wallpaper	1a27	Зробити шпалерами
-menu_set_wallpaper_of	aa60	Зробити шпалерами %s
 menu_show_hidden	37bd	Показати приховані файли
 menu_toggle_comment	92ac	Закоментувати/розкоментувати
 menu_undo	b9d3	Скасувати
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	зв'язано: підключається, кол
 settings_bt_pairing	da7b	з'єднання: тримайте пристрій у режимі з'єднання
 settings_busy	34e0	moonwater зайнятий: попередні зміни ще не виконано
 settings_button_discover	c0ee	Виявити
+settings_button_edit	6cb1	Змінити
 settings_button_end	adad	Завершити всі
 settings_button_open	10e9	Відкрити
 settings_button_pair	f1d1	Зв'язати
@@ -514,9 +515,6 @@ settings_unknown	9fb9	невідомо
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ДІЄСЛОВО [АРГУМЕНТИ]
 settings_virtual_refused	4202	віртуальний пристрій не може це ввімкнути: клавіатура чи миша машини, або moonwater ssh у терміналі root
-settings_wall_hint	ccf0	Виберіть PNG у Файлах, потім «Зробити шпалерами цього екрана»
-settings_wall_own	2b4f	Власне зображення
-settings_wall_same	d736	Як на всіх екранах
 taskbar_tab_exit	44a5	Вихід
 taskbar_tab_pin	d57f	Закріпити на панелі завдань
 taskbar_tab_stop	3684	Примусово зупинити
@@ -596,6 +594,7 @@ ui_field_full	fe02	більше не вміщається
 =Caret blink speed	4085	Швидкість блимання текстового курсора
 =Caret thickness	1e9a	Товщина текстового курсора
 =Charge limit (20 to 100, or off)	c92d	Межа заряджання (від 20 до 100 або off)
+=Choose each Scene's wallpaper on the desktop	25bd	Виберіть шпалери кожної сцени на робочому столі
 =Clipboard	99b1	Буфер обміну
 =Clipboard history (copies kept)	7423	Історія буфера обміну (збережених копій)
 =Clock	80fd	Годинник
@@ -800,11 +799,6 @@ ui_field_full	fe02	більше не вміщається
 =Variable refresh rate	06a4	Змінна частота оновлення
 =Volume (percent, or default)	f6e3	Гучність (відсотки або default)
 =Wallpaper	0da9	Шпалери
-=Wallpaper glow	57c6	Сяйво шпалер
-=Wallpaper in the dark theme	a6dc	Шпалери в темній темі
-=Wallpaper of this screen	2c92	Шпалери цього екрана
-=Wallpaper picture (a PNG file, or none)	8e9d	Зображення шпалер (файл PNG або нічого)
-=Wallpaper seas (percent grey)	6836	Моря на шпалерах (відсоток сірого)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Що робить жест від цього краю
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Де малює Canvas: на GPU чи на процесорі. Що робить карта зараз — нижче
@@ -832,7 +826,6 @@ ui_field_full	fe02	більше не вміщається
 =default	5bde	типовий
 =deny	6367	заборонити
 =desktop	87b3	робочий стіл
-=dimmed	bded	приглушені
 =dmy	2a79	dmy
 =dynamic	96ae	динамічний
 =edge	d83c	край
@@ -841,15 +834,12 @@ ui_field_full	fe02	більше не вміщається
 =forest	2a60	лісовий
 =full	b33c	повний
 =games	2b9c	ігри
-=glow	27bc	сяйво
-=glow-and-edges	540f	сяйво-і-краї
 =graphite	dc8d	графітовий
 =green	ecbc	зелений
 =grouped	8b7d	разом
 =high	b9fd	високо
 =hinted	c039	на запит
 =ink	8faf	туш
-=inverted	8038	інвертовані
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg повідомлення
 =late	4d21	при запізненні
@@ -874,8 +864,6 @@ ui_field_full	fe02	більше не вміщається
 =per second	4f98	за секунду
 =percent	fa5a	відсотки
 =performance	8ca5	продуктивність
-=picture	d389	зображення
-=plain	3f67	прості
 =plum	b06b	сливовий
 =powersave	2283	енергозбереження
 =primary	5fd9	основний

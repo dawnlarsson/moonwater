@@ -26,7 +26,6 @@
 #define FILES_ROW UI_ROW_DENSE
 #define FILES_TILE_ICON 104
 #define FILES_TILE_LIST 232
-#define FILES_WALL_SCREENS 8
 #define FILES_SHEET_LINES 10
 #define FILES_DEEDS 32
 #define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4)
@@ -150,7 +149,6 @@ static struct
 
 static struct ui_app files_app;
 static const int files_sort_cols[4] = {FILES_SORT_NAME, FILES_SORT_SIZE, FILES_SORT_KIND, FILES_SORT_TIME};
-static char files_wall_names[FILES_WALL_SCREENS][WINDOWS_OUTPUT_NAME], files_wall_labels[FILES_WALL_SCREENS][96];
 
 #define FILES_COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 #define FILES_SLICE(cond, step) for (b64 _b = (b64)ui_kit_clock(); (cond) && (b64)ui_kit_clock() - _b < FILES_TURN_NS;) (step)
@@ -1789,15 +1787,16 @@ static fn files_open_with(b32 editor)
         }
 }
 
-static fn files_wallpaper(int screen)
+// Set as Wallpaper: the PNG remembered and made the wallpaper of the Scene you are on (setting.c's canvas wallpaper picture).
+static fn files_wallpaper(void)
 {
         struct files_model address_to m = &files.big->model;
         const struct files_entry address_to e = files_model_entry(m, m->cursor);
         static p8 path[FILES_PATH];
-        string_address words[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
-                                   (string_address)path, screen >= 0 && screen < FILES_WALL_SCREENS ? (string_address)files_wall_names[screen] : null, null};
+        string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
+                                   (string_address)path, null};
         if (!files_model_is_remote(m) && e && e->kind != FILES_KIND_DIRECTORY && files_is_png(m, e) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
-                (void)ui_start_apart(words, words[5] ? 6 : 5);
+                (void)ui_start_apart(words, 5);
 }
 
 #define FILES_SEP {null, null, UI_MENU_SEPARATOR, 0, false}
@@ -1875,16 +1874,6 @@ static fn files_menu_open(b32 on, int x, int y)
                     {WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES, false},
                 };
                 ui_popmenu_build(menu, head, FILES_COUNT(head));
-                if (png)
-                {
-                        unsigned int screens = ui_kit_table ? __atomic_load_n(&ui_kit_table->outputs, __ATOMIC_ACQUIRE) : 0;
-                        for (unsigned int at = 0; screens > 1 && screens <= WINDOWS_OUTPUTS && at < screens && at < FILES_WALL_SCREENS; at++)
-                        {
-                                string_copy_bounded((p8 *)files_wall_names[at], (string_address)ui_kit_table->output_name[at], sizeof(files_wall_names[at]));
-                                language_format(files_wall_labels[at], sizeof(files_wall_labels[at]), WORDS(menu_set_wallpaper_of), files_wall_names[at]);
-                                ui_popmenu_add(menu, files_wall_labels[at], null, 0, FILES_MENU_WALLPAPER_OF + (int)at);
-                        }
-                }
                 ui_popmenu_build(menu, tail, FILES_COUNT(tail));
         }
         else
@@ -1940,8 +1929,6 @@ static fn files_menu_do(int id)
                         files.device_at = p, (void)files_device_run(id == FILES_MENU_DEVICE_WRITE ? FILES_DEVICE_WRITE : FILES_DEVICE_EJECT, p);
                 return;
         }
-        if (id >= FILES_MENU_WALLPAPER_OF && id < FILES_MENU_WALLPAPER_OF + FILES_WALL_SCREENS)
-                return files_wallpaper(id - FILES_MENU_WALLPAPER_OF);
         if (id >= FILES_MENU_DETAILS && id <= FILES_MENU_LIST)
                 return files.view = id - FILES_MENU_DETAILS, files.big->list.scroll.scroll = 0, files.dirty = true, files_show_cursor();
         if (id >= FILES_MENU_SORT && id < FILES_MENU_SORT + 4)
@@ -1954,7 +1941,7 @@ static fn files_menu_do(int id)
         {
         case FILES_MENU_OPEN: files_open(m->cursor); break;
         case FILES_MENU_EDITOR: files_open_with(true); break;
-        case FILES_MENU_WALLPAPER: files_wallpaper(-1); break;
+        case FILES_MENU_WALLPAPER: files_wallpaper(); break;
         case FILES_MENU_TERMINAL: files_open_with(false); break;
         case FILES_MENU_CUT: files_rows_copy(true); break;
         case FILES_MENU_COPY: files_rows_copy(false); break;

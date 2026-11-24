@@ -1059,6 +1059,7 @@ static struct windows_owner windows_owner_held[WINDOWS];
 #include "compositor/session.c" // the session: a machine that slept, the settings read and published, the input devices found, the doors and their threads
 #include "compositor/manage.c" // the windows: the stack and the keys, grips and dividers, tiles and the grid, places, a row taken and let go, the keyboard on the screen, the clipboard, popups
 #include "compositor/scenes.c" // the Scenes overview's layout: a Scene's windows in a grid (no overlap), the strip of Scene cards, the hit test
+#include "compositor/wallpaper.c" // each Scene's wallpaper: its word kept and asked for, the miniatures of the words, the editor over a Scene
 #include "compositor/input.c" // what a person does: the keys and the chords, the volume, the hand's motion and buttons, the prediction, the wheel and the pad, the marks and touch
 #include "compositor/access.c" // the desktop with no mouse to hand: a controller (and next a switch, the keys as a pointer, dwell) as the pointer and the actions
 
@@ -2333,6 +2334,7 @@ static b32 compositor_main()
 #endif
         compositor_settings_apply(COMPOSITOR_SET_THEME | COMPOSITOR_SET_SCROLL | COMPOSITOR_SET_VRR | COMPOSITOR_SET_HAND | COMPOSITOR_SET_OSK |
                                   COMPOSITOR_SET_ACCESS);
+        compositor_walls_asks(); // what was asked of the Scenes' wallpapers while the desktop was not running (wallpaper.c)
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++) compositor_input_publish(at);
         // The launcher's button's square, there before any press: a launcher kept up and put away from the start (launcher -k) anchors to it.
         compositor_button_rect(-1, -1, TASKBAR_LAUNCHER);
@@ -2489,6 +2491,7 @@ static b32 compositor_main()
 #endif
                 compositor_taskbar_slide(now), compositor_moon_keep(now), compositor_starting_keep(now);
                 if (!compositor_card_holds()) compositor_wall_keep();
+                compositor_walls_keep(now);
                 compositor_present_pass();
                 compositor_knock(), compositor_rows_spare();
         }

@@ -2462,6 +2462,9 @@ static void compositor_minimize_row(int row)
 
 /* ---- Spaces (per-output desktops & automatic fullscreen Spaces) ---- */
 
+static void compositor_wall_scene_added(int screen);                        // wallpaper.c
+static void compositor_wall_scene_removed(const struct compositor_space *sp); // wallpaper.c
+
 static int compositor_row_space_exempt(int row)
 {
         if (row < 0 || row >= COMPOSITOR_ROWS)
@@ -2944,6 +2947,7 @@ static unsigned int compositor_space_add_id(int screen, int activate)
         sp = compositor_space_alloc(screen, COMPOSITOR_SPACE_DESKTOP, COMPOSITOR_NONE, 0, last);
         if (!sp)
                 return 0;
+        compositor_wall_scene_added(screen); // its wallpaper: the one kept for its number, else the Scene's it was added from (wallpaper.c)
         if (activate)
                 compositor_space_activate(screen, sp->id);
         else
@@ -3000,6 +3004,7 @@ static void compositor_space_remove_index(int screen, int idx)
                         compositor.spaces.list[i].return_id = fallback;
         if (was_active)
                 compositor_space_activate(screen, fallback);
+        compositor_wall_scene_removed(compositor_space_find(sid)); // its wallpaper goes with it, the Scenes after it a number less (wallpaper.c)
         list_idx = compositor_space_index_of(sid);
         if (list_idx >= 0)
                 compositor_space_unlink((unsigned int)list_idx);

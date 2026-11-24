@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language pt
 @name Português
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	&Redefinir zoom
 menu_save_as	7bbe	Salvar como...
 menu_select_all	f6f6	Selecionar t&udo
 menu_set_wallpaper	1a27	Definir como &fundo
-menu_set_wallpaper_of	aa60	Definir como fundo de %s
 menu_show_hidden	37bd	Mostrar arquivos &ocultos
 menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	emparelhado: conecta quando desperta; Delete esquec
 settings_bt_pairing	da7b	emparelhando: mantenha o dispositivo em modo de emparelhamento
 settings_busy	34e0	moonwater está ocupado: as alterações anteriores não terminaram
 settings_button_discover	c0ee	Descobrir
+settings_button_edit	6cb1	Editar
 settings_button_end	adad	Encerrar todas
 settings_button_open	10e9	Abrir
 settings_button_pair	f1d1	Parear
@@ -514,9 +515,6 @@ settings_unknown	9fb9	desconhecido
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 settings_virtual_refused	4202	um dispositivo virtual não pode ativar isto: use um teclado ou rato ligado à máquina, ou moonwater ssh num terminal root
-settings_wall_hint	ccf0	Escolha um PNG em Ficheiros e depois Definir como fundo deste ecrã
-settings_wall_own	2b4f	A sua própria imagem
-settings_wall_same	d736	Igual a todos os ecrãs
 taskbar_tab_exit	44a5	Sair
 taskbar_tab_pin	d57f	Fixar na barra de tarefas
 taskbar_tab_stop	3684	Forçar parada
@@ -596,6 +594,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Caret blink speed	4085	Velocidade de piscar do cursor de texto
 =Caret thickness	1e9a	Espessura do cursor de texto
 =Charge limit (20 to 100, or off)	c92d	Limite de carga (20 a 100, ou off)
+=Choose each Scene's wallpaper on the desktop	25bd	Escolha o fundo de cada cena no ambiente de trabalho
 =Clipboard	99b1	Área de transferência
 =Clipboard history (copies kept)	7423	Histórico da área de transferência (cópias mantidas)
 =Clock	80fd	Relógio
@@ -800,11 +799,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Variable refresh rate	06a4	Taxa de atualização variável
 =Volume (percent, or default)	f6e3	Volume (porcentagem ou default)
 =Wallpaper	0da9	Papel de parede
-=Wallpaper glow	57c6	Brilho do papel de parede
-=Wallpaper in the dark theme	a6dc	Papel de parede no tema escuro
-=Wallpaper of this screen	2c92	Fundo deste ecrã
-=Wallpaper picture (a PNG file, or none)	8e9d	Imagem de fundo (um ficheiro PNG, ou nenhuma)
-=Wallpaper seas (percent grey)	6836	Mares do papel de parede (porcentagem de cinza)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	O que faz deslizar a partir desta borda
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Onde o Canvas desenha: na GPU ou no processador. O que a placa faz agora está por baixo
@@ -832,7 +826,6 @@ ui_field_full	fe02	não cabe mais que isso
 =default	5bde	padrão
 =deny	6367	negar
 =desktop	87b3	área de trabalho
-=dimmed	bded	esmaecido
 =dmy	2a79	dmy
 =dynamic	96ae	dinâmico
 =edge	d83c	borda
@@ -841,15 +834,12 @@ ui_field_full	fe02	não cabe mais que isso
 =forest	2a60	floresta
 =full	b33c	completo
 =games	2b9c	jogos
-=glow	27bc	brilho
-=glow-and-edges	540f	brilho-e-bordas
 =graphite	dc8d	grafite
 =green	ecbc	verde
 =grouped	8b7d	agrupadas
 =high	b9fd	alto
 =hinted	c039	quando pedido
 =ink	8faf	tinta
-=inverted	8038	invertido
 =kernel log	415a	registro do kernel
 =kernel log klog dmesg messages	1a8d	registro kernel klog dmesg mensagens
 =late	4d21	atrasado
@@ -874,8 +864,6 @@ ui_field_full	fe02	não cabe mais que isso
 =per second	4f98	por segundo
 =percent	fa5a	porcentagem
 =performance	8ca5	desempenho
-=picture	d389	imagem
-=plain	3f67	simples
 =plum	b06b	ameixa
 =powersave	2283	economia de energia
 =primary	5fd9	principal

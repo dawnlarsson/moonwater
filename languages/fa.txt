@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language fa
 @name فارسی
 @translated machine
@@ -259,7 +260,6 @@ menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
 menu_save_as	7bbe	ذخیره به نام...
 menu_select_all	f6f6	انتخاب همه
 menu_set_wallpaper	1a27	تنظیم به عنوان پس‌زمینه
-menu_set_wallpaper_of	aa60	تنظیم به عنوان پس‌زمینهٔ %s
 menu_show_hidden	37bd	نمایش پرونده‌های پنهان
 menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
@@ -314,6 +314,7 @@ settings_bt_paired_keys	6d99	جفت‌شده: وقتی بیدار شود وصل 
 settings_bt_pairing	da7b	در حال جفت کردن: دستگاه را در حالت جفت شدن نگه دارید
 settings_busy	34e0	moonwater مشغول است: تغییرات پیش از این هنوز انجام نشده‌اند
 settings_button_discover	c0ee	کشف کن
+settings_button_edit	6cb1	ویرایش
 settings_button_end	adad	پایان همه
 settings_button_open	10e9	باز کردن
 settings_button_pair	f1d1	جفت کردن
@@ -515,9 +516,6 @@ settings_unknown	9fb9	نامشخص
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	فعل [آرگومان‌ها]
 settings_virtual_refused	4202	دستگاه مجازی نمی‌تواند این را روشن کند: صفحه‌کلید یا موشواره‌ی خود دستگاه، یا moonwater ssh در پایانه root
-settings_wall_hint	ccf0	یک PNG در فایل‌ها انتخاب کنید، سپس آن را پس‌زمینهٔ این صفحه کنید
-settings_wall_own	2b4f	تصویر خودش
-settings_wall_same	d736	مانند همهٔ صفحه‌ها
 taskbar_tab_exit	44a5	خروج از برنامه
 taskbar_tab_pin	d57f	سنجاق به نوار وظیفه
 taskbar_tab_stop	3684	توقف اجباری
@@ -597,6 +595,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Caret blink speed	4085	سرعت چشمک‌زدن مکان‌نما
 =Caret thickness	1e9a	ضخامت مکان‌نما
 =Charge limit (20 to 100, or off)	c92d	حد شارژ (20 تا 100 یا off)
+=Choose each Scene's wallpaper on the desktop	25bd	پس‌زمینهٔ هر صحنه را روی میز کار انتخاب کنید
 =Clipboard	99b1	کلیپ‌بورد
 =Clipboard history (copies kept)	7423	تاریخچه کلیپ‌بورد (کپی‌های نگه‌داشته‌شده)
 =Clock	80fd	ساعت
@@ -801,11 +800,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Variable refresh rate	06a4	نرخ تازه‌سازی متغیر
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
 =Wallpaper	0da9	کاغذ دیواری
-=Wallpaper glow	57c6	درخشش کاغذ دیواری
-=Wallpaper in the dark theme	a6dc	کاغذ دیواری در تم تیره
-=Wallpaper of this screen	2c92	پس‌زمینهٔ این صفحه
-=Wallpaper picture (a PNG file, or none)	8e9d	تصویر پس‌زمینه (یک فایل PNG، یا هیچ)
-=Wallpaper seas (percent grey)	6836	دریاهای کاغذ دیواری (درصد خاکستری)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	کشیدن از این لبه چه می‌کند
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کجا می‌کشد: روی GPU یا پردازنده. کاری که کارت اکنون می‌کند زیر آن است
@@ -833,7 +827,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =default	5bde	پیش‌فرض
 =deny	6367	رد
 =desktop	87b3	رومیزی
-=dimmed	bded	کم‌نور
 =dmy	2a79	dmy
 =dynamic	96ae	پویا
 =edge	d83c	لبه
@@ -842,15 +835,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =forest	2a60	سبز جنگلی
 =full	b33c	کامل
 =games	2b9c	بازی‌ها
-=glow	27bc	درخشش
-=glow-and-edges	540f	درخشش-و-لبه‌ها
 =graphite	dc8d	گرافیتی
 =green	ecbc	سبز
 =grouped	8b7d	گروه‌شده
 =high	b9fd	زیاد
 =hinted	c039	در صورت درخواست
 =ink	8faf	جوهر
-=inverted	8038	وارونه
 =kernel log	415a	گزارش هسته
 =kernel log klog dmesg messages	1a8d	گزارش هسته klog dmesg پیام‌ها
 =late	4d21	هنگام تأخیر
@@ -875,8 +865,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =per second	4f98	در ثانیه
 =percent	fa5a	درصد
 =performance	8ca5	عملکرد
-=picture	d389	تصویر
-=plain	3f67	ساده
 =plum	b06b	آلویی
 =powersave	2283	صرفه‌جویی در انرژی
 =primary	5fd9	اصلی

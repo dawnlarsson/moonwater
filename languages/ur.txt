@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language ur
 @name اردو
 @translated machine
@@ -259,7 +260,6 @@ menu_reset_zoom	1b0f	زوم بحال کریں
 menu_save_as	7bbe	بطور محفوظ کریں...
 menu_select_all	f6f6	سب منتخب کریں
 menu_set_wallpaper	1a27	وال پیپر بنائیں
-menu_set_wallpaper_of	aa60	%s کا وال پیپر بنائیں
 menu_show_hidden	37bd	پوشیدہ فائلیں دکھائیں
 menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
@@ -314,6 +314,7 @@ settings_bt_paired_keys	6d99	جوڑا گیا: جاگنے پر جڑ جاتا ہے
 settings_bt_pairing	da7b	جوڑا جا رہا ہے: ڈیوائس کو جوڑنے کی حالت میں رکھیں
 settings_busy	34e0	moonwater مصروف ہے: اس سے پہلے کی تبدیلیاں ابھی مکمل نہیں ہوئیں
 settings_button_discover	c0ee	دریافت کریں
+settings_button_edit	6cb1	ترمیم
 settings_button_end	adad	سب ختم کریں
 settings_button_open	10e9	کھولیں
 settings_button_pair	f1d1	جوڑیں
@@ -515,9 +516,6 @@ settings_unknown	9fb9	نامعلوم
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	فعل [آرگیومنٹس]
 settings_virtual_refused	4202	ایک ورچوئل ڈیوائس اسے آن نہیں کر سکتی: مشین سے جڑا کی بورڈ یا ماؤس استعمال کریں، یا root ٹرمینل میں moonwater ssh
-settings_wall_hint	ccf0	فائلوں میں ایک PNG چنیں، پھر اسے اس اسکرین کا وال پیپر بنائیں
-settings_wall_own	2b4f	اپنی تصویر
-settings_wall_same	d736	تمام اسکرینوں جیسا
 taskbar_tab_exit	44a5	باہر نکلیں
 taskbar_tab_pin	d57f	ٹاسک بار پر پن کریں
 taskbar_tab_stop	3684	زبردستی بند کریں
@@ -597,6 +595,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Caret blink speed	4085	ٹیکسٹ کرسر کے جھپکنے کی رفتار
 =Caret thickness	1e9a	ٹیکسٹ کرسر کی موٹائی
 =Charge limit (20 to 100, or off)	c92d	چارج کی حد (20 سے 100 یا off)
+=Choose each Scene's wallpaper on the desktop	25bd	ڈیسک ٹاپ پر ہر منظر کا وال پیپر منتخب کریں
 =Clipboard	99b1	کلپ بورڈ
 =Clipboard history (copies kept)	7423	کلپ بورڈ کی تاریخ (محفوظ کی گئی کاپیاں)
 =Clock	80fd	گھڑی
@@ -801,11 +800,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Variable refresh rate	06a4	متغیر ریفریش ریٹ
 =Volume (percent, or default)	f6e3	آواز کی بلندی (فیصد یا default)
 =Wallpaper	0da9	وال پیپر
-=Wallpaper glow	57c6	وال پیپر کی چمک
-=Wallpaper in the dark theme	a6dc	تاریک تھیم میں وال پیپر
-=Wallpaper of this screen	2c92	اس اسکرین کا وال پیپر
-=Wallpaper picture (a PNG file, or none)	8e9d	وال پیپر تصویر (ایک PNG فائل، یا کوئی نہیں)
-=Wallpaper seas (percent grey)	6836	وال پیپر کے سمندر (سرمئی کا فیصد)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	اس کنارے سے سوائپ کیا کرتا ہے
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کہاں بناتا ہے: GPU پر یا پروسیسر پر۔ کارڈ ابھی کیا کر رہا ہے نیچے ہے
@@ -833,7 +827,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =default	5bde	ڈیفالٹ
 =deny	6367	انکار
 =desktop	87b3	ڈیسک ٹاپ
-=dimmed	bded	مدھم
 =dmy	2a79	dmy
 =dynamic	96ae	ڈائنامک
 =edge	d83c	کنارہ
@@ -842,15 +835,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =forest	2a60	جنگلی سبز
 =full	b33c	مکمل
 =games	2b9c	گیمز
-=glow	27bc	چمک
-=glow-and-edges	540f	چمک-اور-کنارے
 =graphite	dc8d	گریفائٹ
 =green	ecbc	سبز
 =grouped	8b7d	اکٹھے
 =high	b9fd	زیادہ
 =hinted	c039	درخواست پر
 =ink	8faf	سیاہی
-=inverted	8038	الٹا
 =kernel log	415a	کرنل لاگ
 =kernel log klog dmesg messages	1a8d	کرنل لاگ klog dmesg پیغامات
 =late	4d21	تاخیر پر
@@ -875,8 +865,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =per second	4f98	فی سیکنڈ
 =percent	fa5a	فیصد
 =performance	8ca5	کارکردگی
-=picture	d389	تصویر
-=plain	3f67	سادہ
 =plum	b06b	آلو بخارا
 =powersave	2283	بجلی کی بچت
 =primary	5fd9	بنیادی

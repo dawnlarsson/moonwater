@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language de
 @name Deutsch
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	&Zoom zurücksetzen
 menu_save_as	7bbe	Speichern unter...
 menu_select_all	f6f6	Alles &auswählen
 menu_set_wallpaper	1a27	Als &Hintergrundbild festlegen
-menu_set_wallpaper_of	aa60	Als Hintergrundbild von %s festlegen
 menu_show_hidden	37bd	&Versteckte Dateien zeigen
 menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	gekoppelt: verbindet sich, wenn es aufwacht; Delete
 settings_bt_pairing	da7b	kopple: das Gerät im Kopplungsmodus lassen
 settings_busy	34e0	moonwater ist beschäftigt: die vorherigen Änderungen sind noch nicht fertig
 settings_button_discover	c0ee	Erkennen
+settings_button_edit	6cb1	Bearbeiten
 settings_button_end	adad	Alle beenden
 settings_button_open	10e9	Öffnen
 settings_button_pair	f1d1	Koppeln
@@ -514,9 +515,6 @@ settings_unknown	9fb9	unbekannt
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENTE]
 settings_virtual_refused	4202	ein virtuelles Gerät kann dies nicht einschalten: eine am Gerät angeschlossene Tastatur oder Maus verwenden, oder moonwater ssh in einem Root-Terminal
-settings_wall_hint	ccf0	Wählen Sie eine PNG-Datei in Dateien und dann „Als Hintergrundbild dieses Bildschirms festlegen“
-settings_wall_own	2b4f	Eigenes Bild
-settings_wall_same	d736	Wie alle Bildschirme
 taskbar_tab_exit	44a5	Beenden
 taskbar_tab_pin	d57f	An Taskleiste anheften
 taskbar_tab_stop	3684	Beenden erzwingen
@@ -596,6 +594,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Caret blink speed	4085	Blinkgeschwindigkeit des Textcursors
 =Caret thickness	1e9a	Dicke des Textcursors
 =Charge limit (20 to 100, or off)	c92d	Ladegrenze (20 bis 100 oder off)
+=Choose each Scene's wallpaper on the desktop	25bd	Das Hintergrundbild jeder Szene auf dem Schreibtisch wählen
 =Clipboard	99b1	Zwischenablage
 =Clipboard history (copies kept)	7423	Verlauf der Zwischenablage (gemerkte Kopien)
 =Clock	80fd	Uhr
@@ -800,11 +799,6 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Variable refresh rate	06a4	Variable Bildwiederholrate
 =Volume (percent, or default)	f6e3	Lautstärke (Prozent oder default)
 =Wallpaper	0da9	Hintergrundbild
-=Wallpaper glow	57c6	Leuchten des Hintergrundbilds
-=Wallpaper in the dark theme	a6dc	Hintergrundbild im dunklen Design
-=Wallpaper of this screen	2c92	Hintergrundbild dieses Bildschirms
-=Wallpaper picture (a PNG file, or none)	8e9d	Hintergrundbild (eine PNG-Datei oder keins)
-=Wallpaper seas (percent grey)	6836	Meere des Hintergrundbilds (Prozent Grau)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Was ein Wischen von diesem Rand bewirkt
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Wo Canvas zeichnet: auf der GPU oder dem Prozessor. Was die Karte gerade tut, steht darunter
@@ -832,7 +826,6 @@ ui_field_full	fe02	mehr passt nicht hinein
 =default	5bde	Standard
 =deny	6367	Verweigern
 =desktop	87b3	Desktop
-=dimmed	bded	gedimmt
 =dmy	2a79	dmy
 =dynamic	96ae	dynamisch
 =edge	d83c	Rand
@@ -841,15 +834,12 @@ ui_field_full	fe02	mehr passt nicht hinein
 =forest	2a60	Wald
 =full	b33c	Voll
 =games	2b9c	Spiele
-=glow	27bc	Leuchten
-=glow-and-edges	540f	Leuchten-und-Ränder
 =graphite	dc8d	Graphit
 =green	ecbc	Grün
 =grouped	8b7d	gruppiert
 =high	b9fd	Hoch
 =hinted	c039	Auf Wunsch
 =ink	8faf	Tinte
-=inverted	8038	invertiert
 =kernel log	415a	Kernel-Protokoll
 =kernel log klog dmesg messages	1a8d	kernel protokoll klog dmesg meldungen
 =late	4d21	Verspätet
@@ -874,8 +864,6 @@ ui_field_full	fe02	mehr passt nicht hinein
 =per second	4f98	pro Sekunde
 =percent	fa5a	Prozent
 =performance	8ca5	Leistung
-=picture	d389	Bild
-=plain	3f67	schlicht
 =plum	b06b	Pflaume
 =powersave	2283	Energiesparen
 =primary	5fd9	Primär

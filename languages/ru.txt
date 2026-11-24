@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language ru
 @name Русский
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Сбросить масштаб
 menu_save_as	7bbe	Сохранить как...
 menu_select_all	f6f6	Выделить всё
 menu_set_wallpaper	1a27	Сделать обоями
-menu_set_wallpaper_of	aa60	Сделать обоями %s
 menu_show_hidden	37bd	Показать скрытые файлы
 menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	связано: подключается, когд�
 settings_bt_pairing	da7b	сопряжение: держите устройство в режиме сопряжения
 settings_busy	34e0	moonwater занят: предыдущие изменения ещё не выполнены
 settings_button_discover	c0ee	Обнаружить
+settings_button_edit	6cb1	Изменить
 settings_button_end	adad	Завершить все
 settings_button_open	10e9	Открыть
 settings_button_pair	f1d1	Связать
@@ -514,9 +515,6 @@ settings_unknown	9fb9	неизвестно
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ГЛАГОЛ [АРГУМЕНТЫ]
 settings_virtual_refused	4202	виртуальное устройство не может это включить: клавиатура или мышь машины, или moonwater ssh в терминале root
-settings_wall_hint	ccf0	Выберите PNG в Файлах, затем «Сделать обоями этого экрана»
-settings_wall_own	2b4f	Своя картинка
-settings_wall_same	d736	Как у всех экранов
 taskbar_tab_exit	44a5	Выход
 taskbar_tab_pin	d57f	Закрепить на панели задач
 taskbar_tab_stop	3684	Принудительно остановить
@@ -596,6 +594,7 @@ ui_field_full	fe02	больше не помещается
 =Caret blink speed	4085	Скорость мигания текстового курсора
 =Caret thickness	1e9a	Толщина текстового курсора
 =Charge limit (20 to 100, or off)	c92d	Предел зарядки (от 20 до 100 или off)
+=Choose each Scene's wallpaper on the desktop	25bd	Выберите обои каждой сцены на рабочем столе
 =Clipboard	99b1	Буфер обмена
 =Clipboard history (copies kept)	7423	История буфера обмена (хранимых копий)
 =Clock	80fd	Часы
@@ -800,11 +799,6 @@ ui_field_full	fe02	больше не помещается
 =Variable refresh rate	06a4	Переменная частота обновления
 =Volume (percent, or default)	f6e3	Громкость (проценты или default)
 =Wallpaper	0da9	Обои
-=Wallpaper glow	57c6	Свечение обоев
-=Wallpaper in the dark theme	a6dc	Обои в тёмной теме
-=Wallpaper of this screen	2c92	Обои этого экрана
-=Wallpaper picture (a PNG file, or none)	8e9d	Картинка обоев (файл PNG или нет)
-=Wallpaper seas (percent grey)	6836	Моря на обоях (процент серого)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Что делает жест от этого края
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Где рисует Canvas: на GPU или на процессоре. Что делает карта сейчас — ниже
@@ -832,7 +826,6 @@ ui_field_full	fe02	больше не помещается
 =default	5bde	по умолчанию
 =deny	6367	запретить
 =desktop	87b3	рабочий стол
-=dimmed	bded	приглушённые
 =dmy	2a79	dmy
 =dynamic	96ae	динамический
 =edge	d83c	край
@@ -841,15 +834,12 @@ ui_field_full	fe02	больше не помещается
 =forest	2a60	лесной
 =full	b33c	полное
 =games	2b9c	игры
-=glow	27bc	свечение
-=glow-and-edges	540f	свечение-и-края
 =graphite	dc8d	графитовый
 =green	ecbc	зелёный
 =grouped	8b7d	вместе
 =high	b9fd	высоко
 =hinted	c039	по запросу
 =ink	8faf	тушь
-=inverted	8038	инвертированные
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg сообщения
 =late	4d21	при опоздании
@@ -874,8 +864,6 @@ ui_field_full	fe02	больше не помещается
 =per second	4f98	в секунду
 =percent	fa5a	проценты
 =performance	8ca5	производительность
-=picture	d389	картинка
-=plain	3f67	простые
 =plum	b06b	сливовый
 =powersave	2283	экономия энергии
 =primary	5fd9	основной

@@ -459,127 +459,394 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
 }
 
 /*
-        moonwater canvas wallpaper picture [FILE|none] [SCREEN]: a PNG as the wallpaper, of every screen (and canvas wallpaper
-        picture with it) or of SCREEN alone (by its connector's name, as canvas display's), over the moon. The file is read
-        here and a copy of it kept in /root/wallpapers (all.png, or SCREEN.png), so the compositor reads a file of its own
-        and never the path given; none takes the copy away (and canvas wallpaper back to moon from picture). The wallpaper
-        row is written again after either, so the compositor, which watches /root, makes the wallpaper again at once. Bare
-        it says the pictures kept. A file that is not a PNG, or one over 64 MiB, is refused before root is asked for.
-*/
-#define LOCALE_WALLPAPER_DIR "/root/wallpapers"
-#define LOCALE_WALLPAPER_MOST (64ul << 20)
+        moonwater canvas wallpaper: each Scene's wallpaper (the compositor's wallpaper.c, registry.c's SETTING_WALLPAPER_*).
 
-static b32 locale_canvas_wallpaper_picture(string_address address_to arguments, positive count)
+        Bare, the Scenes' words and the pictures remembered. edit [on|off] opens the editor over the desktop, shuts it, or turns it. scene N
+        CHOICE [SCREEN] is Scene N's: auto, dark or white (the moon), or the name of a picture remembered; on SCREEN by its connector's name,
+        or on the screen you are on. picture FILE remembers a PNG (a copy of it in SETTING_WALLPAPER_DIR as NAME.png, its miniature beside
+        it, its name first in the list) and makes it the wallpaper of the Scene you are on; the name is the file's, in letters, digits and
+        dashes, and another picture of the same name already remembered gives it a number after. forget NAME remembers the picture no more:
+        its copy and miniature are taken away, and a Scene that had it has the moon again. The compositor alone writes the Scenes' words, so
+        what changes one is asked of it in a file of SETTING_WALLPAPER_ASK's name; the list is this command's alone.
+
+        A file that is not a PNG the desktop can read, or one over 64 MiB, is refused before root is asked for.
+*/
+#define LOCALE_WALLPAPER_MOST (64ul << 20)
+#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE or forget NAME\n"
+
+#ifndef SHELL_UTILITY_PROGRAM
+static unsigned int address_to ui_png_decode_most(const p8 address_to restrict file, positive size, int address_to restrict width_out,
+                                                  int address_to restrict height_out, unsigned int most);
+#endif
+
+// A file of /root read whole, whatever its length, and ended: null when it is not there (memory_free it with *room).
+static p8 address_to locale_wallpaper_text(string_address path, positive address_to used, positive address_to room)
+{
+        file_facts facts;
+        p8 address_to text;
+        bipolar got;
+
+        *used = *room = 0;
+        if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) || (facts.mode & MODE_FORMAT) != MODE_FILE)
+                return null;
+        *room = (positive)facts.size + 2;
+        if (!(text = (p8 address_to)memory_checked(*room)))
+                return *room = 0, null;
+        got = host_read_state(path, text, *room - 1);
+        *used = got > 0 ? (positive)got : 0;
+        text[*used] = end;
+        return text;
+}
+
+// Whether the list of pictures remembered (text, the most recent first) names name; and where its line is.
+static bool locale_wallpaper_listed(const p8 address_to text, positive used, string_address name, positive address_to from, positive address_to to)
+{
+        positive length = string_length(name);
+
+        for (positive at = 0; at < used;)
+        {
+                positive stop = at;
+
+                while (stop < used && text[stop] != '\n')
+                        stop++;
+                if (stop - at == length && !memory_compare(text + at, name, length))
+                        return *from = at, *to = stop + (stop < used), true;
+                at = stop + 1;
+        }
+        return false;
+}
+
+// The list again: name first (when given), then every other name of it but drop, each once and each a name.
+static b32 locale_wallpaper_list_put(string_address first, string_address drop)
+{
+        positive used, room, at = 0;
+        p8 address_to text = locale_wallpaper_text((string_address)SETTING_WALLPAPER_PICTURES_PATH, address_of used, address_of room);
+        p8 address_to out = (p8 address_to)memory_checked(used + SETTING_WALLPAPER_NAME + 2);
+        bipolar failed;
+
+        if (!out)
+        {
+                if (text)
+                        memory_free(text, room);
+                return host_fail("canvas wallpaper", -ENOMEM);
+        }
+        if (first)
+        {
+                positive length = string_length(first);
+
+                memory_copy(out, first, length), out[length] = '\n', at = length + 1;
+        }
+        for (positive line = 0; text && line < used;)
+        {
+                positive stop = line, from, to;
+
+                while (stop < used && text[stop] != '\n')
+                        stop++;
+                text[stop] = end;
+                if (setting_wallpaper_name_ok((const char address_to)text + line, stop - line) &&
+                    !(first && string_equals((string_address)text + line, first)) && !(drop && string_equals((string_address)text + line, drop)) &&
+                    !locale_wallpaper_listed(out, at, (string_address)text + line, address_of from, address_of to))
+                        memory_copy(out + at, text + line, stop - line), at += stop - line, out[at++] = '\n';
+                line = stop + 1;
+        }
+        failed = host_write_file((string_address)SETTING_WALLPAPER_PICTURES_PATH, out, at, 0644, true);
+        memory_free(out, used + SETTING_WALLPAPER_NAME + 2);
+        if (text)
+                memory_free(text, room);
+        return failed < 0 ? host_fail("canvas wallpaper", failed) : 0;
+}
+
+// A line asked of the compositor (wallpaper.c's compositor_walls_asks): a file of its own in SETTING_WALLPAPER_ASK_DIR, which it reads and
+// takes away, waiting there for it when the desktop is not running yet.
+static b32 locale_wallpaper_ask(string_address line)
+{
+        static positive sent;
+        p8 path[sizeof(SETTING_WALLPAPER_ASK_DIR "/" SETTING_WALLPAPER_ASK) + 48];
+        positive at;
+        bipolar failed;
+
+        string_copy(path, (string_address)SETTING_WALLPAPER_ASK_DIR "/" SETTING_WALLPAPER_ASK);
+        at = string_length(path);
+        at += positive_into_string(path + at, (positive)system_call(syscall(getpid)));
+        path[at++] = '-';
+        at += positive_into_string(path + at, ++sent);
+        path[at] = end;
+        failed = host_write_file(path, (p8 address_to)line, string_length(line), 0600, false);
+        return failed < 0 ? host_fail("canvas wallpaper", failed) : 0;
+}
+
+// A picture's name from its file's: the last part, without what follows its last dot, in letters, digits and dashes.
+static fn locale_wallpaper_name(string_address file, p8 address_to name)
+{
+        string_address base = file, dot = null;
+        positive at = 0;
+
+        for (string_address walk = file; *walk; walk++)
+                if (*walk == '/')
+                        base = walk + 1;
+        for (string_address walk = base; *walk; walk++)
+                if (*walk == '.')
+                        dot = walk;
+        for (string_address walk = base; *walk && walk != dot && at < SETTING_WALLPAPER_NAME - 8; walk++)
+        {
+                p8 c = (p8)(*walk >= 'A' && *walk <= 'Z' ? *walk + 32 : *walk);
+
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+                        c = '-';
+                if (c != '-' || (at && name[at - 1] != '-'))
+                        name[at++] = c;
+        }
+        while (at && name[at - 1] == '-')
+                at--;
+        if (!at)
+                string_copy(name, (string_address) "picture"), at = 7;
+        name[at] = end;
+}
+
+// The miniature of a picture (registry.c's setting_wallpaper_mini_read reads it): its longer side SETTING_WALLPAPER_MINI at the most, each
+// pixel the mean of the picture's under it, opaque.
+static bipolar locale_wallpaper_mini(string_address path, const unsigned int address_to picture, int width, int height)
+{
+        positive w = (positive)width, h = (positive)height, size;
+        p8 address_to out;
+        bipolar failed;
+
+        if (w > SETTING_WALLPAPER_MINI || h > SETTING_WALLPAPER_MINI)
+        {
+                if (w >= h)
+                        h = h * SETTING_WALLPAPER_MINI / w, w = SETTING_WALLPAPER_MINI;
+                else
+                        w = w * SETTING_WALLPAPER_MINI / h, h = SETTING_WALLPAPER_MINI;
+        }
+        w = w ? w : 1, h = h ? h : 1, size = SETTING_WALLPAPER_MINI_HEAD + w * h * 4;
+        if (!(out = (p8 address_to)memory_checked(size)))
+                return -ENOMEM;
+        memory_copy(out, "MWMI", 4), memory_store_unaligned(p32, out + 4, (p32)w), memory_store_unaligned(p32, out + 8, (p32)h);
+        for (positive y = 0; y < h; y++)
+        {
+                positive y0 = y * (positive)height / h, y1 = (y + 1) * (positive)height / h;
+
+                y1 += y1 == y0;
+                for (positive x = 0; x < w; x++)
+                {
+                        positive x0 = x * (positive)width / w, x1 = (x + 1) * (positive)width / w, r = 0, g = 0, b = 0, n;
+
+                        x1 += x1 == x0, n = (y1 - y0) * (x1 - x0);
+                        for (positive sy = y0; sy < y1; sy++)
+                                for (positive sx = x0; sx < x1; sx++)
+                                {
+                                        unsigned int px = picture[sy * (positive)width + sx];
+
+                                        r += px >> 16 & 255, g += px >> 8 & 255, b += px & 255;
+                                }
+                        memory_store_unaligned(p32, out + SETTING_WALLPAPER_MINI_HEAD + (y * w + x) * 4,
+                                               0xff000000u | (p32)(r / n) << 16 | (p32)(g / n) << 8 | (p32)(b / n));
+                }
+        }
+        failed = host_write_file(path, out, size, 0644, true);
+        memory_free(out, size);
+        return failed;
+}
+
+// canvas wallpaper picture FILE: the PNG read, judged, unpacked for its miniature, named, kept, listed first and asked for the Scene you are on.
+static b32 locale_wallpaper_remember(string_address file)
 {
         static const p8 signature[8] = {137, 'P', 'N', 'G', 13, 10, 26, 10};
-        char name[WINDOWS_OUTPUT_NAME], target[sizeof(LOCALE_WALLPAPER_DIR) + WINDOWS_OUTPUT_NAME + 8];
-        p8 kept[32];
-        bool none, every;
-        p8 address_to bytes = null;
-        positive got = 0;
+        p8 name[SETTING_WALLPAPER_NAME], stem[SETTING_WALLPAPER_NAME], target[sizeof(SETTING_WALLPAPER_DIR "/") + SETTING_WALLPAPER_NAME + 8];
+        p8 mini[sizeof(target)], word[SETTING_WALLPAPER_WORD];
+        p8 address_to bytes = null, address_to list;
+        unsigned int address_to picture = null;
+        int width = 0, height = 0;
+        positive got = 0, used, room, from, to;
         bipolar failed, handle;
 
-        if (count == 4)
+        handle = system_open_at(AT_FDCWD, file, FILE_READ | O_CLOEXEC);
+        if (handle < 0)
+                return host_fail(file, handle);
+        bytes = (p8 address_to)memory_checked(LOCALE_WALLPAPER_MOST + 1);
+        while (bytes && got <= LOCALE_WALLPAPER_MOST)
         {
-                file_facts facts;
-                bool any = false;
+                bipolar read = system_read_once(handle, bytes + got, LOCALE_WALLPAPER_MOST + 1 - got);
 
-                if (file_look(AT_FDCWD, (string_address)LOCALE_WALLPAPER_DIR "/all.png", AT_SYMLINK_NOFOLLOW, address_of facts))
-                {
-                        host_say(log, host_label "picture of every screen: " LOCALE_WALLPAPER_DIR "/all.png\n");
-                        any = true;
-                }
-                {
-                        bipolar directory = system_open_at(AT_FDCWD, (string_address)LOCALE_WALLPAPER_DIR, FILE_READ | O_DIRECTORY | O_CLOEXEC);
-                        p8 buffer[2048];
-                        bipolar read;
-
-                        while (directory >= 0 && (read = system_call_3(syscall(getdents64), (positive)directory, (positive)buffer, sizeof(buffer))) > 0)
-                                for (bipolar at = 0; at < read;)
-                                {
-                                        const struct linux_dirent64 address_to entry = (const struct linux_dirent64 address_to)(buffer + at);
-                                        const char address_to word = (const char address_to)entry->d_name;
-                                        positive length = string_length((string_address)word);
-
-                                        if (length > 4 && memory_has_suffix(word, length, ".png") && !string_equals((string_address)word, "all.png"))
-                                        {
-                                                host_say(log, host_label "picture of %s: " LOCALE_WALLPAPER_DIR "/%s\n", (string_address)word, (string_address)word);
-                                                any = true;
-                                        }
-                                        at += entry->d_reclen;
-                                }
-                        if (directory >= 0)
-                                system_close(directory);
-                }
-                if (!any)
-                        host_say(log, host_label "picture none\n");
-                return 0;
+                if (read <= 0)
+                        break;
+                got += (positive)read;
         }
-        if (count > 6)
-                return host_refuse("canvas wallpaper picture is a PNG file or none, and a screen's name after it for that screen alone\n");
-        none = string_equals(arguments[4], "none");
-        every = count == 5;
-        if (!every && !windows_display_name((const char *)arguments[5], string_length(arguments[5]), name))
-                return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes (Virtual-1, HDMI-A-1, eDP-1)\n",
-                                   arguments[5], (positive)(WINDOWS_OUTPUT_NAME - 1));
-        string_copy_bounded((string_address)target, (string_address)LOCALE_WALLPAPER_DIR "/", sizeof(target));
-        string_append_bounded((string_address)target, every ? (string_address) "all" : (string_address)name, sizeof(target));
-        string_append_bounded((string_address)target, (string_address) ".png", sizeof(target));
-        if (!none)
-        {
-                handle = system_open_at(AT_FDCWD, arguments[4], FILE_READ | O_CLOEXEC);
-                if (handle < 0)
-                        return host_fail(arguments[4], handle);
-                bytes = (p8 address_to)memory_checked(LOCALE_WALLPAPER_MOST + 1);
-                while (bytes && got <= LOCALE_WALLPAPER_MOST)
-                {
-                        bipolar read = system_read_once(handle, bytes + got, LOCALE_WALLPAPER_MOST + 1 - got);
-
-                        if (read <= 0)
-                                break;
-                        got += (positive)read;
-                }
-                system_close(handle);
-                if (!bytes || got > LOCALE_WALLPAPER_MOST || got < 33 || memory_compare(bytes, signature, 8) || memory_compare(bytes + 12, "IHDR", 4))
-                {
-                        if (bytes)
-                                memory_free(bytes, LOCALE_WALLPAPER_MOST + 1);
-                        return host_refuse("%s is not a PNG of at most 64 MiB: a wallpaper is a PNG picture\n", arguments[4]);
-                }
-        }
-        if (!bowl_is_root())
+        system_close(handle);
+#ifndef SHELL_UTILITY_PROGRAM
+        if (bytes && got <= LOCALE_WALLPAPER_MOST && got >= 33 && !memory_compare(bytes, signature, 8) && !memory_compare(bytes + 12, "IHDR", 4))
+                picture = ui_png_decode_most(bytes, got, &width, &height, 16384);
+#endif
+        if (!picture)
         {
                 if (bytes)
                         memory_free(bytes, LOCALE_WALLPAPER_MOST + 1);
+                return host_refuse("%s is not a PNG of at most 64 MiB the desktop can read: a wallpaper is a PNG picture\n", file);
+        }
+        if (!bowl_is_root())
+        {
+                memory_free(bytes, LOCALE_WALLPAPER_MOST + 1), memory_free(picture, (positive)width * (positive)height * 4);
                 return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
         }
-        if (none)
-                failed = system_remove_at(AT_FDCWD, (string_address)target, 0), failed = failed == -ENOENT ? 0 : failed;
-        else
+        // The name: the file's, and a number after it while another picture of the list has it.
+        locale_wallpaper_name(file, stem);
+        list = locale_wallpaper_text((string_address)SETTING_WALLPAPER_PICTURES_PATH, address_of used, address_of room);
+        string_copy(name, stem);
+        for (positive number = 2; list && locale_wallpaper_listed(list, used, name, address_of from, address_of to); number++)
         {
-                failed = host_make_directory((string_address)LOCALE_WALLPAPER_DIR, 0755, false);
-                if (failed >= 0)
-                        failed = host_write_file((string_address)target, bytes, got, 0644, true);
-                memory_free(bytes, LOCALE_WALLPAPER_MOST + 1);
+                positive at = string_length(stem);
+
+                string_copy(name, stem);
+                name[at++] = '-';
+                at += positive_into_string(name + at, number);
+                name[at] = end;
         }
+        if (list)
+                memory_free(list, room);
+        string_join(target, sizeof(target), (string_address)SETTING_WALLPAPER_DIR "/", name);
+        string_append_bounded(target, (string_address) ".png", sizeof(target));
+        string_join(mini, sizeof(mini), (string_address)SETTING_WALLPAPER_DIR "/", name);
+        string_append_bounded(mini, (string_address) ".mini", sizeof(mini));
+        failed = host_make_directory((string_address)SETTING_WALLPAPER_DIR, 0755, false);
+        if (failed >= 0)
+                failed = host_write_file(target, bytes, got, 0644, true);
+        if (failed >= 0)
+                failed = locale_wallpaper_mini(mini, picture, width, height);
+        memory_free(bytes, LOCALE_WALLPAPER_MOST + 1), memory_free(picture, (positive)width * (positive)height * 4);
         if (failed < 0)
                 return host_fail("canvas wallpaper picture", failed);
-        // The wallpaper row written again (picture for every screen's, moon when it is taken away), which the compositor hears.
-        kept[0] = end;
-        if (host_read_state(SETTING_WALLPAPER_PATH, kept, sizeof(kept) - 1) <= 0)
-                string_copy_bounded(kept, (string_address) "moon\n", sizeof(kept));
-        kept[sizeof(kept) - 1] = end;
-        if (every)
-                string_copy_bounded(kept, none ? (string_address) "moon\n" : (string_address) "picture\n", sizeof(kept));
-        failed = host_write_file((string_address)SETTING_WALLPAPER_PATH, kept, string_length(kept), 0644, true);
-        if (failed < 0)
-                return host_fail("canvas wallpaper", failed);
-        if (none)
-                host_say(log, host_label "%s has no picture now\n", every ? (string_address) "every screen" : (string_address)name);
-        else
-                host_say(log, host_label "the wallpaper of %s is %s, kept as %s\n", every ? (string_address) "every screen" : (string_address)name,
-                         arguments[4], (string_address)target);
+        if (locale_wallpaper_list_put(name, null))
+                return 1;
+        string_join(word, sizeof(word), (string_address) "current picture:", name);
+        string_append_bounded(word, (string_address) "\n", sizeof(word));
+        if (locale_wallpaper_ask(word))
+                return 1;
+        host_say(log, host_label "the wallpaper of the Scene you are on is %s, remembered as %s\n", file, target);
         return 0;
+}
+
+// canvas wallpaper forget NAME: out of the list, its copy and its miniature taken away (the compositor hears the list and gives a Scene
+// that had it the moon).
+static b32 locale_wallpaper_forget(string_address name)
+{
+        p8 path[sizeof(SETTING_WALLPAPER_DIR "/") + SETTING_WALLPAPER_NAME + 8];
+        positive used, room, from, to;
+        p8 address_to list;
+        bool listed;
+
+        if (!setting_wallpaper_name_ok((const char address_to)name, string_length(name)))
+                return host_refuse("\"%s\" is not a picture's name: letters, digits and dashes, as canvas wallpaper lists them\n", name);
+        list = locale_wallpaper_text((string_address)SETTING_WALLPAPER_PICTURES_PATH, address_of used, address_of room);
+        listed = list && locale_wallpaper_listed(list, used, name, address_of from, address_of to);
+        if (list)
+                memory_free(list, room);
+        if (!listed)
+                return host_refuse("no picture %s is remembered: canvas wallpaper lists them\n", name);
+        host_need_root();
+        if (locale_wallpaper_list_put(null, name))
+                return 1;
+        for (positive k = 0; k < 2; k++)
+        {
+                string_join(path, sizeof(path), (string_address)SETTING_WALLPAPER_DIR "/", name);
+                string_append_bounded(path, k ? (string_address) ".mini" : (string_address) ".png", sizeof(path));
+                (void)system_remove_at(AT_FDCWD, path, 0);
+        }
+        host_say(log, host_label "%s is remembered no more\n", name);
+        return 0;
+}
+
+static b32 locale_canvas_wallpaper(string_address address_to arguments, positive count)
+{
+        p8 line[SETTING_WALLPAPER_WORD + WINDOWS_OUTPUT_NAME + 32], word[SETTING_WALLPAPER_WORD], screen[WINDOWS_OUTPUT_NAME];
+        string_address form = count > 3 ? arguments[3] : null;
+
+        if (!form)
+        {
+                positive used, room, at = 0;
+                p8 address_to text = locale_wallpaper_text((string_address)SETTING_WALLPAPER_SCENES_PATH, address_of used, address_of room);
+                unsigned int scene;
+                bool any = false;
+
+                while (text && setting_wallpaper_line((const char address_to)text, used, address_of at, (char address_to)screen, address_of scene,
+                                                      (char address_to)word))
+                {
+                        host_say(log, host_label "Scene %p of %s: %s\n", (positive)scene, (string_address)screen, (string_address)word);
+                        any = true;
+                }
+                if (!any)
+                        host_say(log, host_label "every Scene: auto\n");
+                if (text)
+                        memory_free(text, room);
+                text = locale_wallpaper_text((string_address)SETTING_WALLPAPER_PICTURES_PATH, address_of used, address_of room);
+                for (at = 0; text && at < used;)
+                {
+                        positive stop = at;
+
+                        while (stop < used && text[stop] != '\n')
+                                stop++;
+                        text[stop] = end;
+                        if (setting_wallpaper_name_ok((const char address_to)text + at, stop - at))
+                                host_say(log, host_label "picture %s: " SETTING_WALLPAPER_DIR "/%s.png\n", (string_address)text + at, (string_address)text + at);
+                        at = stop + 1;
+                }
+                if (text)
+                        memory_free(text, room);
+                return 0;
+        }
+        if (string_equals(form, "edit") && count <= 5)
+        {
+                string_address how = count == 5 ? arguments[4] : (string_address) "toggle";
+
+                if (!string_equals(how, "on") && !string_equals(how, "off") && !string_equals(how, "toggle"))
+                        return host_refuse(LOCALE_WALLPAPER_USAGE);
+                host_need_root();
+                string_join(line, sizeof(line), (string_address) "edit ", how);
+                string_append_bounded(line, (string_address) "\n", sizeof(line));
+                return locale_wallpaper_ask(line);
+        }
+        if (string_equals(form, "picture") && count == 5)
+                return locale_wallpaper_remember(arguments[4]);
+        if (string_equals(form, "forget") && count == 5)
+                return locale_wallpaper_forget(arguments[4]);
+        if (string_equals(form, "scene") && (count == 6 || count == 7))
+        {
+                positive used = 0, number = string_digits_max(arguments[4], 4, address_of used), length = string_length(arguments[5]);
+                string_address choice = arguments[5];
+
+                if (!used || arguments[4][used] || !number)
+                        return host_refuse("a Scene is its number, 1 to 9999, not %s\n", arguments[4]);
+                if (count == 7 && !windows_display_name((const char *)arguments[6], string_length(arguments[6]), (char *)screen))
+                        return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes (Virtual-1, HDMI-A-1, eDP-1)\n",
+                                           arguments[6], (positive)(WINDOWS_OUTPUT_NAME - 1));
+                if (count == 6)
+                        string_copy(screen, (string_address) "-");
+                // A picture's name alone is the picture remembered by it.
+                if (setting_wallpaper_name_ok((const char address_to)choice, length) && !setting_wallpaper_word_ok((const char address_to)choice, length))
+                {
+                        positive used_list, room, from, to;
+                        p8 address_to list = locale_wallpaper_text((string_address)SETTING_WALLPAPER_PICTURES_PATH, address_of used_list, address_of room);
+                        bool listed = list && locale_wallpaper_listed(list, used_list, choice, address_of from, address_of to);
+
+                        if (list)
+                                memory_free(list, room);
+                        if (!listed)
+                                return host_refuse("no picture %s is remembered: canvas wallpaper picture FILE remembers one\n", choice);
+                        string_join(word, sizeof(word), (string_address) "picture:", choice);
+                }
+                else if (setting_wallpaper_word_ok((const char address_to)choice, length) && length < sizeof(word))
+                        string_copy(word, choice);
+                else
+                        return host_refuse("a Scene's wallpaper is auto, dark, white or a picture's name, not %s\n", choice);
+                host_need_root();
+                string_join(line, sizeof(line), (string_address) "scene ", screen);
+                string_append_bounded(line, (string_address) " ", sizeof(line));
+                string_append_bounded(line, arguments[4], sizeof(line));
+                string_append_bounded(line, (string_address) " ", sizeof(line));
+                string_append_bounded(line, word, sizeof(line));
+                string_append_bounded(line, (string_address) "\n", sizeof(line));
+                return locale_wallpaper_ask(line);
+        }
+        return host_refuse(LOCALE_WALLPAPER_USAGE);
 }
 
 #define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred, NAME mode WxH|preferred, NAME scale PERCENT, NAME primary or NAME place X Y [NAME place X Y]...\n"

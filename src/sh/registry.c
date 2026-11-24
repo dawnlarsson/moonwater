@@ -71,7 +71,6 @@
 #define SETTINGS_OUT_NOTICES 6u // the kernel's own notices: the value is their count, and the row's lines are each one (settings.c)
 #define SETTINGS_OUT_SIZE 7u    // the screen's resolution: every size it lists, the preferred marked (the table's output_size)
 #define SETTINGS_OUT_PRIMARY 8u // whether the screen is the primary: the table's index 0, the taskbar's and where a window opens
-#define SETTINGS_OUT_WALLPAPER 9u // the screen's wallpaper: the picture of every screen's, or its own (/root/wallpapers/NAME.png)
 
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
@@ -136,10 +135,19 @@
 #define SETTING_TASKBAR_ITEM_BATTERY_PATH "/root/taskbar.item.battery"
 #define SETTING_TASKBAR_ITEM_TEXT_PATH "/root/taskbar.item.text"
 #define SETTING_TASKBAR_ITEM_CLOCK_PATH "/root/taskbar.item.clock"
-#define SETTING_WALLPAPER_PATH "/root/canvas.wallpaper"
-#define SETTING_WALLPAPER_DARK_PATH "/root/canvas.wallpaper.dark"
-#define SETTING_WALLPAPER_MARIA_PATH "/root/canvas.wallpaper.maria"
-#define SETTING_WALLPAPER_GLOW_PATH "/root/canvas.wallpaper.glow"
+// Each Scene's wallpaper (the compositor's wallpaper.c). The Scenes' words, a line a Scene (the screen's name, the Scene's number among its
+// desktop Scenes from 1, and its word), written by the compositor alone: the command asks it to with a file of its own whose name starts
+// SETTING_WALLPAPER_ASK (wallpaper.c's compositor_walls_asks). The pictures remembered, a name a line, the most recent first, written by the
+// command alone. And their directory: a picture is NAME.png with its miniature NAME.mini beside it (setting_wallpaper_mini_read), and one
+// of the feed's is curated/HEX.png by its digest.
+#define SETTING_WALLPAPER_SCENES_PATH "/root/canvas.wallpaper.scenes"
+#define SETTING_WALLPAPER_PICTURES_PATH "/root/canvas.wallpaper.pictures"
+#define SETTING_WALLPAPER_DIR "/root/wallpapers"
+#define SETTING_WALLPAPER_ASK_DIR "/run/moonwater"
+#define SETTING_WALLPAPER_ASK "wallpaper.ask."
+#define SETTING_WALLPAPER_WORD 96  // the bytes of a word, its end with them: auto, dark, white, picture:NAME or curated:HEX
+#define SETTING_WALLPAPER_NAME 48  // and of a picture's name, letters, digits and dashes
+#define SETTING_WALLPAPER_MINI 512 // a miniature's longer side, at the most
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
 #define SETTING_TOUCH_LEFT_PATH "/root/canvas.touch.left"
@@ -336,31 +344,11 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
     {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
      {"canvas", "background"}, null, 0, .how = SETTING_ALIAS},
-    //  The wallpaper the compositor draws its ground with (ui.c's ui_moon_night): the moon over its sky with the glow of the accent, or
-    //  the background colour plain. In a dark theme the moon is dimmed (as it is, its seas a share of grey) or inverted (the ink look,
-    //  chalk on charcoal); the glow is none, the glow, or the glow and the light along the screen's edges.
-    SETTING_PLAIN_ROW(null, "Wallpaper", SETTINGS_CHOICE, 0, ("canvas", "wallpaper"), "wallpaper ", "moon plain picture",
-                      .path = SETTING_WALLPAPER_PATH, .standard = "moon",
-                      .usage = "canvas wallpaper [moon|plain|picture]",
-                      .help = "the desktop behind the windows: the moon over a night sky that turns with the theme and the accent, the background colour plain, or the picture canvas wallpaper picture keeps [moon]"),
-    //  The picture (setting.c's locale_canvas_wallpaper_picture): a PNG copied into /root/wallpapers, for every screen or one.
-    {null, "Wallpaper picture (a PNG file, or none)", SETTINGS_FIELD, 0, 0, {"canvas", "wallpaper", "picture"}, "picture of every screen: ", "picture ",
-     {"canvas", "wallpaper", "picture"}, null, 0,
-     .usage = "canvas wallpaper picture [FILE|none] [SCREEN]",
-     .help = "a PNG as the wallpaper of every screen, or of SCREEN alone by its name, over the moon; none takes it away; bare, the pictures kept [none]"},
-    SETTING_PLAIN_ROW(null, "Wallpaper in the dark theme", SETTINGS_CHOICE, 0, ("canvas", "wallpaper", "dark"), "dark ", "dimmed inverted",
-                      .path = SETTING_WALLPAPER_DARK_PATH, .standard = "dimmed",
-                      .usage = "canvas wallpaper dark [dimmed|inverted]",
-                      .help = "the moon of the wallpaper in a dark theme: dimmed, as it is with its seas grey, or inverted, chalk lines on charcoal [dimmed]"),
-    SETTING_PLAIN_ROW(null, "Wallpaper seas (percent grey)", SETTINGS_SLIDER, 0, ("canvas", "wallpaper", "maria"), "maria ", null,
-                      .type = SETTING_NUMBER, .path = SETTING_WALLPAPER_MARIA_PATH, .standard = "45",
-                      .unit = "percent", .low = 20, .high = 80,
-                      .usage = "canvas wallpaper maria [PERCENT|default]",
-                      .help = "how grey the dark seas of the dimmed moon are, 20 to 80 percent of its highlands [45]"),
-    SETTING_PLAIN_ROW(null, "Wallpaper glow", SETTINGS_CHOICE, 0, ("canvas", "wallpaper", "glow"), "glow ", "none glow glow-and-edges",
-                      .path = SETTING_WALLPAPER_GLOW_PATH, .standard = "glow",
-                      .usage = "canvas wallpaper glow [none|glow|glow-and-edges]",
-                      .help = "the light of the accent round the moon: none, a glow, or a glow and a light along the edges of the screen [glow]"),
+    //  Each Scene's wallpaper (the compositor's wallpaper.c): chosen in the editor over the desktop, which this opens and shuts, with the
+    //  Moonwater moon (dark, white, or with the theme), the pictures remembered and the feed's. canvas wallpaper is its verb (page.c's rows).
+    {null, "Wallpaper", SETTINGS_ACTION, 0, 0, {null}, null, null, {"canvas", "wallpaper", "edit"}, null, 0,
+     .help = "the editor of the wallpaper of the Scene you are on, over the desktop: the moon, the pictures you chose and the curated ones",
+     .about = "Choose each Scene's wallpaper on the desktop"},
     //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
     //  fill with; the compositor puts them in the window table and every window turns to them at once.
     SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
@@ -452,8 +440,6 @@ static const struct settings_row settings_rows[] = {
      .help = "how big the screen draws things, in percent of its size: 50, 75, 100, 125, 150 or 200 [100]", .output = SETTINGS_OUT_SCALE},
     {null, "Primary display", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "the screen the taskbar is on and windows open on, wherever it is laid", .output = SETTINGS_OUT_PRIMARY},
-    {null, "Wallpaper of this screen", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "wallpaper", "picture"}, null, null, {"canvas", "wallpaper", "picture"}, null, 0,
-     .help = "the wallpaper every screen has, or a picture of its own, which Set as Wallpaper in Files gives it", .output = SETTINGS_OUT_WALLPAPER},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
     //  Variable refresh (kms.c's compositor_vrr): a screen that can (its connector's vrr_capable) waits for each frame, so a key or a frame
@@ -1847,6 +1833,142 @@ static bool setting_startup_entry(const char *line, positive length, struct sett
         if (line[k] == '\n' || line[k] == '\r' || !line[k])
             return false;
     return e->command_length > 0;
+}
+
+/*
+        Each Scene's wallpaper, the words of it as the compositor, the command and the window read them (SETTING_WALLPAPER_*). A picture's
+        name is letters, digits and dashes, lower case, 1 to SETTING_WALLPAPER_NAME - 1 of them; a word is auto, dark, white, picture:NAME,
+        or curated:HEX, the 64 hex digits of the digest of one of the feed's.
+*/
+static bool setting_wallpaper_name_ok(const char address_to name, positive length)
+{
+        if (!length || length >= SETTING_WALLPAPER_NAME || name[0] == '-')
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                        return false;
+        return true;
+}
+
+static bool setting_wallpaper_word_ok(const char address_to word, positive length)
+{
+        if ((length == 4 && !memory_compare(word, "auto", 4)) || (length == 4 && !memory_compare(word, "dark", 4)) ||
+            (length == 5 && !memory_compare(word, "white", 5)))
+                return true;
+        if (length > 8 && !memory_compare(word, "picture:", 8))
+                return setting_wallpaper_name_ok(word + 8, length - 8);
+        if (length != 8 + 64 || memory_compare(word, "curated:", 8))
+                return false;
+        for (positive at = 8; at < length; at++)
+                if (!((word[at] >= '0' && word[at] <= '9') || (word[at] >= 'a' && word[at] <= 'f')))
+                        return false;
+        return true;
+}
+
+// The file of a word's picture (SETTING_WALLPAPER_DIR/NAME.png or curated/HEX.png, with suffix in place of .png): false for the moon's words.
+static bool setting_wallpaper_file(const char address_to word, const char address_to suffix, char address_to path, positive room)
+{
+        positive length = string_length((string_address)word);
+        bool curated = length > 8 && !memory_compare(word, "curated:", 8);
+
+        if (!setting_wallpaper_word_ok(word, length) || (memory_compare(word, "picture:", 8) && !curated) ||
+            sizeof(SETTING_WALLPAPER_DIR "/curated/") + length + string_length((string_address)suffix) > room)
+                return false;
+        string_copy((string_address)path, (string_address)(curated ? SETTING_WALLPAPER_DIR "/curated/" : SETTING_WALLPAPER_DIR "/"));
+        string_append_bounded((string_address)path, (string_address)word + 8, room);
+        string_append_bounded((string_address)path, (string_address)suffix, room);
+        return true;
+}
+
+// Whether a word's moon is the dark one: dark, or auto in a dark theme (white and auto in a light one are the ink on paper).
+static bool setting_wallpaper_dark(const char address_to word, bool theme_dark)
+{
+        return string_equals((string_address)word, "dark") || (string_equals((string_address)word, "auto") && theme_dark);
+}
+
+/*
+        The next line of the Scenes' words (SETTING_WALLPAPER_SCENES_PATH) from text[*at]: the screen's name, the Scene's number and the
+        word, each as it may be; false at the text's end. A line that is none of that is passed over, so a word written by hand wrong is
+        the Scene's auto and nothing else.
+*/
+static bool setting_wallpaper_line(const char address_to text, positive size, positive address_to at, char address_to screen,
+                                   unsigned int address_to scene, char address_to word)
+{
+        while (*at < size)
+        {
+                positive start = *at, stop = start, field[3][2], count = 0, digit;
+                unsigned int number = 0;
+
+                while (stop < size && text[stop] != '\n')
+                        stop++;
+                *at = stop + (stop < size);
+                for (positive k = start; k < stop && count < 4;)
+                {
+                        positive from;
+
+                        while (k < stop && text[k] == ' ')
+                                k++;
+                        if (k >= stop)
+                                break;
+                        from = k;
+                        while (k < stop && text[k] != ' ')
+                                k++;
+                        if (count < 3)
+                                field[count][0] = from, field[count][1] = k - from;
+                        count++;
+                }
+                if (count != 3 || !field[0][1] || field[0][1] >= WINDOWS_OUTPUT_NAME || field[1][1] > 4 ||
+                    !setting_wallpaper_word_ok(text + field[2][0], field[2][1]))
+                        continue;
+                for (digit = 0; digit < field[1][1] && text[field[1][0] + digit] >= '0' && text[field[1][0] + digit] <= '9'; digit++)
+                        number = number * 10 + (unsigned int)(text[field[1][0] + digit] - '0');
+                if (digit != field[1][1] || !number)
+                        continue;
+                memory_copy(screen, text + field[0][0], field[0][1]), screen[field[0][1]] = end;
+                memory_copy(word, text + field[2][0], field[2][1]), word[field[2][1]] = end;
+                *scene = number;
+                return true;
+        }
+        return false;
+}
+
+/*
+        A picture's miniature (NAME.mini beside NAME.png, made by `canvas wallpaper picture`): "MWMI", its width and height (little end
+        first, each 1 to SETTING_WALLPAPER_MINI) and four bytes of none, then its pixels, opaque, a row after a row. The window and the
+        compositor read it, never the picture, for a thumbnail: the picture is megabytes to unpack, this a few hundred kilobytes to read.
+        Answers its pixels (memory_free them with *bytes), null when it is not there or not one.
+*/
+#define SETTING_WALLPAPER_MINI_HEAD 16u
+static unsigned int address_to setting_wallpaper_mini_read(const char address_to path, int address_to width, int address_to height,
+                                                           positive address_to bytes)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        p8 head[SETTING_WALLPAPER_MINI_HEAD];
+        unsigned int address_to pixels = null, w, h;
+        positive size = 0, got = 0;
+
+        if (handle < 0)
+                return null;
+        if (system_read_once(handle, head, sizeof(head)) == (bipolar)sizeof(head) && !memory_compare(head, "MWMI", 4))
+        {
+                w = memory_load_unaligned(p32, head + 4), h = memory_load_unaligned(p32, head + 8);
+                if (w && h && w <= SETTING_WALLPAPER_MINI && h <= SETTING_WALLPAPER_MINI)
+                        size = (positive)w * h * 4, pixels = (unsigned int address_to)memory_checked(size);
+                while (pixels && got < size)
+                {
+                        bipolar read = system_read_once(handle, (p8 address_to)pixels + got, size - got);
+
+                        if (read <= 0)
+                                break;
+                        got += (positive)read;
+                }
+                if (pixels && got == size)
+                        *width = (int)w, *height = (int)h, *bytes = size;
+                else if (pixels)
+                        memory_free(pixels, size), pixels = null;
+        }
+        system_close(handle);
+        return pixels;
 }
 
 #endif // MOONWATER_SETTINGS_REGISTRY

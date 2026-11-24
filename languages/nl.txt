@@ -26,6 +26,7 @@
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
+# machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 @language nl
 @name Nederlands
 @translated machine
@@ -258,7 +259,6 @@ menu_reset_zoom	1b0f	Zoom &herstellen
 menu_save_as	7bbe	Opslaan als...
 menu_select_all	f6f6	&Alles selecteren
 menu_set_wallpaper	1a27	Instellen als &achtergrond
-menu_set_wallpaper_of	aa60	Instellen als achtergrond van %s
 menu_show_hidden	37bd	&Verborgen bestanden tonen
 menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
@@ -313,6 +313,7 @@ settings_bt_paired_keys	6d99	gekoppeld: verbindt zodra het wakker wordt; Delete 
 settings_bt_pairing	da7b	koppelen: houd het apparaat in koppelmodus
 settings_busy	34e0	moonwater is bezig: de vorige wijzigingen zijn nog niet klaar
 settings_button_discover	c0ee	Detecteren
+settings_button_edit	6cb1	Bewerken
 settings_button_end	adad	Alles beëindigen
 settings_button_open	10e9	Openen
 settings_button_pair	f1d1	Koppelen
@@ -514,9 +515,6 @@ settings_unknown	9fb9	onbekend
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	WERKWOORD [ARGUMENTEN]
 settings_virtual_refused	4202	een virtueel apparaat kan dit niet aanzetten: gebruik een toetsenbord of muis die op de machine is aangesloten, of moonwater ssh in een root-terminal
-settings_wall_hint	ccf0	Kies een PNG in Bestanden en daarna Instellen als achtergrond van dit scherm
-settings_wall_own	2b4f	Eigen afbeelding
-settings_wall_same	d736	Zoals elk scherm
 taskbar_tab_exit	44a5	Afsluiten
 taskbar_tab_pin	d57f	Aan taakbalk vastmaken
 taskbar_tab_stop	3684	Geforceerd stoppen
@@ -596,6 +594,7 @@ ui_field_full	fe02	meer past er niet in
 =Caret blink speed	4085	Knippersnelheid van de tekstcursor
 =Caret thickness	1e9a	Dikte van de tekstcursor
 =Charge limit (20 to 100, or off)	c92d	Laadlimiet (20 tot 100, of off)
+=Choose each Scene's wallpaper on the desktop	25bd	Kies de achtergrond van elke scène op het bureaublad
 =Clipboard	99b1	Klembord
 =Clipboard history (copies kept)	7423	Klembordgeschiedenis (bewaarde kopieën)
 =Clock	80fd	Klok
@@ -800,11 +799,6 @@ ui_field_full	fe02	meer past er niet in
 =Variable refresh rate	06a4	Variabele vernieuwingsfrequentie
 =Volume (percent, or default)	f6e3	Volume (procent of default)
 =Wallpaper	0da9	Bureaubladachtergrond
-=Wallpaper glow	57c6	Gloed van de bureaubladachtergrond
-=Wallpaper in the dark theme	a6dc	Bureaubladachtergrond in het donkere thema
-=Wallpaper of this screen	2c92	Achtergrond van dit scherm
-=Wallpaper picture (a PNG file, or none)	8e9d	Achtergrondafbeelding (een PNG-bestand, of geen)
-=Wallpaper seas (percent grey)	6836	Zeeën van de bureaubladachtergrond (procent grijs)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Wat vegen vanaf deze rand doet
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Waar Canvas tekent: op de GPU of de processor. Wat de kaart nu doet staat eronder
@@ -832,7 +826,6 @@ ui_field_full	fe02	meer past er niet in
 =default	5bde	standaard
 =deny	6367	weigeren
 =desktop	87b3	bureaublad
-=dimmed	bded	gedimd
 =dmy	2a79	dmy
 =dynamic	96ae	dynamisch
 =edge	d83c	rand
@@ -841,15 +834,12 @@ ui_field_full	fe02	meer past er niet in
 =forest	2a60	woud
 =full	b33c	volledig
 =games	2b9c	games
-=glow	27bc	gloed
-=glow-and-edges	540f	gloed-en-randen
 =graphite	dc8d	grafiet
 =green	ecbc	groen
 =grouped	8b7d	gegroepeerd
 =high	b9fd	hoog
 =hinted	c039	op verzoek
 =ink	8faf	inkt
-=inverted	8038	omgekeerd
 =kernel log	415a	kernellogboek
 =kernel log klog dmesg messages	1a8d	kernel logboek klog dmesg berichten
 =late	4d21	te laat
@@ -874,8 +864,6 @@ ui_field_full	fe02	meer past er niet in
 =per second	4f98	per seconde
 =percent	fa5a	procent
 =performance	8ca5	prestaties
-=picture	d389	afbeelding
-=plain	3f67	effen
 =plum	b06b	pruim
 =powersave	2283	energiebesparing
 =primary	5fd9	primair

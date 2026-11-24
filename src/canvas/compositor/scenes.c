@@ -866,6 +866,8 @@ static void compositor_scenes_card_shown(unsigned int i, const int s[4], int gap
         out[1] -= (int)((lift * (UI_ONE - t)) >> UI_Q);
 }
 
+static const unsigned int *compositor_wall_card(const struct compositor_space *sp, const int s[4], int w, int h); // wallpaper.c
+
 // The overview's frames at frames[at], the rows' in rows (room of each at the most): the current Scene's windows at their
 // rects, then the strip, a card a Scene with its windows on the wallpaper's miniature, and the "+" card. Answers how many.
 static unsigned int compositor_scenes_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room)
@@ -914,7 +916,7 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                                 at += compositor_scenes_own(compositor.scenes.row[i], frames, rows, at, room);
                                 span[i][1] = at;
                         }
-        // The strip: each Scene's card, its ground the wallpaper's miniature (a fullscreen Scene's black), its windows over it.
+        // The strip: each Scene's card, its ground its wallpaper's miniature (a fullscreen Scene's black), its windows over it.
         for (unsigned int card = 0; card + 1 < compositor.scenes.cards && card < COMPOSITOR_SPACES_MAX; card++)
         {
                 int c[4];
@@ -926,9 +928,8 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
 
                 if (!sp || !compositor_scenes_plain(frames, rows, at, room, filler, c, clip, scale))
                         continue;
-                if (sp->kind != COMPOSITOR_SPACE_FULLSCREEN && !wall)
-                        wall = compositor_scenes_wall_of(s, c[2], c[3]);
-                if (sp->kind != COMPOSITOR_SPACE_FULLSCREEN && wall)
+                wall = sp->kind != COMPOSITOR_SPACE_FULLSCREEN ? compositor_wall_card(sp, s, c[2], c[3]) : 0; // the Scene's own (wallpaper.c)
+                if (wall)
                         frames[at].pixels = wall + (frames[at].y - c[1]) * c[2] + (frames[at].x - c[0]), frames[at].pitch = (unsigned long)c[2];
                 else
                         frames[at].fill = sp->kind == COMPOSITOR_SPACE_FULLSCREEN ? 0xff000000u : compositor_ground | 0xff000000u;
