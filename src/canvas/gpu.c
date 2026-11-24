@@ -2152,8 +2152,14 @@ static b32 gpu_start(positive bytes)
 
                                                                         if (op == 0x31u)
                                                                         {
+                                                                                // Gen7's block messages are not the data cache's (0xC, Haswell's too): the damage is read and
+                                                                                // written by the render cache's port (5), and the scene's other surfaces (its lists, by an
+                                                                                // immediate descriptor that names an entry past 0; its images, by the descriptor in a0) are
+                                                                                // read by the sampler cache's (4). Through the render cache's a 1080p copy took 9.3 ms on
+                                                                                // Haswell and 4.9 on Ivy Bridge, through the sampler cache's 2.7 and 2.1, the pixels the same
+                                                                                // with the pictures and lists changed between the jobs. The other kernels stay as they ran.
                                                                                 if (((w[0] >> 24) & 0xfu) == 0xcu)
-                                                                                        w[0] = (w[0] & ~0x0f000000u) | (0x5u << 24); // Gen7 Render Cache SFID = 5
+                                                                                        w[0] = (w[0] & ~0x0f000000u) | ((i == 6u && (s1rf != 3u || (((w[3] >> 14) & 0x1fu) == 4u && (w[3] & 0xffu))) ? 0x4u : 0x5u) << 24);
                                                                                 s1type = 1u; // Gen7 send Src1Type = :d
                                                                         }
                                                                         else if (op == 0x20u && gpu.family < 750)
@@ -3109,8 +3115,9 @@ static void gpu_release_import_gen(positive at, unsigned int gen)
 
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
 // s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene, 5 with boxes (both by clang, any width), 6 by hand with or without boxes for a width and a pitch of a multiple of 4 (gpu_scene picks).
-struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows, pad; positive tab, ops; unsigned int count, pad2; };
-// ops and count: a scene's records (the card's address of the first, and how many), read by the Intel scene batch (op 6) only.
+struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows, pad; positive tab, ops; unsigned int count, room; };
+// ops and count: a scene's records (the card's address of the first, and how many), and room: the bytes of its bins at g (all ones for more than 32 bits
+// hold), read by the Intel scene batch (op 6) only.
 #define GPU_ARGS_AT(slot) (gpu_layout.args + 256 * (positive)(slot)) // a slot's arguments, in bytes of the buffer (after every slot's packets)
 static struct gpu_args gpu_slot_args[GPU_SLOTS]; // cached RAM mirror of GPU_ARGS, flushed in one sequential WC burst in gpu_submit()
 #define GPU_ARGS (&gpu_slot_args[gpu_slot])      // the arguments of the slot the job is built in
@@ -3390,106 +3397,205 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
 
 /*
         The Intel scene (op 6, the kernel gpu_i915_scene: fill 0, tone over 1, image copy 4 and premultiplied image over 11, the images with an
-        optional 0x80 R/B swap, drawn in order over each 8 by 8 tile of the damage, a thread a tile). The damage is the patch the arguments name
+        optional 0x80 R/B swap, drawn in order over the damage, a thread a strip of eight 8 by 8 tiles). The damage is the patch the arguments name
         (a->x0 patches of 64 pixels, a->y0 of 4 rows, a->w by a->rows as gpu_scene_build sets them) clipped to the picture (a->sp by a->gp); the
-        records are a->count of 8 words at a->ops (64-byte aligned, inside the buffer). The batch clips each record to the damage, passes over
-        those that miss it and those a later fill or copy covering all of it hides, and packs the rest a 64-byte row each at the slot's part of
-        the side's bins (a->g, GPU_I915_SCENE_SIDE bytes a slot) for binding table entry 1. An image is given a surface of its own at the top of
-        that part (based at the 64-byte line of its first pixel in the damage, at its own pitch), its entry in the record's word 7 and its x and
-        row bias in words 5 and 6 (the kernel reads byte x = word 5 + 4 x of row word 6 + y). The binding table is the slot state's from
-        GPU_I915_SCENE_TABLE: entry 0 the damage (32-byte aligned, rows of whole 16-byte groups), 1 the records, 2 on the images. Refused (0 words:
-        the processor draws the scene): a kind other than those, a damage whose width is not a multiple of 4 pixels or past 4096, more images
-        than the send's 8-bit entry reaches (GPU_I915_SCENE_IMAGES), more records than the part holds, an image past the surface fields.
+        records are a->count of 8 words at a->ops (64-byte aligned, inside the buffer). The batch clips each record to the damage and bins it into
+        the damage's cells of 64 by 64 pixels (from the damage's first pixel), a cell's list in the order of the records and started at the last
+        record that covers all of the cell's damage opaque (a fill or a copy: the records before it there cannot show, and are not listed). The
+        lists are laid in the bins' room (a->g, a->room bytes: the job's own side) as the kernel reads them:
+          - binding table entry 1, the cells: 64 bytes a cell and row, eight rows a cell, so the cell tx, ty has its record n at
+            64 * ((8 * ty + n) * cw + tx). A record is its 32 bytes (kind, x0, y0, x1, y1 clipped, then the colour, or an image's x and row bias
+            and its entry). The first row's word 0 also holds the list's length (bits 31:16), 0x200 when the first record covers every tile of the
+            cell whole and opaque (the strip then reads no tile and looks for no cover), and 0x100 for a list of more than eight: the row is then
+            no record, and its word 1 is the list's first row in
+          - entry 2, the long lists: a record a 64-byte row, eight rows of slack after the last;
+          - entries 3 and up, an image's surface each, their states from the top of the room down: based at the 64-byte line of the image's first
+            pixel in the damage, at its own pitch, its x and row bias in the record's words 5 and 6 (the kernel reads byte x = word 5 + 4 x of
+            row word 6 + y).
+        Entry 0 is the damage, 32-byte aligned and as wide as its whole tiles: a last tile cut by the picture's edge has its other lanes in the
+        pitch's padding, which the kernel reads and writes back (no record covers such a tile whole: every record ends at the damage). The binding
+        table is the slot state's from GPU_I915_SCENE_TABLE. Refused (0 words: the processor draws the scene): a kind other than those, a damage
+        past 4096 pixels wide or whose whole tiles pass the pitch, more images than the send's 8-bit entry reaches (GPU_I915_SCENE_IMAGES), lists
+        that do not fit the room or the surfaces' 16384 rows, an image past the surface fields, no memory for the cells' counts.
 */
-#define GPU_I915_SCENE_TABLE 512u                               // the scene's binding table in a slot's state
-#define GPU_I915_SCENE_IMAGES 238u                              // entries 2 to 239: a message's binding table index is 8 bits, 240 and up are not surfaces
-#define GPU_I915_SCENE_SIDE (256u << 10)                        // a slot's part of the side's bins: the packed records, then the images' surfaces at its top
-#define GPU_I915_SCENE_SURFACES (GPU_I915_SCENE_SIDE - 64u * GPU_I915_SCENE_IMAGES)
-typedef char gpu_i915_scene_table_fits[GPU_I915_SCENE_TABLE + 4u * (2u + GPU_I915_SCENE_IMAGES) <= GPU_I915_STATE ? 1 : -1];
-static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
+#define GPU_I915_SCENE_TABLE 512u    // the scene's binding table in a slot's state
+#define GPU_I915_SCENE_IMAGES 237u   // entries 3 to 239: a message's binding table index is 8 bits, 240 and up are not surfaces
+typedef char gpu_i915_scene_table_fits[GPU_I915_SCENE_TABLE + 4u * (3u + GPU_I915_SCENE_IMAGES) <= GPU_I915_STATE ? 1 : -1];
+// A record clipped to the damage: false when nothing of it is inside.
+static inline b32 gpu_i915_scene_clip(const unsigned int r[8], const unsigned int damage[4], long long c[4])
+{
+        c[0] = (int)r[1] > (long long)damage[0] ? (int)r[1] : (long long)damage[0], c[1] = (int)r[2] > (long long)damage[1] ? (int)r[2] : (long long)damage[1];
+        c[2] = (int)r[3] < (long long)damage[2] ? (int)r[3] : (long long)damage[2], c[3] = (int)r[4] < (long long)damage[3] ? (int)r[4] : (long long)damage[3];
+        return c[2] > c[0] && c[3] > c[1];
+}
+HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
-        unsigned int px0, py0, px1, py1, kept = 0, images = 0, sbase;
-        positive base, pack_va;
+        unsigned int damage[4], images = 0, sbase, cw, ch, cells, span, address_to cell;
+        positive base, pack_va, pack_room, heads, more = 0;
         p8 address_to state, address_to pack;
         const unsigned int address_to rec;
+        b32 any = false;
 
-        if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || !a->gp || a->gp > 16384u ||
+        if (!a || !a->count || a->ops < GPU_VA || (a->ops & 63) || !a->sp || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA ||
             a->g < GPU_VA || (a->g & 63))
                 return 0;
-        // The records, and the slot's part of the bins they are packed into, are read and written through the CPU mapping: they must lie inside it.
-        pack_va = a->g + (gpu_slot ? GPU_I915_SCENE_SIDE : 0u);
+        // The records, and the room of the bins the lists are laid in, are read and written through the CPU mapping: they must lie inside it.
+        pack_va = a->g, pack_room = a->room;
         if (a->ops - GPU_VA > gpu.size || 32ull * a->count > gpu.size - (a->ops - GPU_VA) || pack_va - GPU_VA > gpu.size ||
-            GPU_I915_SCENE_SIDE > gpu.size - (pack_va - GPU_VA))
+            pack_room > gpu.size - (pack_va - GPU_VA))
                 return 0;
-        px0 = a->x0 << 6, py0 = a->y0 << 2;
-        px1 = (positive)px0 + (positive)a->w < a->sp ? px0 + a->w : a->sp;
-        py1 = (positive)py0 + 4 * (positive)a->rows < a->gp ? py0 + 4 * a->rows : a->gp; // in 64 bits: 4 * a->rows wraps at 2^30 rows
-        if (px0 >= px1 || py0 >= py1 || (px1 - px0) > 4096u || ((px1 - px0) & 3))
+        damage[0] = a->x0 << 6, damage[1] = a->y0 << 2;
+        damage[2] = (positive)damage[0] + (positive)a->w < a->sp ? damage[0] + a->w : a->sp;
+        damage[3] = (positive)damage[1] + 4 * (positive)a->rows < a->gp ? damage[1] + 4 * a->rows : a->gp; // in 64 bits: 4 * a->rows wraps at 2^30 rows
+        if (damage[0] >= damage[2] || damage[1] >= damage[3] || (damage[2] - damage[0]) > 4096u)
                 return 0;
-        base = a->d + 4 * ((positive)py0 * a->dp + px0);
+        span = (damage[2] - damage[0] + 7) & ~7u;
+        if ((positive)damage[0] + span > a->dp)
+                return 0;
+        base = a->d + 4 * ((positive)damage[1] * a->dp + damage[0]);
         if (base & 31)
                 return 0;
+        cw = (damage[2] - damage[0] + 63) >> 6, ch = (damage[3] - damage[1] + 63) >> 6, cells = cw * ch, heads = 512ull * cells;
+        if (heads + 512 > pack_room)
+                return 0;
+        // The cells' counts, four words a cell: its list's length, the first record listed, its first row in the long lists (all ones: its
+        // rows are the cell's own eight), and the rows put so far.
+        {
+                positive need = 16ull * cells;
+                void *stage = gpu_bin_stage;
+
+                if (need > gpu_bin_room && gpu_buf_grow(&stage, &gpu_bin_room, need < 65536 ? 65536 : need, 0))
+                        gpu_bin_stage = (unsigned int *)stage;
+                if (!gpu_bin_stage || need > gpu_bin_room)
+                        return 0;
+                cell = gpu_bin_stage, memory_zero(cell, need);
+        }
         rec = (const unsigned int address_to)((p8 address_to)job->state_at + ((long)a->ops - (long)job->state));
         pack = (p8 address_to)job->state_at + ((long)pack_va - (long)job->state);
         for (unsigned int i = 0; i < a->count; i++)
         {
-                unsigned int r[16] = {0}, k;
-                long long rx0, ry0, cx0, cy0, cx1, cy1;
+                unsigned int r[8], k;
+                long long c[4];
 
                 memory_copy(r, rec + 8 * i, 32);
                 k = r[0] & ~0x80u;
                 if (r[0] > 1u && k != 4u && k != 11u)
                         return 0;
-                rx0 = (int)r[1], ry0 = (int)r[2], cx0 = rx0 > (long long)px0 ? rx0 : (long long)px0, cy0 = ry0 > (long long)py0 ? ry0 : (long long)py0;
-                cx1 = (int)r[3] < (long long)px1 ? (int)r[3] : (long long)px1, cy1 = (int)r[4] < (long long)py1 ? (int)r[4] : (long long)py1;
-                if (cx1 <= cx0 || cy1 <= cy0)
+                if (!gpu_i915_scene_clip(r, damage, c))
                         continue;
-                // A fill or a copy over the whole damage hides every record before it.
-                if ((r[0] == 0u || k == 4u) && cx0 == px0 && cy0 == py0 && cx1 == px1 && cy1 == py1)
-                        kept = 0, images = 0;
-                if (64ull * (kept + 1) > GPU_I915_SCENE_SURFACES)
-                        return 0;
-                r[1] = (unsigned int)cx0, r[2] = (unsigned int)cy0, r[3] = (unsigned int)cx1, r[4] = (unsigned int)cy1;
-                if (k == 4u || k == 11u)
-                {
-                        // The image's first pixel in the damage, the 64-byte line it is on, and the surface from there: as wide as the record's part of
-                        // the damage, its rows, at the picture's own pitch (r[7] pixels).
-                        positive va = (positive)r[5] | ((positive)r[6] << 32), at, line;
-                        unsigned int rp = r[7], xo, width, rows = (unsigned int)(cy1 - cy0);
-                        p8 address_to surface = pack + GPU_I915_SCENE_SURFACES + 64u * images;
+                for (unsigned int ty = (unsigned int)(c[1] - damage[1]) >> 6, ty1 = (unsigned int)(c[3] - 1 - damage[1]) >> 6; ty <= ty1; ty++)
+                        for (unsigned int tx = (unsigned int)(c[0] - damage[0]) >> 6, tx1 = (unsigned int)(c[2] - 1 - damage[0]) >> 6; tx <= tx1; tx++)
+                        {
+                                unsigned int address_to n = cell + 4 * (ty * cw + tx);
+                                long long x0 = (long long)damage[0] + 64ll * tx, y0 = (long long)damage[1] + 64ll * ty;
+                                long long x1 = x0 + 64 < (long long)damage[2] ? x0 + 64 : (long long)damage[2], y1 = y0 + 64 < (long long)damage[3] ? y0 + 64 : (long long)damage[3];
 
-                        if (!rp || rp > 65535u || va < GPU_VA || (va & 3) || images == GPU_I915_SCENE_IMAGES)
-                                return 0;
-                        at = va + 4ull * ((positive)(cy0 - ry0) * rp + (positive)(cx0 - rx0)), line = at & ~63ull;
-                        xo = (unsigned int)(at & 63), width = xo + 4u * (unsigned int)(cx1 - cx0);
-                        if (at < va || line < GPU_VA || line > GPU_VA_END || width > 16384u || rows > 16384u)
-                                return 0;
-                        memory_zero(surface, 64);
-                        gpu_i915_surface(surface, 0, line, width, rows, 4u * rp);
-                        r[5] = xo - 4u * (unsigned int)cx0, r[6] = 0u - (unsigned int)cy0, r[7] = 2u + images++;
-                }
-                memory_copy(pack + 64u * kept++, r, 64);
+                                // A fill or a copy over all of the cell's damage hides every record before it there.
+                                if ((r[0] == 0u || k == 4u) && c[0] <= x0 && c[2] >= x1 && c[1] <= y0 && c[3] >= y1)
+                                        n[0] = 1, n[1] = i;
+                                else if (n[0]++ == 0)
+                                        n[1] = i;
+                        }
         }
-        if (!kept)
+        for (unsigned int n = 0; n < cells; n++)
+        {
+                if (cell[4 * n] > 65535u)
+                        return 0;
+                cell[4 * n + 2] = ~0u;
+                if (cell[4 * n] > 8u)
+                        cell[4 * n + 2] = (unsigned int)more, more += cell[4 * n];
+                if (!cell[4 * n])
+                        gpu_i915_put(pack, 64u * (8u * (n / cw) * cw + n % cw), 0u);
+                else
+                        any = true;
+        }
+        if (more > 16384u - 8u || 64ull * (more + 8) > pack_room - heads)
+                return 0;
+        if (!any)
         {
                 words[0] = 0x05000000u, words[1] = 0u;
                 return 2;
         }
-        // The state as gpu_i915_emit_batch lays it (the damage's surface at 64, the records' at 256, the descriptor at 128, the CURBE at 192), with
-        // the binding table at GPU_I915_SCENE_TABLE: the damage, the records, the images' surfaces (their card offsets, as the table holds them).
+        for (unsigned int i = 0; i < a->count; i++)
+        {
+                unsigned int r[8], k;
+                long long c[4];
+                b32 made = false;
+
+                memory_copy(r, rec + 8 * i, 32);
+                k = r[0] & ~0x80u;
+                if (!gpu_i915_scene_clip(r, damage, c))
+                        continue;
+                for (unsigned int ty = (unsigned int)(c[1] - damage[1]) >> 6, ty1 = (unsigned int)(c[3] - 1 - damage[1]) >> 6; ty <= ty1; ty++)
+                        for (unsigned int tx = (unsigned int)(c[0] - damage[0]) >> 6, tx1 = (unsigned int)(c[2] - 1 - damage[0]) >> 6; tx <= tx1; tx++)
+                        {
+                                unsigned int address_to n = cell + 4 * (ty * cw + tx), row, word, head = 64u * (8u * ty * cw + tx);
+
+                                if (i < n[1])
+                                        continue;
+                                if (!made)
+                                {
+                                        made = true;
+                                        if (k == 4u || k == 11u)
+                                        {
+                                                // The image's first pixel in the damage, the 64-byte line it is on, and the surface from there: as wide as the
+                                                // record's part of the damage, its rows, at the picture's own pitch (r[7] pixels).
+                                                positive va = (positive)r[5] | ((positive)r[6] << 32), at, line;
+                                                unsigned int rp = r[7], xo, width, rows = (unsigned int)(c[3] - c[1]);
+                                                p8 address_to surface;
+
+                                                if (!rp || rp > 65535u || va < GPU_VA || (va & 3) || images == GPU_I915_SCENE_IMAGES ||
+                                                    64ull * (images + 1) > pack_room - heads - 64ull * (more + 8))
+                                                        return 0;
+                                                at = va + 4ull * ((positive)(c[1] - (int)r[2]) * rp + (positive)(c[0] - (int)r[1])), line = at & ~63ull;
+                                                xo = (unsigned int)(at & 63), width = xo + 4u * (unsigned int)(c[2] - c[0]);
+                                                if (at < va || line < GPU_VA || line > GPU_VA_END || width > 16384u || rows > 16384u)
+                                                        return 0;
+                                                surface = pack + pack_room - 64ull * (images + 1);
+                                                memory_zero(surface, 64);
+                                                gpu_i915_surface(surface, 0, line, width, rows, 4u * rp);
+                                                r[5] = xo - 4u * (unsigned int)c[0], r[6] = 0u - (unsigned int)c[1], r[7] = 3u + images++;
+                                        }
+                                        r[1] = (unsigned int)c[0], r[2] = (unsigned int)c[1], r[3] = (unsigned int)c[2], r[4] = (unsigned int)c[3];
+                                }
+                                row = n[3]++, word = r[0];
+                                if (!row)
+                                {
+                                        // The cell's first row: the list's length, and whether its first record covers every tile of the cell whole and
+                                        // opaque (the tiles' right end is the damage's, in whole tiles).
+                                        long long x0 = (long long)damage[0] + 64ll * tx, y0 = (long long)damage[1] + 64ll * ty, right = (long long)damage[0] + span;
+                                        long long x1 = x0 + 64 < right ? x0 + 64 : right, y1 = y0 + 64 < (long long)damage[3] ? y0 + 64 : (long long)damage[3];
+                                        unsigned int said = n[0] << 16 | ((r[0] == 0u || k == 4u) && c[0] <= x0 && c[2] >= x1 && c[1] <= y0 && c[3] >= y1 ? 0x200u : 0u);
+
+                                        if (n[2] != ~0u)
+                                                gpu_i915_put(pack, head, said | 0x100u), gpu_i915_put(pack, head + 4, n[2]);
+                                        else
+                                                word |= said;
+                                }
+                                {
+                                        p8 address_to to = n[2] != ~0u ? pack + heads + 64ull * (n[2] + row) : pack + head + 64ull * row * cw;
+
+                                        memory_copy(to, r, 32), gpu_i915_put(to, 0, word);
+                                }
+                        }
+        }
+        // The state as gpu_i915_emit_batch lays it (the damage's surface at 64, the cells' at 256, the long lists' at 320, the descriptor at 128,
+        // the CURBE at 192), with the binding table at GPU_I915_SCENE_TABLE: the damage, the cells, the long lists, the images' surfaces.
         state = (p8 address_to)job->state_at, sbase = (unsigned int)(job->state - GPU_VA);
-        memory_zero(state, GPU_I915_SCENE_TABLE + 4u * (2u + images));
+        memory_zero(state, GPU_I915_SCENE_TABLE + 4u * (3u + images));
         gpu_i915_put(state, GPU_I915_SCENE_TABLE, sbase + 64), gpu_i915_put(state, GPU_I915_SCENE_TABLE + 4, sbase + 256);
+        gpu_i915_put(state, GPU_I915_SCENE_TABLE + 8, sbase + 320);
         for (unsigned int j = 0; j < images; j++)
-                gpu_i915_put(state, GPU_I915_SCENE_TABLE + 8 + 4 * j, (unsigned int)(pack_va - GPU_VA) + GPU_I915_SCENE_SURFACES + 64u * j);
-        gpu_i915_surface(state, 64, base, 4u * (px1 - px0), py1 - py0, 4u * a->dp);
-        gpu_i915_surface(state, 256, pack_va, 64, kept, 64);
+                gpu_i915_put(state, GPU_I915_SCENE_TABLE + 12 + 4 * j, (unsigned int)(pack_va - GPU_VA + pack_room - 64ull * (j + 1)));
+        gpu_i915_surface(state, 64, base, 4u * span, damage[3] - damage[1], 4u * a->dp);
+        gpu_i915_surface(state, 256, pack_va, 64u * cw, 8u * ch, 64u * cw);
+        gpu_i915_surface(state, 320, pack_va + heads, 64, (unsigned int)more + 8u, 64);
         gpu_i915_descriptor(state, job, sbase + GPU_I915_SCENE_TABLE);
-        gpu_i915_put(state, 192, kept), gpu_i915_put(state, 196, px0), gpu_i915_put(state, 200, py0);
-        gpu_i915_put(state, 204, px1), gpu_i915_put(state, 208, py1);
-        gpu_i915_frame(words, sbase, (px1 - px0 + 7) / 8, (py1 - py0 + 7) / 8);
+        gpu_i915_put(state, 192, cw), gpu_i915_put(state, 196, damage[0]), gpu_i915_put(state, 200, damage[1]);
+        gpu_i915_put(state, 204, damage[2]), gpu_i915_put(state, 208, damage[3]);
+        gpu_i915_frame(words, sbase, cw, (damage[3] - damage[1] + 7) / 8);
         return 64;
 }
 
@@ -4334,7 +4440,9 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
         unsigned int cw, ch, hand = 0, scene_op = 4, i, address_to list, record[16 * 8], held[4];
         positive at = 0;
         struct gpu_args address_to a = GPU_ARGS;
-        b32 aligned = !(w & 3) && !(pitch & 3) && !(d_at & 15), partial, cut;
+        // The kernels by hand draw a picture of whole 4-pixel groups on a 16-byte base; i915's scene draws any width in whole tiles (the last one's
+        // other lanes are the pitch's padding, read and written back: gpu_i915_scene_batch) on a pitch of whole 64-byte lines and a 32-byte base.
+        b32 aligned = gpu_backend == &gpu_i915_row ? !(pitch & 15) && !(d_at & 31) : !(w & 3) && !(pitch & 3) && !(d_at & 15), partial, cut;
 
         if (!w || !h || w > 65536u || h > 65536u || ops_at > gpu.size || 32ull * (positive)n > gpu.size - ops_at)
                 return -1;
@@ -4437,7 +4545,7 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
         a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = scene_op;
         if (aligned)
                 a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
-        a->ops = GPU_VA + ops_at, a->count = n;
+        a->ops = GPU_VA + ops_at, a->count = n, a->room = room > 0xffffffffull ? 0xffffffffu : (unsigned int)room;
         return 1;
 }
 

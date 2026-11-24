@@ -1301,7 +1301,7 @@ gpu_kernels_ready()
 gpu_kernels_wanted()
 {
         case " $* " in
-        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DCHECK_gpu_model "* | *" -DCHECK_gpu_model_kit "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
+        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DCHECK_gpu_scene "* | *" -DCHECK_gpu_model "* | *" -DCHECK_gpu_model_kit "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
         esac
         case $source_file in
         programs/*)
@@ -7971,12 +7971,18 @@ gate_kit_frames()
 #
 #       CHECK_gpu goes with it: the Intel set's batch encoder (gpu_i915_gen9_batch, 84 of its 85 rows) and the card's four
 #       operations against the processor's, which no lane built, so the Intel rows had never run.
+#
+#       CHECK_gpu_scene too: random scenes of fills, tones and pictures (1 to 2000 records, whole and part damages, odd widths where the
+#       card's set takes them) and the four operations on whole rows, every pixel against the processor's model, on whatever card starts
+#       (amdgpu's or i915's); then a desktop's scene timed. NOT RUN without a card.
 gate_gpu_kit()
 {
         freestanding_check gpu_kit "$work/gpu-kit-check" || return 1
         "$work/gpu-kit-check" || return 1
         freestanding_check gpu "$work/gpu-check" || return 1
-        "$work/gpu-check"
+        "$work/gpu-check" || return 1
+        freestanding_check gpu_scene "$work/gpu-scene-check" || return 1
+        "$work/gpu-scene-check"
 }
 
 #       CHECK_gpu_model: the model of the card (test/gpu_model.c, an interpreter of the words gpuasm makes) held to the card and to itself

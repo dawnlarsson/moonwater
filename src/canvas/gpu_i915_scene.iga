@@ -1,22 +1,29 @@
 // Gen9 scene (op 6): fill (0), tone over (1), image copy (4) and premultiplied image over (11), the images with an optional R/B
-// swap (0x80), drawn in order over one 8 by 8 pixel tile of the damage. Each thread is one tile: walker group X (r0.1) and Y (r0.6),
-// the tile's first pixel at x = px0 + 8 X, y = py0 + 8 Y. Every ALU instruction is SIMD8 (a register, one row of the tile), so the
-// Gen7 and Gen7.5 patch of these words (gpu.c's gpu_start) has no compressed instruction to change.
+// swap (0x80), drawn in order over the damage. A thread is a strip of eight 8 by 8 pixel tiles, 64 pixels by 8 rows: walker group X
+// (r0.1) is the strip's column of 64 pixels and Y (r0.6) its row of tiles, its first pixel at x = px0 + 64 X, y = py0 + 8 Y. Every
+// ALU instruction is SIMD8 (a register, one row of a tile), so the Gen7 and Gen7.5 patch of these words (gpu.c's gpu_start) has
+// no compressed instruction to change.
 //
-// CURBE (r1): r1.0 = the record count, r1.1 = px0, r1.2 = py0, r1.3 = px1, r1.4 = py1 (the damage, in the picture's pixels).
-// Binding table entry 0 is the damage (the tile read once, only when no record covers it whole and opaque, and written once);
-// entry 1 the records, one a 64-byte row (32 bytes used: kind, x0, y0, x1, y1, then colour or the image's x and row bias and its
-// entry), read eight at a time; entries 2 and up are the records' images, a surface each (its own base and pitch), read a tile at a
-// time at byte x = word 5 + 4 x and row = word 6 + y. The records are clipped to the damage by the encoder (gpu_i915_scene_batch).
+// CURBE (r1): r1.1 = px0, r1.2 = py0, r1.3 = px1, r1.4 = py1 (the damage, in the picture's pixels).
+// Binding table entry 0 is the damage (a tile read once, at the first record that draws in it, only when no record covers it
+// whole and opaque, and written once if anything drew); entry 1 the cells' lists: the damage in cells of 64 by 64 pixels from
+// px0, py0, a cell eight rows of 64 bytes at x = 64 X, y = 8 * (Y / 8) (a row a record, 32 bytes used: kind, x0, y0, x1, y1, then
+// colour or the image's x and row bias and its entry), the first row's word 0 with the list's length in its bits 31:16, 0x100 for
+// a list of more than eight (the row is then no record: its word 1 is the list's first row in entry 2, whose rows are records)
+// and 0x200 when the first record covers every tile of the cell whole and opaque (no tile is read, none looks for its cover);
+// entries 3 and up are the records' images, a surface each (its own base and pitch), read a tile at a time at byte
+// x = word 5 + 4 x and row = word 6 + y. The records are clipped to the damage, and a cell's list starts at the last record that
+// covers all of the cell's damage, by the encoder (gpu_i915_scene_batch). A strip reads its cell's list once.
 //
-// Two passes over the records: the first finds the last that covers the tile whole and writes every pixel of it (a fill, or a copy:
-// what was under it cannot show), the second draws from it on (or from the first, over the tile as it was read). A tile row is
-// written under its lanes' mask, x in [x0, x1) and the row's y in [y0, y1).
+// A tile: the last record that covers it whole and opaque is found (a fill, or a copy: what was under it cannot show), and the
+// records from it on are drawn (or from the first, over the tile as it was read). A tile row is written under its lanes' mask,
+// x in [x0, x1) and the row's y in [y0, y1).
 //
-// Registers: r2 scalars (.0 bx .1 by .2 the tile's right end .3 its bottom .4 the record .5 the first drawn .6 records left in the
-// batch .7 4 bx), r3 the lanes' x, r7 the lane numbers 0 to 7, r8 scratch, r9 the x mask, r10 the rows' y masks (lane r: row r),
-// r11 r12 r13 the headers of the records', the image's and the tile's block messages, r14-r21 the tile, r22-r29 the image's tile,
-// r30-r38 scratch, r40-r47 the records batch (the record drawn is r40: the batch is moved down one register after each).
+// Registers: r2 scalars (.0 bx .1 by .2 bx + 8 .3 the tile's bottom .4 the record .5 the first drawn .6 the batch of eight
+// records held in r40-r47 .7 4 bx), r4 (.0 the strip's end .1 the list's first row in entry 2 .2 the list's length .3 its flags
+// .4 the tile is in r14-r21), r3 the lanes' x, r7 the lane numbers 0 to 7, r8 scratch, r9 the x mask, r10 the rows' y masks
+// (lane r: row r), r11 r12 r13 the headers of the lists', the image's and the tile's block messages, r14-r21 the tile, r22-r29
+// the image's tile, r30-r38 scratch, r39 the record drawn (moved from the batch by its number: r[a0.0]), r40-r47 the batch.
 mov (1|M0)               r7.0<1>:ud    0:ud
 mov (1|M0)               r7.1<1>:ud    1:ud
 mov (1|M0)               r7.2<1>:ud    2:ud
@@ -25,71 +32,126 @@ mov (1|M0)               r7.4<1>:ud    4:ud
 mov (1|M0)               r7.5<1>:ud    5:ud
 mov (1|M0)               r7.6<1>:ud    6:ud
 mov (1|M0)               r7.7<1>:ud    7:ud
-shl (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    3:ud
+shl (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    6:ud
 add (1|M0)               r2.0<1>:ud    r2.0<0;1,0>:ud    r1.1<0;1,0>:ud
 shl (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud    3:ud
 add (1|M0)               r2.1<1>:ud    r2.1<0;1,0>:ud    r1.2<0;1,0>:ud
-add (1|M0)               r2.2<1>:ud    r2.0<0;1,0>:ud    8:ud
-sel (1|M0)   (lt)f1.1    r2.2<1>:ud    r2.2<0;1,0>:ud    r1.3<0;1,0>:ud
+add (1|M0)               r4.0<1>:ud    r2.0<0;1,0>:ud    64:ud
+sel (1|M0)   (lt)f1.1    r4.0<1>:ud    r4.0<0;1,0>:ud    r1.3<0;1,0>:ud
 add (1|M0)               r2.3<1>:ud    r2.1<0;1,0>:ud    8:ud
 sel (1|M0)   (lt)f1.1    r2.3<1>:ud    r2.3<0;1,0>:ud    r1.4<0;1,0>:ud
-shl (1|M0)               r2.7<1>:ud    r2.0<0;1,0>:ud    2:ud
-add (8|M0)               r3.0<1>:ud    r7.0<8;8,1>:ud    r2.0<0;1,0>:ud
-// the tile's header: x in bytes and the row, in the damage's surface; 32 bytes by 8 rows
+// the first tile's header: x in bytes and the row, in the damage's surface; 32 bytes by 8 rows. The image's header's block.
 mov (8|M0)               r13.0<1>:ud   r0.0<8;8,1>:ud
-shl (1|M0)               r13.0<1>:ud   r0.1<0;1,0>:ud    5:ud
+shl (1|M0)               r13.0<1>:ud   r0.1<0;1,0>:ud    8:ud
 shl (1|M0)               r13.1<1>:ud   r0.6<0;1,0>:ud    3:ud
 mov (1|M0)               r13.2<1>:ud   0x0007001f:ud
-// pass 1: the last record that covers the tile whole and opaque (kind 0, or 4 with or without the swap): r2.5, all ones for none
-mov (1|M0)               r2.4<1>:ud    0:ud
-mov (1|M0)               r2.5<1>:ud    0xffffffff:ud
-mov (1|M0)               r2.6<1>:ud    0:ud
-first_loop:
-cmp (16|M0)  (ge)f0.1    null:ud       r2.4<0;1,0>:ud    r1.0<0;1,0>:ud
-(W&f0.1) jmpi first_end
-cmp (16|M0)  (ne)f0.1    null:ud       r2.6<0;1,0>:ud    0:ud
-(W&f0.1) jmpi first_have
+mov (8|M0)               r12.0<1>:ud   r0.0<8;8,1>:ud
+mov (1|M0)               r12.2<1>:ud   0x0007001f:ud
+// the cell's list: its eight rows, and when it is longer its first eight from entry 2
 mov (8|M0)               r11.0<1>:ud   r0.0<8;8,1>:ud
-mov (1|M0)               r11.0<1>:ud   0:ud
-mov (1|M0)               r11.1<1>:ud   r2.4<0;1,0>:ud
+shl (1|M0)               r11.0<1>:ud   r0.1<0;1,0>:ud    6:ud
+and (1|M0)               r11.1<1>:ud   r0.6<0;1,0>:ud    0xfffffff8:ud
 mov (1|M0)               r11.2<1>:ud   0x0007001f:ud
 send (16|M0)             r40:ud        r11:ud    0xC  0x02890001
-mov (1|M0)               r2.6<1>:ud    8:ud
+shr (1|M0)               r4.2<1>:ud    r40.0<0;1,0>:ud   16:ud
+and (1|M0)               r4.3<1>:ud    r40.0<0;1,0>:ud   0xff00:ud
+mov (1|M0)               r2.6<1>:ud    0:ud
+mov (1|M0)               r4.1<1>:ud    0:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r4.2<0;1,0>:ud    0:ud
+(W&f0.1) jmpi end
+and (1|M0)               r8.0<1>:ud    r4.3<0;1,0>:ud    0x100:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r8.0<0;1,0>:ud    0:ud
+(W&f0.1) jmpi tile_loop
+mov (1|M0)               r4.1<1>:ud    r40.1<0;1,0>:ud
+mov (1|M0)               r11.0<1>:ud   0:ud
+mov (1|M0)               r11.1<1>:ud   r4.1<0;1,0>:ud
+send (16|M0)             r40:ud        r11:ud    0xC  0x02890002
+tile_loop:
+add (1|M0)               r2.2<1>:ud    r2.0<0;1,0>:ud    8:ud
+shl (1|M0)               r2.7<1>:ud    r2.0<0;1,0>:ud    2:ud
+add (8|M0)               r3.0<1>:ud    r7.0<8;8,1>:ud    r2.0<0;1,0>:ud
+mov (1|M0)               r2.4<1>:ud    0:ud
+mov (1|M0)               r2.5<1>:ud    0:ud
+mov (1|M0)               r4.4<1>:ud    1:ud
+// the first record holds the cell: every tile is drawn from it, none read
+and (1|M0)               r8.0<1>:ud    r4.3<0;1,0>:ud    0x200:ud
+cmp (16|M0)  (ne)f0.1    null:ud       r8.0<0;1,0>:ud    0:ud
+(W&f0.1) jmpi draw_loop
+// the last record that covers the tile whole and opaque (kind 0, or 4 with or without the swap): r2.5, all ones for none
+mov (1|M0)               r2.5<1>:ud    0xffffffff:ud
+first_loop:
+cmp (16|M0)  (ge)f0.1    null:ud       r2.4<0;1,0>:ud    r4.2<0;1,0>:ud
+(W&f0.1) jmpi first_end
+shr (1|M0)               r8.5<1>:ud    r2.4<0;1,0>:ud    3:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r8.5<0;1,0>:ud    r2.6<0;1,0>:ud
+(W&f0.1) jmpi first_have
+mov (1|M0)               r2.6<1>:ud    r8.5<0;1,0>:ud
+shl (1|M0)               r8.6<1>:ud    r8.5<0;1,0>:ud    3:ud
+mov (1|M0)               r11.0<1>:ud   0:ud
+add (1|M0)               r11.1<1>:ud   r4.1<0;1,0>:ud    r8.6<0;1,0>:ud
+send (16|M0)             r40:ud        r11:ud    0xC  0x02890002
 first_have:
-// (bx - x0) | (x1 - right) | (by - y0) | (y1 - bottom) | -(kind & 0x7b): not negative when it covers the tile and is opaque
-add (1|M0)               r8.3<1>:ud    r2.0<0;1,0>:ud    -r40.1<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r40.3<0;1,0>:ud   -r2.2<0;1,0>:ud
+and (1|M0)               r8.5<1>:ud    r2.4<0;1,0>:ud    7:ud
+shl (1|M0)               r8.5<1>:ud    r8.5<0;1,0>:ud    5:ud
+add (1|M0)               a0.0<1>:uw    r8.10<0;1,0>:uw   1280:uw
+mov (8|M0)               r39.0<1>:ud   r[a0.0]<8;8,1>:ud
+// (bx - x0) | (x1 - bx - 8) | (by - y0) | (y1 - bottom) | -(kind & 0x7b): not negative when it covers the tile and is opaque
+add (1|M0)               r8.3<1>:ud    r2.0<0;1,0>:ud    -r39.1<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r39.3<0;1,0>:ud   -r2.2<0;1,0>:ud
 or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r2.1<0;1,0>:ud    -r40.2<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r2.1<0;1,0>:ud    -r39.2<0;1,0>:ud
 or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r40.4<0;1,0>:ud   -r2.3<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r39.4<0;1,0>:ud   -r2.3<0;1,0>:ud
 or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
-and (1|M0)               r8.4<1>:ud    r40.0<0;1,0>:ud   0x7b:ud
+and (1|M0)               r8.4<1>:ud    r39.0<0;1,0>:ud   0x7b:ud
 add (1|M0)               r8.4<1>:ud    -r8.4<0;1,0>:ud   0:ud
 or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
 cmp (16|M0)  (lt)f0.1    null:d        r8.3<0;1,0>:d     0:d
 (W&f0.1) jmpi first_next
 mov (1|M0)               r2.5<1>:ud    r2.4<0;1,0>:ud
 first_next:
-mov (8|M0)               r40.0<1>:ud   r41.0<8;8,1>:ud
-mov (8|M0)               r41.0<1>:ud   r42.0<8;8,1>:ud
-mov (8|M0)               r42.0<1>:ud   r43.0<8;8,1>:ud
-mov (8|M0)               r43.0<1>:ud   r44.0<8;8,1>:ud
-mov (8|M0)               r44.0<1>:ud   r45.0<8;8,1>:ud
-mov (8|M0)               r45.0<1>:ud   r46.0<8;8,1>:ud
-mov (8|M0)               r46.0<1>:ud   r47.0<8;8,1>:ud
-add (1|M0)               r2.6<1>:ud    r2.6<0;1,0>:ud    0xffffffff:ud
 add (1|M0)               r2.4<1>:ud    r2.4<0;1,0>:ud    1:ud
 (W) jmpi first_loop
 first_end:
-// pass 2 reads its batches at whole batches of eight (r2.4 from r2.5 rounded down) and passes over the records before r2.5
-and (1|M0)               r2.4<1>:ud    r2.5<0;1,0>:ud    0xfffffff8:ud
-mov (1|M0)               r2.6<1>:ud    0:ud
+mov (1|M0)               r2.4<1>:ud    r2.5<0;1,0>:ud
 cmp (16|M0)  (ne)f0.1    null:ud       r2.5<0;1,0>:ud    0xffffffff:ud
 (W&f0.1) jmpi draw_loop
-// no record covers the tile: it is read, and drawn over from the first record (each row read before any is written)
+// no record covers the tile: drawn from the first record, over the tile as it is read at the first record that draws in it
 mov (1|M0)               r2.4<1>:ud    0:ud
-mov (1|M0)               r2.5<1>:ud    0:ud
+mov (1|M0)               r4.4<1>:ud    0:ud
+draw_loop:
+cmp (16|M0)  (ge)f0.1    null:ud       r2.4<0;1,0>:ud    r4.2<0;1,0>:ud
+(W&f0.1) jmpi tile_done
+shr (1|M0)               r8.5<1>:ud    r2.4<0;1,0>:ud    3:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r8.5<0;1,0>:ud    r2.6<0;1,0>:ud
+(W&f0.1) jmpi draw_have
+mov (1|M0)               r2.6<1>:ud    r8.5<0;1,0>:ud
+shl (1|M0)               r8.6<1>:ud    r8.5<0;1,0>:ud    3:ud
+mov (1|M0)               r11.0<1>:ud   0:ud
+add (1|M0)               r11.1<1>:ud   r4.1<0;1,0>:ud    r8.6<0;1,0>:ud
+send (16|M0)             r40:ud        r11:ud    0xC  0x02890002
+draw_have:
+and (1|M0)               r8.5<1>:ud    r2.4<0;1,0>:ud    7:ud
+shl (1|M0)               r8.5<1>:ud    r8.5<0;1,0>:ud    5:ud
+add (1|M0)               a0.0<1>:uw    r8.10<0;1,0>:uw   1280:uw
+mov (8|M0)               r39.0<1>:ud   r[a0.0]<8;8,1>:ud
+// (x1 - 1 - bx) | (bx + 7 - x0) | (y1 - 1 - by) | (bottom - 1 - y0): negative when the record misses the tile
+add (1|M0)               r8.3<1>:ud    r39.3<0;1,0>:ud   -r2.0<0;1,0>:ud
+add (1|M0)               r8.3<1>:ud    r8.3<0;1,0>:ud    0xffffffff:ud
+add (1|M0)               r8.4<1>:ud    r2.2<0;1,0>:ud    -r39.1<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r8.4<0;1,0>:ud    0xffffffff:ud
+or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r39.4<0;1,0>:ud   -r2.1<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r8.4<0;1,0>:ud    0xffffffff:ud
+or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r2.3<0;1,0>:ud    -r39.2<0;1,0>:ud
+add (1|M0)               r8.4<1>:ud    r8.4<0;1,0>:ud    0xffffffff:ud
+or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
+cmp (16|M0)  (lt)f0.1    null:d        r8.3<0;1,0>:d     0:d
+(W&f0.1) jmpi draw_next
+// the tile is read before the first record that draws in it (each row read before any is written)
+cmp (16|M0)  (ne)f0.1    null:ud       r4.4<0;1,0>:ud    0:ud
+(W&f0.1) jmpi draw_tile
 send (16|M0)             r14:ud        r13:ud    0xC  0x02890000
 or (8|M0)                r38.0<1>:ud   r14.0<8;8,1>:ud   r15.0<8;8,1>:ud
 or (8|M0)                r38.0<1>:ud   r38.0<8;8,1>:ud   r16.0<8;8,1>:ud
@@ -98,60 +160,31 @@ or (8|M0)                r38.0<1>:ud   r38.0<8;8,1>:ud   r18.0<8;8,1>:ud
 or (8|M0)                r38.0<1>:ud   r38.0<8;8,1>:ud   r19.0<8;8,1>:ud
 or (8|M0)                r38.0<1>:ud   r38.0<8;8,1>:ud   r20.0<8;8,1>:ud
 or (8|M0)                r38.0<1>:ud   r38.0<8;8,1>:ud   r21.0<8;8,1>:ud
-// pass 2
-draw_loop:
-cmp (16|M0)  (ge)f0.1    null:ud       r2.4<0;1,0>:ud    r1.0<0;1,0>:ud
-(W&f0.1) jmpi done
-cmp (16|M0)  (ne)f0.1    null:ud       r2.6<0;1,0>:ud    0:ud
-(W&f0.1) jmpi draw_have
-mov (8|M0)               r11.0<1>:ud   r0.0<8;8,1>:ud
-mov (1|M0)               r11.0<1>:ud   0:ud
-mov (1|M0)               r11.1<1>:ud   r2.4<0;1,0>:ud
-mov (1|M0)               r11.2<1>:ud   0x0007001f:ud
-send (16|M0)             r40:ud        r11:ud    0xC  0x02890001
-mov (1|M0)               r2.6<1>:ud    8:ud
-draw_have:
-cmp (16|M0)  (lt)f0.1    null:ud       r2.4<0;1,0>:ud    r2.5<0;1,0>:ud
-(W&f0.1) jmpi draw_next
-// (x1 - 1 - bx) | (right - 1 - x0) | (y1 - 1 - by) | (bottom - 1 - y0): negative when the record misses the tile
-add (1|M0)               r8.3<1>:ud    r40.3<0;1,0>:ud   -r2.0<0;1,0>:ud
-add (1|M0)               r8.3<1>:ud    r8.3<0;1,0>:ud    0xffffffff:ud
-add (1|M0)               r8.4<1>:ud    r2.2<0;1,0>:ud    -r40.1<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r8.4<0;1,0>:ud    0xffffffff:ud
-or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r40.4<0;1,0>:ud   -r2.1<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r8.4<0;1,0>:ud    0xffffffff:ud
-or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r2.3<0;1,0>:ud    -r40.2<0;1,0>:ud
-add (1|M0)               r8.4<1>:ud    r8.4<0;1,0>:ud    0xffffffff:ud
-or (1|M0)                r8.3<1>:ud    r8.3<0;1,0>:ud    r8.4<0;1,0>:ud
-cmp (16|M0)  (lt)f0.1    null:d        r8.3<0;1,0>:d     0:d
-(W&f0.1) jmpi draw_next
+mov (1|M0)               r4.4<1>:ud    1:ud
+draw_tile:
 // the lanes' x mask (x - x0) | (x1 - 1 - x), and each row's y mask (y - y0) | (y1 - 1 - y) in lane r of r10: a pixel is drawn when
 // the two, or'ed, are not negative
-add (8|M0)               r9.0<1>:ud    r3.0<8;8,1>:ud    -r40.1<0;1,0>:ud
-add (8|M0)               r38.0<1>:ud   -r3.0<8;8,1>:ud   r40.3<0;1,0>:ud
+add (8|M0)               r9.0<1>:ud    r3.0<8;8,1>:ud    -r39.1<0;1,0>:ud
+add (8|M0)               r38.0<1>:ud   -r3.0<8;8,1>:ud   r39.3<0;1,0>:ud
 add (8|M0)               r38.0<1>:ud   r38.0<8;8,1>:ud   0xffffffff:ud
 or (8|M0)                r9.0<1>:ud    r9.0<8;8,1>:ud    r38.0<8;8,1>:ud
-add (1|M0)               r8.0<1>:ud    r2.1<0;1,0>:ud    -r40.2<0;1,0>:ud
-add (1|M0)               r8.1<1>:ud    r40.4<0;1,0>:ud   -r2.1<0;1,0>:ud
+add (1|M0)               r8.0<1>:ud    r2.1<0;1,0>:ud    -r39.2<0;1,0>:ud
+add (1|M0)               r8.1<1>:ud    r39.4<0;1,0>:ud   -r2.1<0;1,0>:ud
 add (1|M0)               r8.1<1>:ud    r8.1<0;1,0>:ud    0xffffffff:ud
 add (8|M0)               r10.0<1>:ud   r7.0<8;8,1>:ud    r8.0<0;1,0>:ud
 add (8|M0)               r38.0<1>:ud   -r7.0<8;8,1>:ud   r8.1<0;1,0>:ud
 or (8|M0)                r10.0<1>:ud   r10.0<8;8,1>:ud   r38.0<8;8,1>:ud
-and (1|M0)               r8.2<1>:ud    r40.0<0;1,0>:ud   0x7f:ud
+and (1|M0)               r8.2<1>:ud    r39.0<0;1,0>:ud   0x7f:ud
 cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    0:ud
 (W&f0.1) jmpi kind_fill
 cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    1:ud
 (W&f0.1) jmpi kind_tone
 // an image (4, 11): its tile read through its own entry (word 7), the descriptor made in a0.0
-mov (8|M0)               r12.0<1>:ud   r0.0<8;8,1>:ud
-add (1|M0)               r12.0<1>:ud   r40.5<0;1,0>:ud   r2.7<0;1,0>:ud
-add (1|M0)               r12.1<1>:ud   r40.6<0;1,0>:ud   r2.1<0;1,0>:ud
-mov (1|M0)               r12.2<1>:ud   0x0007001f:ud
-or (1|M0)                a0.0<1>:ud    r40.7<0;1,0>:ud   0x02890000:ud
+add (1|M0)               r12.0<1>:ud   r39.5<0;1,0>:ud   r2.7<0;1,0>:ud
+add (1|M0)               r12.1<1>:ud   r39.6<0;1,0>:ud   r2.1<0;1,0>:ud
+or (1|M0)                a0.0<1>:ud    r39.7<0;1,0>:ud   0x02890000:ud
 send (16|M0)             r22:ud        r12:ud    0xC  a0.0
-and (1|M0)               r8.3<1>:ud    r40.0<0;1,0>:ud   0x80:ud
+and (1|M0)               r8.3<1>:ud    r39.0<0;1,0>:ud   0x80:ud
 cmp (16|M0)  (eq)f0.1    null:ud       r8.3<0;1,0>:ud    0:ud
 (W&f0.1) jmpi kind_ordered
 and (8|M0)               r30.0<1>:ud   r22.0<8;8,1>:ud   0xff00ff00:ud
@@ -215,28 +248,28 @@ cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    4:ud
 (W&f0.1) jmpi kind_copy
 (W) jmpi kind_over
 kind_fill:
-mov (8|M0)               r22.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r23.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r24.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r25.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r26.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r27.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r28.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r29.0<1>:ud   r40.5<0;1,0>:ud
+mov (8|M0)               r22.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r23.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r24.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r25.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r26.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r27.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r28.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r29.0<1>:ud   r39.5<0;1,0>:ud
 (W) jmpi kind_copy
 kind_tone:
 // a tone of alpha 0 leaves the tile as it is
-shr (1|M0)               r8.3<1>:ud    r40.5<0;1,0>:ud   24:ud
+shr (1|M0)               r8.3<1>:ud    r39.5<0;1,0>:ud   24:ud
 cmp (16|M0)  (eq)f0.1    null:ud       r8.3<0;1,0>:ud    0:ud
 (W&f0.1) jmpi draw_next
-mov (8|M0)               r22.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r23.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r24.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r25.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r26.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r27.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r28.0<1>:ud   r40.5<0;1,0>:ud
-mov (8|M0)               r29.0<1>:ud   r40.5<0;1,0>:ud
+mov (8|M0)               r22.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r23.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r24.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r25.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r26.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r27.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r28.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r29.0<1>:ud   r39.5<0;1,0>:ud
 (W) jmpi kind_over
 kind_copy:
 or (8|M0)                r38.0<1>:ud   r9.0<8;8,1>:ud    r10.0<0;1,0>:ud
@@ -547,17 +580,18 @@ or (8|M0)                r38.0<1>:ud   r9.0<8;8,1>:ud    r10.7<0;1,0>:ud
 cmp (8|M0)   (ge)f0.0    null:d        r38.0<8;8,1>:d    0:d
 (f0.0) mov (8|M0)        r21.0<1>:ud   r37.0<8;8,1>:ud
 draw_next:
-mov (8|M0)               r40.0<1>:ud   r41.0<8;8,1>:ud
-mov (8|M0)               r41.0<1>:ud   r42.0<8;8,1>:ud
-mov (8|M0)               r42.0<1>:ud   r43.0<8;8,1>:ud
-mov (8|M0)               r43.0<1>:ud   r44.0<8;8,1>:ud
-mov (8|M0)               r44.0<1>:ud   r45.0<8;8,1>:ud
-mov (8|M0)               r45.0<1>:ud   r46.0<8;8,1>:ud
-mov (8|M0)               r46.0<1>:ud   r47.0<8;8,1>:ud
-add (1|M0)               r2.6<1>:ud    r2.6<0;1,0>:ud    0xffffffff:ud
 add (1|M0)               r2.4<1>:ud    r2.4<0;1,0>:ud    1:ud
 (W) jmpi draw_loop
-done:
+tile_done:
+// a tile no record drew in is not written
+cmp (16|M0)  (eq)f0.1    null:ud       r4.4<0;1,0>:ud    0:ud
+(W&f0.1) jmpi tile_next
 send (16|M0)             null:uw       r13:ud    0xC  0x120A8000
+tile_next:
+add (1|M0)               r2.0<1>:ud    r2.0<0;1,0>:ud    8:ud
+add (1|M0)               r13.0<1>:ud   r13.0<0;1,0>:ud   32:ud
+cmp (16|M0)  (lt)f0.1    null:ud       r2.0<0;1,0>:ud    r4.0<0;1,0>:ud
+(W&f0.1) jmpi tile_loop
+end:
 mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
 send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

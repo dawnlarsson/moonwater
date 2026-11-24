@@ -327,8 +327,10 @@ static void gpu_i915_set_rows(void)
                 }
         }
         {
-                // The scene (op 6): records on a 256 by 32 picture at a 256-pixel pitch, the records at GPU_VA + 512 KiB, the side's bins at GPU_VA + 8192
-                // (slot 0's part: the packed records a 64-byte row each, the images' surfaces at its top), the walker a thread an 8 by 8 tile.
+                // The scene (op 6): records on a 256 by 32 picture at a 256-pixel pitch, the records at GPU_VA + 512 KiB, the bins' room of 256 KiB at
+                // GPU_VA + 8192 (four cells of 64 by 64 pixels: a cell's record n is the 64-byte row at 64 * (4 n + cell), 16 words; the long lists
+                // after the cells' 2048 bytes; the images' surfaces from the room's top down), the walker a thread a strip of eight 8 by 8 tiles.
+                enum { ROOM = 256u << 10, CELL = 16, ROW = 4 * CELL };
                 static unsigned char buffer[(1u << 20)] __attribute__((aligned(4096)));
                 struct gpu_job job;
                 struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
@@ -336,33 +338,37 @@ static void gpu_i915_set_rows(void)
                 unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
                 unsigned int address_to recs = (unsigned int address_to)(buffer + (512u << 10));
                 unsigned int address_to pack = (unsigned int address_to)(buffer + 8192);
-                unsigned int address_to surf = (unsigned int address_to)(buffer + 8192 + GPU_I915_SCENE_SURFACES);
+                unsigned int address_to more = (unsigned int address_to)(buffer + 8192 + 2048);
+                unsigned int address_to surf = (unsigned int address_to)(buffer + 8192 + ROOM - 64);
                 unsigned int n, slot = gpu_slot;
                 positive gpu_size = gpu.size;
 
                 memset(buffer, 0, sizeof buffer);
-                gpu.size = sizeof buffer, gpu_slot = 0; // the records are read and packed through the buffer: the encoder checks they lie in gpu.size
+                gpu.size = sizeof buffer, gpu_slot = 0; // the records are read and binned through the buffer: the encoder checks they lie in gpu.size
                 recs[0] = 0, recs[1] = 0, recs[2] = 0, recs[3] = 256, recs[4] = 32, recs[5] = 0x11223344u, recs[6] = recs[7] = 0;
                 recs[8] = 1, recs[9] = (unsigned int)-3, recs[10] = 4, recs[11] = 20, recs[12] = 40, recs[13] = 0x80402010u, recs[14] = recs[15] = 0;
                 a->d = GPU_VA + 0x2000, a->dp = 256, a->sp = 256, a->gp = 32, a->w = 256, a->rows = 8, a->op = 6, a->x0 = 0, a->y0 = 0, a->count = 2;
-                a->ops = GPU_VA + (512u << 10), a->g = GPU_VA + 8192;
+                a->ops = GPU_VA + (512u << 10), a->g = GPU_VA + 8192, a->room = ROOM;
                 job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
                 job.code = GPU_VA + 6656;
                 n = gpu_i915_gen9_batch(&job, words, 64);
-                check("gpu i915 scene: two records make the 64 dwords of the walker, a thread an 8 by 8 tile: 32 tiles a row, 4 rows of them",
-                      n == 64 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 32u && words[47] == 4u);
-                check("gpu i915 scene: the CURBE holds the records kept, then the damage (0, 0 to 256, 32)",
-                      state[48] == 2u && state[49] == 0u && state[50] == 0u && state[51] == 256u && state[52] == 32u);
-                check("gpu i915 scene: the binding table is at 512 of the slot's state (entry 0 the damage at 64, entry 1 the records at 256), the descriptor names it",
-                      state[128] == 2560 + 64 && state[129] == 2560 + 256 && state[(128 + 16) / 4] == 2560 + GPU_I915_SCENE_TABLE);
-                check("gpu i915 scene: the records are packed a 64-byte row each at the side's bins (two rows: height 1, width and pitch 63)",
-                      state[(256 + 8) / 4] == (63u | (1u << 16)) && state[(256 + 12) / 4] == 63u && state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 8192));
-                check("gpu i915 scene: each record is clipped to the damage (the tone at -3, 4 to 20, 40 is kept as 0, 4 to 20, 32)",
-                      pack[0] == 0 && pack[3] == 256 && pack[5] == 0x11223344u && pack[16] == 1 && pack[17] == 0 && pack[18] == 4 && pack[19] == 20 && pack[20] == 32 &&
-                          pack[21] == 0x80402010u);
+                check("gpu i915 scene: two records make the 64 dwords of the walker, a thread a strip of 64 pixels by 8 rows: 4 strips a row, 4 rows of them",
+                      n == 64 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 4u && words[47] == 4u);
+                check("gpu i915 scene: the CURBE holds the cells a row, then the damage (0, 0 to 256, 32)",
+                      state[48] == 4u && state[49] == 0u && state[50] == 0u && state[51] == 256u && state[52] == 32u);
+                check("gpu i915 scene: the binding table is at 512 of the slot's state (the damage at 64, the cells at 256, the long lists at 320), the descriptor names it",
+                      state[128] == 2560 + 64 && state[129] == 2560 + 256 && state[130] == 2560 + 320 && state[(128 + 16) / 4] == 2560 + GPU_I915_SCENE_TABLE);
+                check("gpu i915 scene: the cells are a surface of 64 bytes a cell and 8 rows a row of cells at the bins (width and pitch 255, height 7)",
+                      state[(256 + 8) / 4] == (255u | (7u << 16)) && state[(256 + 12) / 4] == 255u && state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 8192));
+                check("gpu i915 scene: the long lists are a surface of 64-byte rows after the cells (eight rows of slack when there is none)",
+                      state[(320 + 8) / 4] == (63u | (7u << 16)) && state[(320 + 12) / 4] == 63u && state[(320 + 32) / 4] == (unsigned int)(GPU_VA + 8192 + 2048));
+                check("gpu i915 scene: the first cell lists the fill (its first row: two records, the first covers every tile) and the tone, clipped to the damage (0, 4 to 20, 32)",
+                      pack[0] == (0x200u | 2u << 16) && pack[3] == 256 && pack[5] == 0x11223344u && pack[ROW] == 1 && pack[ROW + 1] == 0 && pack[ROW + 2] == 4 &&
+                          pack[ROW + 3] == 20 && pack[ROW + 4] == 32 && pack[ROW + 5] == 0x80402010u);
+                check("gpu i915 scene: a cell the tone is not in lists the fill alone", pack[CELL] == (0x200u | 1u << 16) && pack[3 * CELL] == (0x200u | 1u << 16) && pack[3 * CELL + 3] == 256);
                 recs[0] = 1, recs[8] = 0, recs[9] = 0, recs[10] = 0, recs[11] = 256, recs[12] = 32;
-                check("gpu i915 scene: a fill over the whole damage hides the records before it: one is kept",
-                      gpu_i915_gen9_batch(&job, words, 64) == 64 && state[48] == 1u && pack[0] == 0 && state[(256 + 8) / 4] == 63u);
+                check("gpu i915 scene: a fill over a cell's damage hides the records before it there: every cell lists the fill alone",
+                      gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[0] == (0x200u | 1u << 16) && pack[CELL] == (0x200u | 1u << 16) && pack[5] == 0x80402010u);
                 recs[0] = 0, recs[8] = 1, recs[9] = 3, recs[10] = 4, recs[11] = 20, recs[12] = 9;
                 recs[8] = 2;
                 check("gpu i915 scene: a record that is not a fill, a tone or a picture (kind 2, a box) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
@@ -373,31 +379,44 @@ static void gpu_i915_set_rows(void)
                 a->count = 2, a->g = GPU_VA + 8192 + 8;
                 check("gpu i915 scene: bins not 64-byte aligned are refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->g = GPU_VA + sizeof buffer - 4096;
-                check("gpu i915 scene: a slot's part of the bins past the buffer is refused (0 words), not written", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                a->g = GPU_VA + 8192, a->w = 7;
-                check("gpu i915 scene: a rectangle 7 pixels wide (not a multiple of 4) is refused (0 words): its last tile could not be written whole",
-                      gpu_i915_gen9_batch(&job, words, 64) == 0);
+                check("gpu i915 scene: a room of the bins that runs past the buffer is refused (0 words), not written", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->g = GPU_VA + 8192, a->room = 2048 + 256;
+                check("gpu i915 scene: a room that holds the cells but not the long lists' slack is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->room = ROOM, a->w = 7;
+                check("gpu i915 scene: a rectangle 7 pixels wide is drawn as its one tile (a strip, 32 bytes wide), and no record covers that tile whole",
+                      gpu_i915_gen9_batch(&job, words, 64) == 64 && words[44] == 1u && state[(64 + 8) / 4] == (31u | (31u << 16)) && pack[0] == (2u << 16));
                 a->w = 256, a->ops = GPU_VA + sizeof buffer - 64, a->count = 16;
                 check("gpu i915 scene: records that run past the GPU buffer are refused (0 words), not read", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->ops = GPU_VA + (512u << 10);
-                // Pictures (kind 4 copy, 11 alpha-over, optional 0x80 R/B swap): a surface each at the top of the slot's part, its entry in word 7.
+                // Nine tones in one cell: a list longer than the cell's eight rows is laid in the long lists, the cell's first row its length and place.
+                for (unsigned int i = 0; i < 9; i++)
+                        recs[8 * i] = 1, recs[8 * i + 1] = 70 + i, recs[8 * i + 2] = 1, recs[8 * i + 3] = 100, recs[8 * i + 4] = 30, recs[8 * i + 5] = 0x40000000u + i, recs[8 * i + 6] = recs[8 * i + 7] = 0;
+                a->count = 9;
+                check("gpu i915 scene: nine records in a cell are a long list: the cell's first row says 9, 0x100 and the first row, and the ninth is there",
+                      gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[CELL] == (0x100u | 9u << 16) && pack[CELL + 1] == 0u && more[0] == 1u && more[1] == 70u &&
+                          more[16 * 8 + 1] == 78u && more[16 * 8 + 5] == 0x40000008u && state[(320 + 8) / 4] == (63u | (16u << 16)) && pack[0] == 0u);
+                recs[0] = 0, recs[1] = 0, recs[2] = 0, recs[3] = 256, recs[4] = 32, recs[5] = 0x11223344u, recs[6] = recs[7] = 0;
+                recs[8] = 1, recs[9] = 3, recs[10] = 4, recs[11] = 20, recs[12] = 9, recs[13] = 0x80402010u;
+                // Pictures (kind 4 copy, 11 alpha-over, optional 0x80 R/B swap): a surface each from the room's top down, its entry in word 7.
                 {
-                        positive img_va = GPU_VA + 0x4014ull, surface_at = 8192 + GPU_I915_SCENE_SURFACES;
+                        positive img_va = GPU_VA + 0x4014ull, surface_at = 8192 + ROOM - 64;
 
                         a->count = 3;
                         recs[16] = 4u | 0x80u, recs[17] = 4, recs[18] = 2, recs[19] = 68, recs[20] = 18;
                         recs[21] = (unsigned int)img_va, recs[22] = (unsigned int)(img_va >> 32), recs[23] = 128;
-                        check("gpu i915 scene: a picture (4 | 0x80) is entry 2, its surface at the 64-byte line of its first pixel, as wide as its part, at its pitch",
-                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[130] == (unsigned int)surface_at &&
+                        check("gpu i915 scene: a picture (4 | 0x80) is entry 3, its surface at the 64-byte line of its first pixel, as wide as its part, at its pitch",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[131] == (unsigned int)surface_at &&
                                   surf[32 / 4] == (unsigned int)(img_va & ~63ull) && surf[8 / 4] == ((20u + 4u * 64u - 1u) | (15u << 16)) && surf[12 / 4] == 4u * 128u - 1u);
-                        check("gpu i915 scene: the picture's record keeps its kind and rectangle and says its x bias (20 - 4 * 4), row bias (-2) and entry (2)",
-                              pack[32] == (4u | 0x80u) && pack[33] == 4 && pack[36] == 18 && pack[37] == 20u - 16u && pack[38] == (unsigned int)-2 && pack[39] == 2u);
+                        check("gpu i915 scene: the picture's record keeps its kind and rectangle and says its x bias (20 - 4 * 4), row bias (-2) and entry (3), in each cell it is in",
+                              pack[2 * ROW] == (4u | 0x80u) && pack[2 * ROW + 1] == 4 && pack[2 * ROW + 4] == 18 && pack[2 * ROW + 5] == 20u - 16u &&
+                                  pack[2 * ROW + 6] == (unsigned int)-2 && pack[2 * ROW + 7] == 3u && pack[ROW + CELL] == (4u | 0x80u) && pack[ROW + CELL + 7] == 3u &&
+                                  pack[0] == (0x200u | 3u << 16) && pack[CELL] == (0x200u | 2u << 16));
                         recs[17] = (unsigned int)-8, recs[19] = 40;
                         check("gpu i915 scene: a picture left of the damage starts at its first pixel inside it (8 pixels in: 32 bytes further on the same line)",
-                              gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[33] == 0 && surf[32 / 4] == (unsigned int)(img_va & ~63ull) &&
-                                  pack[37] == 20u + 32u && surf[8 / 4] == ((52u + 4u * 40u - 1u) | (15u << 16)));
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[2 * ROW + 1] == 0 && surf[32 / 4] == (unsigned int)(img_va & ~63ull) &&
+                                  pack[2 * ROW + 5] == 20u + 32u && surf[8 / 4] == ((52u + 4u * 40u - 1u) | (15u << 16)));
                         recs[17] = 4, recs[19] = 68, recs[16] = 11u;
-                        check("gpu i915 scene: a picture laid over (11) is taken the same way", gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[39] == 2u);
+                        check("gpu i915 scene: a picture laid over (11) is taken the same way", gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[2 * ROW + 7] == 3u);
                         recs[21] = (unsigned int)(img_va + 1);
                         check("gpu i915 scene: a picture not 4-byte aligned is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         recs[21] = (unsigned int)img_va, recs[23] = 0;
@@ -411,8 +430,10 @@ static void gpu_i915_set_rows(void)
                                         memory_copy(recs + 8 * i, picture, 32);
                         }
                         a->count = GPU_I915_SCENE_IMAGES;
-                        check("gpu i915 scene: as many pictures as the binding table's entries reach are taken, the last entry 239",
-                              gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[16 * (GPU_I915_SCENE_IMAGES - 1) + 7] == 239u);
+                        check("gpu i915 scene: as many pictures as the binding table's entries reach are taken, the last entry 239, in the long lists of its two cells",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[0] == (0x100u | GPU_I915_SCENE_IMAGES << 16) && pack[1] == 0u &&
+                                  pack[CELL] == (0x100u | GPU_I915_SCENE_IMAGES << 16) && pack[CELL + 1] == GPU_I915_SCENE_IMAGES &&
+                                  more[16 * (GPU_I915_SCENE_IMAGES - 1) + 7] == 239u && more[16 * (2 * GPU_I915_SCENE_IMAGES - 1) + 7] == 239u);
                         a->count = GPU_I915_SCENE_IMAGES + 1;
                         check("gpu i915 scene: one picture more than the entries reach is refused (0 words): the processor draws the scene",
                               gpu_i915_gen9_batch(&job, words, 64) == 0);
@@ -514,15 +535,23 @@ b32 main(void)
                               (positive)gpu_req.first, (positive)gpu_req.error);
                 return test_report(null);
         }
+        // A set whose command words are made from the job (i915's) takes whole 64-byte rows on a 32-byte base, a scene of at most 4096 pixels a row and
+        // no texture unit: the rows below at an odd place, the texture unit's and the 8K scene are amdgpu's, and said NOT RUN there (the scene's own
+        // check, CHECK_gpu_scene, holds such a card's scenes and operations to the processor at the places it takes).
+        if (gpu_set->batch)
+                string_format(log, "gpu: the operations at an odd place, the texture unit's rows and the 8K scene NOT RUN -- this card's set takes whole rows only (CHECK_gpu_scene is its check)\n");
         // The texture unit's read (op 8) drew its test at the start (gpu_image_test, a linear picture through an image resource, straight and swapped).
-        check("gpu: the card's texture unit reads a picture through an image resource as it is and with red and blue the other way (gpu_image_test)", gpu_image_ok);
-        gpu_scaled_rows();
+        if (!gpu_set->batch)
+        {
+                check("gpu: the card's texture unit reads a picture through an image resource as it is and with red and blue the other way (gpu_image_test)", gpu_image_ok);
+                gpu_scaled_rows();
+        }
         src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
         gnd = (unsigned int address_to)((p8 address_to)gpu.at + gnd_at), a = GPU_ARGS;
         tones[4] = gpu_random() | 0x80000000u;
 
         // 1. Every operation, the whole OW by OH screen compared, the rect W by H at X, Y.
-        for (int op = 0; op < 8; op++)
+        for (int op = 0; op < 8 && !gpu_set->batch; op++)
         {
                 unsigned int v = op == 1 ? gpu_random() : op >= 2 && op < 7 ? tones[op - 2] : 0, light = op == 7;
                 int kind = op < 2 ? op : op < 7 ? 2 : 3;
@@ -558,7 +587,7 @@ b32 main(void)
         }
 
         // 2. Each operation at the size a window is, GPU (submit and wait) against the CPU's routine, best of 8, each side run back to back.
-        for (int kind = 0; kind < 4; kind++)
+        for (int kind = 0; kind < 4 && !gpu_set->batch; kind++)
         {
                 cpu[kind] = gpu_time[kind] = ~0ull;
                 a->s = GPU_VA + src_at, a->d = GPU_VA + dst_at + ((positive)60 * SW + 300) * 4, a->g = GPU_VA + src_at;
@@ -620,7 +649,10 @@ b32 main(void)
                                                 memory_over_tone_u32(gpu_want + (positive)y * SP + q[1], width, q[5]);
                                 }
                 }
+                // (two seconds for it: a card at its least clock draws 300 records over 700,000 pixels in more than a tick)
+                gpu_patient = 1;
                 check("gpu: the scene finishes", gpu_scene(ops_at, N, bins_at, scene_at, SP, SWD, SHT, 0, 0, SWD, SHT));
+                gpu_patient = 0;
                 for (int y = 0; y < SHT; y++)
                         for (int x = 0; x < SWD; x++)
                         {
@@ -633,6 +665,7 @@ b32 main(void)
         }
 
         // 4. The same at 8K: a window's clear and 199 more fills and tones, GPU (bins and run, then the run alone) against the CPU applying them, best of 5.
+        if (!gpu_set->batch)
         {
                 enum { KW = 7680, KH = 4320, M = 200 };
                 unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to sd = (unsigned int address_to)((p8 address_to)gpu.at + scene_at);
@@ -748,6 +781,371 @@ b32 main(void)
 }
 
 #endif /* CHECK_gpu */
+
+#ifdef CHECK_gpu_scene
+#include "../../src/lib.util.c"
+#define SIGNAL_RESTART 0x10000000
+#define SIGNAL_CATCH_RESTORER 0
+#define SIGNAL_CATCH_FLAGS SIGNAL_RESTART
+#include "../../src/canvas/gpu.c"
+/*
+        The scene on the card against the processor, on any card whose set draws the kinds the kernels by hand draw: a fill (0), a tone laid over
+        (1), a picture copied (4) and a picture laid over (11), the pictures also with red and blue the other way (0x80). Random scenes of 1 to 2000
+        records, some off the picture's edges, some empty, some large, on pictures of several sizes, the whole picture and a part of it as the damage,
+        every pixel of the picture and of its pitch's padding compared with the records applied in order by the processor (gpu_test_overv, the kernels'
+        own formula). Then the shapes a desktop has (a wallpaper, windows and their shadows, a panel, a pointer), the card's time for the whole scene and
+        for parts of it against the processor's rows (memory_copy_rect_u32, memory_over_u32_rect, memory_fill_u32_rect, memory_over_tone_u32, one thread).
+        Needs a card that starts; without one it says NOT RUN, and nothing of it has passed.
+*/
+#define SHARED_counted
+#include "../checks.c"
+#undef SHARED_counted
+
+enum { GS_PITCH = 2048, GS_ROWS = 1280, GS_MOST = 4096 };
+static unsigned int gs_seed = 2463534242u;
+static positive gs_ops_at, gs_bins_at, gs_dst_at, gs_src_at;
+static unsigned int address_to gs_want;
+static unsigned int gs_quick;
+
+static unsigned int gs_random(void)
+{
+        gs_seed ^= gs_seed << 13, gs_seed ^= gs_seed >> 17, gs_seed ^= gs_seed << 5;
+        return gs_seed;
+}
+
+// The dark glass's grain as compositor_grain_row builds it: a four by four ordered pattern of 0 to 3 levels, added.
+static unsigned int gs_grains[4][128];
+static const unsigned int *gs_grain(int x, int y)
+{
+        static const unsigned char order[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
+        for (int row = 0; row < 4; row++)
+                for (int at = 0; at < 64; at++)
+                        gs_grains[row][at] = ((unsigned int)order[row][at & 3] >> 2) * 0x010101u, gs_grains[row][64 + at] = 0;
+        return gs_grains[y & 3] + (x & 15);
+}
+
+// One record applied to the model's picture inside the damage, as the kernels draw it.
+static void gs_apply(unsigned int address_to want, const unsigned int q[8], const unsigned int damage[4])
+{
+        unsigned int kind = q[0] & ~0x80u;
+        long long x0 = (int)q[1], y0 = (int)q[2], x1 = (int)q[3], y1 = (int)q[4];
+        const unsigned int address_to from = kind == 4 || kind == 11 ? (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)q[5] | (positive)q[6] << 32) - GPU_VA)) : 0;
+
+        if (kind == 1 && !(q[5] >> 24))
+                return;
+        for (long long y = y0 > (long long)damage[1] ? y0 : (long long)damage[1]; y < y1 && y < (long long)damage[3]; y++)
+                for (long long x = x0 > (long long)damage[0] ? x0 : (long long)damage[0]; x < x1 && x < (long long)damage[2]; x++)
+                {
+                        unsigned int address_to p = want + y * GS_PITCH + x, v = q[5];
+
+                        if (from)
+                        {
+                                v = from[(y - y0) * q[7] + (x - x0)];
+                                if (q[0] & 0x80u)
+                                        v = (v & 0xff00ff00u) | (v >> 16 & 255u) | (v & 255u) << 16;
+                        }
+                        *p = kind == 0 || kind == 4 ? v : gpu_test_overv(*p, v);
+                }
+}
+
+// n random records for a picture w by h: every kind, a seventh of them large, some off the edges, some empty; at most 200 pictures among them.
+static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int w, unsigned int h)
+{
+        static const unsigned int kinds[6] = {0, 1, 4, 11, 4 | 0x80, 11 | 0x80};
+        unsigned int pictures = 0;
+
+        for (unsigned int k = 0; k < n; k++)
+        {
+                unsigned int address_to q = ops + 8 * k, kind = kinds[gs_random() % 6], large = k % 7 == 3;
+                unsigned int rw = 1 + gs_random() % (large ? w : 96), rh = 1 + gs_random() % (large ? h : 64);
+                int x0 = (int)(gs_random() % (w + 40)) - 20, y0 = (int)(gs_random() % (h + 40)) - 20;
+
+                if (kind > 1 && pictures >= 200)
+                        kind = k & 1;
+                if (k % 13 == 5)
+                        rw = 0;
+                q[0] = kind, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)(x0 + (int)rw), q[4] = (unsigned int)(y0 + (int)rh);
+                q[5] = gs_random(), q[6] = q[7] = 0;
+                if (kind > 1)
+                {
+                        positive va = GPU_VA + gs_src_at + 4ull * ((positive)(gs_random() % (GS_ROWS - rh)) * GS_PITCH + gs_random() % (GS_PITCH - rw));
+
+                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = GS_PITCH, pictures++;
+                }
+        }
+}
+
+// The damage as the scene draws it: whole patches of 64 pixels by 4 rows, inside the picture.
+static void gs_binned(const unsigned int d[4], unsigned int w, unsigned int h, unsigned int binned[4])
+{
+        binned[0] = d[0] & ~63u, binned[1] = d[1] & ~3u, binned[2] = (d[2] + 63) & ~63u, binned[3] = (d[3] + 3) & ~3u;
+        binned[2] = binned[2] > w ? w : binned[2], binned[3] = binned[3] > h ? h : binned[3];
+}
+
+// A scene of the n records at the ops drawn by the card into a picture of random pixels, and held to the model. The card's time, 0 when refused.
+static positive gs_scene_row(string_address label, unsigned int w, unsigned int h, unsigned int n, const unsigned int d[4])
+{
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + gs_ops_at), address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at);
+        unsigned int binned[4];
+        positive bad = 0, began, took;
+        b32 done;
+
+        for (positive i = 0; i < (positive)GS_PITCH * h; i++)
+                dst[i] = gs_want[i] = gs_random();
+        // The pictures change between the jobs, as a window's does between presents: a card that read them through a cache it kept would draw the old ones.
+        {
+                unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + gs_src_at), turn = gs_random() | 1u;
+
+                for (positive i = 0; i < (positive)GS_PITCH * GS_ROWS; i++)
+                        src[i] ^= turn;
+        }
+        gs_binned(d, w, h, binned);
+        for (unsigned int k = 0; k < n; k++)
+                gs_apply(gs_want, ops + 8 * k, binned);
+        began = clock_monotonic_nanoseconds();
+        gpu_patient = 1;
+        done = gpu_scene(gs_ops_at, n, gs_bins_at, gs_dst_at, GS_PITCH, w, h, d[0], d[1], d[2], d[3]);
+        gpu_patient = 0;
+        took = clock_monotonic_nanoseconds() - began;
+        checks++;
+        for (positive until = clock_monotonic_nanoseconds() + 8000000000ull; !done && !gpu_idle() && clock_monotonic_nanoseconds() < until;)
+                ;
+        if (!done)
+        {
+                failures++;
+                string_format(log, "  FAIL gpu scene %s: %p by %p, %p records, damage %p,%p to %p,%p: not drawn (the card's error %p, end %p)\n", label, (positive)w, (positive)h,
+                              (positive)n, (positive)d[0], (positive)d[1], (positive)d[2], (positive)d[3], (positive)gpu_last_error, (positive)gpu_end);
+                return 0;
+        }
+        for (positive y = 0; y < h; y++)
+                for (positive x = 0; x < GS_PITCH; x++)
+                {
+                        checks++;
+                        if (dst[y * GS_PITCH + x] != gs_want[y * GS_PITCH + x] && (++failures, ++bad) < 4)
+                                string_format(log, "  FAIL gpu scene %s: pixel %p,%p is %p, wanted %p\n", label, x, y, (positive)dst[y * GS_PITCH + x],
+                                              (positive)gs_want[y * GS_PITCH + x]);
+                }
+        string_format(log, "  gpu scene %s: %p by %p, %p records, damage %p,%p to %p,%p: %p us, %p pixels wrong\n", label, (positive)w, (positive)h, (positive)n,
+                      (positive)d[0], (positive)d[1], (positive)d[2], (positive)d[3], took / 1000, bad);
+        log_flush();
+        return took;
+}
+
+// The records by the processor's rows into the model's picture, inside the damage: its time. No picture has red and blue the other way here.
+static positive gs_rows(const unsigned int address_to ops, unsigned int n, const unsigned int damage[4])
+{
+        positive began = clock_monotonic_nanoseconds();
+
+        for (unsigned int k = 0; k < n; k++)
+        {
+                const unsigned int address_to q = ops + 8 * k;
+                long long x0 = (int)q[1] > (long long)damage[0] ? (int)q[1] : (long long)damage[0], y0 = (int)q[2] > (long long)damage[1] ? (int)q[2] : (long long)damage[1];
+                long long x1 = (int)q[3] < (long long)damage[2] ? (int)q[3] : (long long)damage[2], y1 = (int)q[4] < (long long)damage[3] ? (int)q[4] : (long long)damage[3];
+                unsigned int address_to into = gs_want + y0 * GS_PITCH + x0;
+
+                if (x1 <= x0 || y1 <= y0)
+                        continue;
+                if (q[0] == 0)
+                        memory_fill_u32_rect(into, GS_PITCH, (positive)(x1 - x0), (positive)(y1 - y0), q[5]);
+                else if (q[0] == 1)
+                        for (long long y = y0; y < y1; y++)
+                                memory_over_tone_u32(gs_want + y * GS_PITCH + x0, (positive)(x1 - x0), q[5]);
+                else
+                {
+                        const unsigned int address_to from = (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)q[5] | (positive)q[6] << 32) - GPU_VA)) +
+                                                              (y0 - (int)q[2]) * q[7] + (x0 - (int)q[1]);
+
+                        if (q[0] == 4)
+                                memory_copy_rect_u32(into, GS_PITCH, from, q[7], (positive)(x1 - x0), (positive)(y1 - y0));
+                        else
+                                memory_over_u32_rect(into, GS_PITCH, from, q[7], (positive)(x1 - x0), (positive)(y1 - y0));
+                }
+        }
+        return clock_monotonic_nanoseconds() - began;
+}
+
+// The n records at the ops over a damage, the card (the scene built, submitted and waited for) against the processor's rows: the best and the mean of rounds.
+static void gs_time_row(string_address label, unsigned int w, unsigned int h, unsigned int n, const unsigned int d[4])
+{
+        enum { ROUNDS = 12 };
+        const unsigned int address_to ops = (const unsigned int address_to)((p8 address_to)gpu.at + gs_ops_at);
+        unsigned int binned[4];
+        positive card = ~0ull, card_sum = 0, rows = ~0ull, rows_sum = 0, took, submit = 0;
+        b32 done = true;
+
+        gs_binned(d, w, h, binned);
+        for (int i = 0; i < ROUNDS && done; i++)
+        {
+                took = clock_monotonic_nanoseconds();
+                gpu_patient = 1;
+                done = gpu_scene(gs_ops_at, n, gs_bins_at, gs_dst_at, GS_PITCH, w, h, d[0], d[1], d[2], d[3]);
+                gpu_patient = 0;
+                took = clock_monotonic_nanoseconds() - took;
+                card = took < card ? took : card, card_sum += took, submit += gpu_submit_took;
+                took = gs_rows(ops, n, binned);
+                rows = took < rows ? took : rows, rows_sum += took;
+        }
+        check("gpu scene: a timed scene is drawn", done);
+        string_format(log, "  gpu time %s: %p by %p pixels of damage, %p records: card %p us best, %p mean (%p of it the submit); processor rows %p us best, %p mean\n", label,
+                      (positive)(binned[2] - binned[0]), (positive)(binned[3] - binned[1]), (positive)n, card / 1000, card_sum / ROUNDS / 1000, submit / ROUNDS / 1000,
+                      rows / 1000, rows_sum / ROUNDS / 1000);
+        log_flush();
+}
+
+b32 main(void)
+{
+        static const unsigned int sizes[][2] = {{256, 32}, {1000, 701}, {1920, 1080}, {64, 8}, {1280, 1024}, {997, 701}, {1366, 768}, {13, 9}, {2047, 70}};
+        static const unsigned int counts[] = {1, 2, 8, 9, 40, 300, 2000};
+        unsigned int address_to ops, address_to src;
+        const positive picture = (positive)GS_PITCH * GS_ROWS * 4;
+
+        gs_ops_at = GPU_DATA, gs_bins_at = gs_ops_at + (1 << 20), gs_dst_at = gs_bins_at + (12 << 20), gs_src_at = gs_dst_at + picture;
+        // /tmp/gpu-scene-quick, when it is there: the timed rows alone.
+        gs_quick = gpu_flag("/tmp/gpu-scene-quick");
+        if (!gpu_start(gs_src_at + picture + (2 << 20)))
+        {
+                check("gpu scene: a card that is there passes the self-test", !gpu.broken);
+                string_format(log, "gpu scene: the card's scenes against the processor's NOT RUN -- no card starts here: step %p of the prerequisites failed (error %p)\n",
+                              (positive)gpu_req.first, (positive)gpu_req.error);
+                return test_report(null);
+        }
+        {
+                char words[160];
+                unsigned int at = gpu_backend->describe(gpu.family, gpu.device, words, 0, sizeof words - 1);
+
+                words[at < sizeof words ? at : sizeof words - 1] = 0;
+                string_format(log, "gpu scene: %s\n", (string_address)words);
+        }
+        gs_want = (unsigned int address_to)memory(picture);
+        if (!gs_want)
+                return 1;
+        ops = (unsigned int address_to)((p8 address_to)gpu.at + gs_ops_at), src = (unsigned int address_to)((p8 address_to)gpu.at + gs_src_at);
+        for (positive i = 0; i < (positive)GS_PITCH * GS_ROWS; i++)
+                src[i] = gs_random();
+        // 1. Random scenes: each size, each count, the whole picture and a part of it.
+        for (unsigned int s = 0; s < sizeof sizes / sizeof sizes[0] && !gs_quick; s++)
+                for (unsigned int c = 0; c < sizeof counts / sizeof counts[0]; c++)
+                {
+                        unsigned int w = sizes[s][0], h = sizes[s][1], whole[4] = {0, 0, w, h}, part[4];
+
+                        // A width that is not whole 4-pixel groups is a set's with its own command words (i915's scene, in whole tiles); the kernels
+                        // by hand draw pictures only at whole groups.
+                        if ((w & 3) && !gpu_set->batch)
+                        {
+                                if (!c)
+                                        string_format(log, "  gpu scene: %p by %p NOT RUN -- this card's kernels draw pictures on whole 4-pixel groups\n", (positive)w, (positive)h);
+                                continue;
+                        }
+                        gs_records(ops, counts[c], w, h);
+                        gs_scene_row("whole", w, h, counts[c], whole);
+                        part[0] = gs_random() % w, part[1] = gs_random() % h, part[2] = part[0] + 1 + gs_random() % (w - part[0]), part[3] = part[1] + 1 + gs_random() % (h - part[1]);
+                        gs_scene_row("part", w, h, counts[c], part);
+                }
+        // 2. A scene whose first record covers it (a fill, then a copy), so no tile is read: the same checks.
+        for (unsigned int c = 0; c < sizeof counts / sizeof counts[0] && !gs_quick; c++)
+        {
+                unsigned int whole[4] = {0, 0, 1920, 1080};
+
+                gs_records(ops, counts[c], 1920, 1080);
+                ops[0] = c & 1 ? 4 : 0, ops[1] = ops[2] = 0, ops[3] = 1920, ops[4] = 1080, ops[5] = c & 1 ? (unsigned int)(GPU_VA + gs_src_at) : 0xff203040u;
+                ops[6] = c & 1 ? (unsigned int)((GPU_VA + gs_src_at) >> 32) : 0, ops[7] = c & 1 ? GS_PITCH : 0;
+                gs_scene_row("covered", 1920, 1080, counts[c], whole);
+        }
+        // 3. A desktop: the wallpaper, two windows with their shadows, a panel (a tone and its picture laid over), a pointer. The pictures are opaque
+        // where they are copied; the card against the processor's rows, the whole screen and parts of it.
+        {
+                enum { W = 1920, H = 1080 };
+                static const int shapes[8][5] = {{4, 0, 0, W, H}, {11, 180, 130, 1120, 850}, {4, 200, 150, 1100, 830}, {11, 780, 280, 1700, 980}, {4, 800, 300, 1680, 960},
+                                                 {1, 0, 1040, W, H}, {11, 0, 1040, W, H}, {11, 950, 500, 974, 524}};
+                static const unsigned int damages[][4] = {{0, 0, W, H}, {800, 300, 1680, 960}, {200, 150, 1100, 830}, {840, 340, 1040, 380}, {950, 500, 974, 524}, {0, 1040, W, H}};
+                static const string_address names[] = {"desktop, whole", "desktop, the front window", "desktop, the window behind", "desktop, a line of text", "desktop, the pointer", "desktop, the panel"};
+                unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at), one[4] = {0, 0, W, H};
+
+                for (positive i = 0; i < (positive)GS_PITCH * GS_ROWS; i++)
+                        src[i] |= 0xff000000u;
+                for (unsigned int k = 0; k < 8; k++)
+                {
+                        unsigned int address_to q = ops + 8 * k;
+                        positive va = GPU_VA + gs_src_at + 4ull * ((positive)(k * 16) * GS_PITCH + k * 16);
+
+                        q[0] = (unsigned int)shapes[k][0], q[1] = (unsigned int)shapes[k][1], q[2] = (unsigned int)shapes[k][2], q[3] = (unsigned int)shapes[k][3], q[4] = (unsigned int)shapes[k][4];
+                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = GS_PITCH;
+                        if (q[0] == 1)
+                                q[5] = 0x80101010u, q[6] = q[7] = 0;
+                }
+                gs_scene_row("desktop", W, H, 8, one);
+                for (unsigned int i = 0; i < sizeof damages / sizeof damages[0]; i++)
+                        gs_time_row(names[i], W, H, 8, damages[i]);
+                // One record over the whole screen, each kind: what a tile costs.
+                for (unsigned int kind = 0; kind < 4; kind++)
+                {
+                        static const unsigned int kinds[4] = {0, 4, 1, 11};
+                        static const string_address said[4] = {"one fill", "one copy", "one tone over", "one picture over"};
+
+                        ops[0] = kinds[kind];
+                        if (kinds[kind] < 2)
+                                ops[5] = 0x80402010u, ops[6] = ops[7] = 0;
+                        else
+                                ops[5] = (unsigned int)(GPU_VA + gs_src_at), ops[6] = (unsigned int)((GPU_VA + gs_src_at) >> 32), ops[7] = GS_PITCH;
+                        for (positive i = 0; i < (positive)GS_PITCH * H; i++)
+                                dst[i] = gs_want[i] = 0xff405060u;
+                        gs_time_row(said[kind], W, H, 1, one);
+                }
+        }
+        // 4. The four operations (copy, fill, tone over, glass over) on whole 64-byte rows at a 32-byte base, the place every set takes: the rows
+        // around them compared too.
+        {
+                enum { OW = 1216, OH = 211, OX = 320, OY = 7, SP = 1280 };
+                static const string_address names[4] = {"copy", "fill", "tone over", "glass over (dark)"};
+                unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at);
+                unsigned int address_to gnd = src + (positive)SP * 512;
+
+                for (int op = 0; op < 4; op++)
+                {
+                        struct gpu_args address_to a;
+                        unsigned int v = op == 1 ? gs_random() : 0x80402010u;
+                        positive bad = 0;
+                        b32 done;
+
+                        for (positive i = 0; i < (positive)GS_PITCH * (OH + 16); i++)
+                                dst[i] = gs_want[i] = gs_random();
+                        for (positive i = 0; i < (positive)SP * OH; i++)
+                                gnd[i] |= 0xff000000u;
+                        for (int r = 0; r < OH; r++)
+                        {
+                                unsigned int address_to row = gs_want + (positive)(OY + r) * GS_PITCH + OX;
+
+                                if (op == 0)
+                                        memory_copy(row, src + (positive)r * SP, OW * 4);
+                                else if (op == 1)
+                                        memory_fill_u32_rect(row, GS_PITCH, OW, 1, v);
+                                else if (op == 2)
+                                        memory_over_tone_u32(row, OW, v);
+                                else
+                                        memory_glass_over_u32(row, src + (positive)r * SP, gnd + (positive)r * SP, OW, gs_grain(OX, OY + r));
+                        }
+                        gpu_idle(), gpu_slot_take(), a = GPU_ARGS;
+                        a->s = GPU_VA + gs_src_at, a->d = GPU_VA + gs_dst_at + ((positive)OY * GS_PITCH + OX) * 4, a->g = GPU_VA + gs_src_at + (positive)SP * 512 * 4;
+                        a->sp = SP, a->dp = GS_PITCH, a->gp = SP, a->w = OW, a->rows = OH, a->op = (unsigned int)op, a->v = op == 3 ? 0 : v, a->x0 = op == 3 ? OX : 0, a->y0 = op == 3 ? OY : 0; // (the place is the glass's grain's)
+                        gpu_patient = 1, done = gpu_run(), gpu_patient = 0;
+                        check("gpu scene: an operation on whole rows finishes", done);
+                        for (positive i = 0; i < (positive)GS_PITCH * (OH + 16); i++)
+                        {
+                                checks++;
+                                if (dst[i] != gs_want[i] && (++failures, ++bad) < 4)
+                                        string_format(log, "  FAIL gpu scene operation %s: pixel %p,%p is %p, wanted %p\n", names[op], i % GS_PITCH, i / GS_PITCH, (positive)dst[i],
+                                                      (positive)gs_want[i]);
+                        }
+                        string_format(log, "  gpu scene operation %s: %p by %p at %p,%p: %p pixels wrong\n", names[op], (positive)OW, (positive)OH, (positive)OX, (positive)OY, bad);
+                }
+        }
+        string_format(log, "gpu scene: jobs %p, %p us mean (%p us of it the submit)\n", (positive)gpu_jobs, (positive)(gpu_jobs ? gpu_job_ns / gpu_jobs / 1000 : 0),
+                      (positive)(gpu_jobs ? gpu_job_submit_ns / gpu_jobs / 1000 : 0));
+        return test_report(null);
+}
+
+#endif /* CHECK_gpu_scene */
 
 #if defined(CHECK_gpu_kit) || defined(CHECK_gpu_model_kit)
 // The kit's seeded random words and picture (CHECK_gpu_kit's seed, shared with CHECK_gpu_model_kit).
