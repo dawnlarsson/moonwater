@@ -5073,6 +5073,36 @@ b32 main()
         check_decode_bad_lead();
         check_zero_face();
         check_crossing_stems();
+        /* Regression tests for FONT-001 (font_order_marks) and FONT-002 (font_load indexToLocFormat). */
+        {
+                font_item m220[3] = {{0}, {0}, {0}};
+                font_item m230[3] = {{0}, {0}, {0}};
+                static p8 bad_loca[8192];
+                font_face bad_face;
+                positive head_off = 0;
+
+                m220[0].code = 0x064e, m220[1].code = 0x065f, m220[2].code = 0x0655;
+                font_order_marks(m220, 3, true);
+                check("font_order_marks: class-220 Arabic modifier after non-modifier moves ahead of vowels",
+                      m220[0].code == 0x0655 && m220[1].code == 0x064e && m220[2].code == 0x065f);
+
+                m230[0].code = 0x064e, m230[1].code = 0x0610, m230[2].code = 0x0654;
+                font_order_marks(m230, 3, true);
+                check("font_order_marks: class-230 Arabic modifier after non-modifier moves ahead of vowels",
+                      m230[0].code == 0x0654 && m230[1].code == 0x064e && m230[2].code == 0x0610);
+
+                memory_copy(bad_loca, font_one, font_one_size);
+                for (p32 i = 0, tables = ((p32)bad_loca[4] << 8) | bad_loca[5]; i < tables; i++)
+                {
+                        p8 address_to rec = bad_loca + 12 + 16 * (positive)i;
+                        if (!memory_compare(rec, "head", 4))
+                                head_off = ((positive)rec[8] << 24) | ((positive)rec[9] << 16) | ((positive)rec[10] << 8) | rec[11];
+                }
+                bad_loca[head_off + 50] = 0x01, bad_loca[head_off + 51] = 0x00;
+                check("font_load: rejects 16-bit indexToLocFormat 0x0100", font_load(&bad_face, bad_loca, font_one_size, 0) == FONT_BAD);
+                bad_loca[head_off + 50] = 0x01, bad_loca[head_off + 51] = 0x01;
+                check("font_load: rejects 16-bit indexToLocFormat 0x0101", font_load(&bad_face, bad_loca, font_one_size, 0) == FONT_BAD);
+        }
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
         check_generation_wrap();

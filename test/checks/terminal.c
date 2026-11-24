@@ -1106,6 +1106,9 @@ static int popmenu_row(const struct ui_popmenu address_to m)
 #endif
 #undef windows_take
 #include "../../src/canvas/ui/terminal.c"
+#ifdef CHECK_terminal
+#include "../../src/canvas/klog.c"
+#endif
 #if MOONWATER_UI_SETTINGS
 #include "../../src/canvas/ui/gallery.c"
 #include "../../src/canvas/ui/settings.c"
@@ -2436,6 +2439,135 @@ static fn check_pointer(void)
                 terminal_select_clear();
         }
                 terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
+        }
+        /* Regression tests for TERM-001, KLOG-001, TERM-002, TERM-003, TERM-004. */
+        {
+                /* TERM-001: terminal_row and terminal_fill must clamp grid-relative draws to (width - pad, height - pad_y). */
+                unsigned int pad_was = terminal.pad, pad_y_was = terminal.pad_y, height_was = terminal.height;
+                positive picture, guard = 16 * (positive)terminal.pitch, spoiled = 0;
+                unsigned int address_to row_frame;
+
+                terminal.pad = 8, terminal.pad_y = 8;
+                terminal.height = ROWS * terminal.cell_h + terminal.pad_y - 4;
+                picture = (positive)terminal.pitch * terminal.height;
+                row_frame = memory((picture + guard) * sizeof(unsigned int));
+                if (row_frame)
+                {
+                        static struct window_cell last_row[512];
+                        unsigned int cols = min(COLUMNS, 512u);
+
+                        for (unsigned int c = 0; c < cols; c++)
+                                last_row[c] = (struct window_cell){.character = 'g', .flags = WINDOW_CELL_UNDERLINE};
+                        for (positive at = picture; at < picture + guard; at++)
+                                row_frame[at] = 0xdeadbeefu;
+                        terminal_row(&terminal_painters[0], terminal_grid(row_frame), ROWS - 1, last_row, null, 0, cols);
+                        for (positive at = picture; at < picture + guard; at++)
+                                spoiled += row_frame[at] != 0xdeadbeefu;
+                        memory_free(row_frame, (picture + guard) * sizeof(unsigned int));
+                }
+                terminal.pad = pad_was, terminal.pad_y = pad_y_was, terminal.height = height_was;
+                check("TERM-001: terminal_row on the last row draws nothing past the end of the picture", row_frame && spoiled == 0);
+        }
+        {
+                /* KLOG-001: klog mode ignores clipboard/drag paste paths and terminal_tick does not term_send(-1). */
+                b32 reading_was = terminal.reading, gone_was = terminal.gone;
+                int phase_was = terminal.phase;
+                b32 master_was = terminal.master;
+                struct window_event drag_ev = {WINDOW_EVENT_DRAG, 0, WINDOWS_DRAG_ENTER, 0};
+                b32 klog_dirty = false;
+                long other = -1;
+                int ids[4], item_count;
+                b32 has_paste = false;
+
+                terminal.reading = true, terminal.gone = false, terminal.phase = TERMINAL_RUNNING, terminal.master = (b32)-1;
+                terminal_drop.over = false;
+                check("KLOG-001: klog_receive ignores WINDOW_EVENT_DRAG without activating drop",
+                      klog_receive(&drag_ev, &klog_dirty) && !terminal_drop.over);
+                item_count = terminal_op_items(&terminal, ids);
+                for (int k = 0; k < item_count; k++)
+                        has_paste |= ids[k] == UI_SELECT_PASTE;
+                check("KLOG-001: touch selection actions omit Paste in klog mode", !has_paste);
+                to_shell[0] = 'x', to_shell_length = 1;
+                terminal_tick(-1, &other);
+                check("KLOG-001: terminal_tick does not fail with gone=true in klog mode when to_shell has bytes", !terminal.gone);
+                to_shell_length = 0;
+                terminal.reading = reading_was, terminal.gone = gone_was, terminal.phase = phase_was, terminal.master = master_was;
+        }
+        {
+                /* TERM-002: term_paste in canonical line-editing mode anchors before showing and accepts on newline. */
+                b32 unanchored_ok, multiline_ok;
+
+                term_line_editing(false);
+                term_bytes("\x1b[H\x1b[2J", 7);
+                to_shell_length = 0;
+                term_line_editing(true);
+                term_paste((const p8 address_to) "hello", 5);
+                unanchored_ok = *row_length(0) >= 5 && row_cells(0)[0].character == 'h' && row_cells(0)[4].character == 'o';
+                check("TERM-002: term_paste in canonical mode anchors and renders text without a prior keypress", unanchored_ok);
+
+                term_line_editing(false);
+                term_bytes("\x1b[H\x1b[2J", 7);
+                to_shell_length = 0;
+                term_line_editing(true);
+                term_paste((const p8 address_to) "foo\nbar", 7);
+                multiline_ok = to_shell_length == 4 && !memory_compare(to_shell, "foo\n", 4) &&
+                               *row_length(0) == 3 && row_cells(0)[0].character == 'f' && row_cells(0)[2].character == 'o' &&
+                               *row_length(1) >= 3 && row_cells(1)[0].character == 'b' && row_cells(1)[2].character == 'r';
+                check("TERM-002: term_paste with newline in canonical mode accepts the line instead of inserting raw LF", multiline_ok);
+                term_line_editing(false);
+                to_shell_length = 0;
+        }
+        {
+                /* TERM-003: CSI_DCH clamps to COLUMNS after narrow resize and DCH/ICH unpair wide characters. */
+                unsigned int width_was = terminal.width, height_was = terminal.height;
+                b32 dch_clamped, dch_unpaired, ich_unpaired;
+
+                terminal_configure(-1, terminal.pad + 100 * terminal.cell_w + 4, height_was);
+                term_bytes("\x1b[H\x1b[2J", 7);
+                for (int c = 0; c < 80; c++)
+                        term_bytes("a", 1);
+                for (int c = 0; c < 20; c++)
+                        term_bytes("Z", 1);
+                terminal_configure(-1, terminal.pad + 80 * terminal.cell_w + 4, height_was);
+                term_bytes("\x1b[1;80H\x1b[P", 10);
+                dch_clamped = row_cells(0)[79].character != 'Z';
+                check("TERM-003: CSI_DCH does not pull off-screen cells past COLUMNS into the visible row", dch_clamped);
+
+                term_bytes("\x1b[H\x1b[2J\xe4\xb8\xad\x1b[1;2H\x1b[P", 20);
+                dch_unpaired = (row_cells(0)[0].flags & WINDOW_CELL_WIDE) == 0;
+                check("TERM-003: CSI_DCH unpairs wide character when deleting its right half", dch_unpaired);
+
+                term_bytes("\x1b[H\x1b[2J\xe4\xb8\xad\x1b[1;2H\x1b[@", 20);
+                ich_unpaired = (row_cells(0)[0].flags & WINDOW_CELL_WIDE) == 0 &&
+                               (row_cells(0)[2].flags & WINDOW_CELL_WIDE_RIGHT) == 0;
+                check("TERM-003: CSI_ICH unpairs wide character when inserting at its right half", ich_unpaired);
+
+                terminal_configure(-1, width_was, height_was);
+        }
+        {
+                /* TERM-004: terminal_select_text resets fc=0 when fl scrolls past history and guards ll==window->head. */
+                p8 address_to text = null;
+                positive room = 0, length;
+                b32 clamped_ok, head_ok;
+
+                terminal_view_live();
+                for (unsigned int line = 0; line < window->history + 5; line++)
+                        term_bytes("0123456789abcdef\r\n", 18);
+                terminal_view_live();
+                terminal.select_box = false;
+                terminal_select_set(terminal_place(window->head - window->history - 2, 10),
+                                    terminal_place(window->head - window->history, 16));
+                length = terminal_select_text(&text, &room);
+                clamped_ok = length == 16 && text && !memory_compare(text, "0123456789abcdef", 16);
+                array_store_release(text, room, length);
+                check("TERM-004: terminal_select_text resets fc=0 when selection start scrolls past history", clamped_ok);
+
+                terminal_select_set(terminal_place(window->head - 1, 0), terminal_place(window->head, 4));
+                length = terminal_select_text(&text, &room);
+                head_ok = length == 0;
+                array_store_release(text, room, length);
+                check("TERM-004: terminal_select_text returns 0 when selection end equals window->head", head_ok);
+                terminal_select_clear();
         }
 #endif
 }

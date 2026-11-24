@@ -142,6 +142,8 @@ static b32 klog_receive(const struct window_event address_to event, b32 address_
 {
         int lines = 0;
 
+        if (event->type == WINDOW_EVENT_CLIP || event->type == WINDOW_EVENT_DRAG)
+                return true;
         if (event->type != WINDOW_EVENT_KEY)
                 return terminal_receive(-1, event, dirty);
 

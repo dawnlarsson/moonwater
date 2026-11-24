@@ -606,11 +606,14 @@ static void terminal_span(const struct window_cell address_to now, const struct 
 
 static unsigned int terminal_mix(unsigned int ink, unsigned int paper) { return ((ink & 0xfefefe) >> 1) + ((paper & 0xfefefe) >> 1); }
 static b32 terminal_recording(void) { return terminal.ui.scene != null; }
+static unsigned int terminal_grid_w(void) { return terminal.width > terminal.pad ? terminal.width - terminal.pad : 0; }
+static unsigned int terminal_grid_h(void) { return terminal.height > terminal.pad_y ? terminal.height - terminal.pad_y : 0; }
 
-static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned int width, unsigned int height, unsigned int colour)
+static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned int width, unsigned int height, unsigned int colour, b32 grid)
 {
+        unsigned int bound_w = grid ? terminal_grid_w() : terminal.width, bound_h = grid ? terminal_grid_h() : terminal.height;
         long x0 = x < 0 ? 0 : (long)x, y0 = y < 0 ? 0 : (long)y;
-        long x2 = min((long)x + (long)width, (long)terminal.width), y2 = min((long)y + (long)height, (long)terminal.height);
+        long x2 = min((long)x + (long)width, (long)bound_w), y2 = min((long)y + (long)height, (long)bound_h);
 
         if (x0 >= x2 || y0 >= y2)
                 return;
@@ -634,21 +637,21 @@ static void terminal_grid_slide(unsigned int address_to whole, int shift)
         if (!shift)
                 return;
         if (up >= height)
-                return terminal_fill(whole, 0, 0, width, height, whole[0]);
+                return terminal_fill(whole, 0, 0, width, height, whole[0], false);
         if (shift > 0)
         {
                 unsigned int colour = whole[0];
 
                 for (unsigned int y = height; y-- > up;)
                         memory_copy(whole + (positive)y * pitch, whole + (positive)(y - up) * pitch, (positive)width * sizeof(unsigned int));
-                terminal_fill(whole, 0, 0, width, up, colour);
+                terminal_fill(whole, 0, 0, width, up, colour, false);
         }
         else
         {
                 unsigned int colour = whole[(positive)(height - 1) * pitch];
 
                 memory_copy_rect_u32(whole, pitch, whole + (positive)up * pitch, pitch, width, height - up);
-                terminal_fill(whole, 0, (int)(height - up), width, up, colour);
+                terminal_fill(whole, 0, (int)(height - up), width, up, colour, false);
         }
 }
 
@@ -663,12 +666,12 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
                 int rule = terminal.grid.underline ? terminal.grid.baseline - (int)((terminal.grid.underline + 0x8000) >> 16)
                                                    : terminal.grid.baseline + (int)thick;
                 rule = rule + (int)thick > (int)terminal.cell_h ? (int)(terminal.cell_h - thick) : rule;
-                terminal_fill(pixels, x, y + rule, width, thick, ink);
+                terminal_fill(pixels, x, y + rule, width, thick, ink, true);
         }
         if (cell->flags & WINDOW_CELL_STRIKE)
-                terminal_fill(pixels, x, y + terminal.grid.baseline - (int)((terminal.grid.x_height / 2 + 0x8000) >> 16), width, thick, ink);
+                terminal_fill(pixels, x, y + terminal.grid.baseline - (int)((terminal.grid.x_height / 2 + 0x8000) >> 16), width, thick, ink, true);
         if (cell->flags & WINDOW_CELL_BAR)
-                terminal_fill(pixels, x, y, caret ? caret : terminal.cell_w / 8 ? terminal.cell_w / 8 : 1, terminal.cell_h, ink);
+                terminal_fill(pixels, x, y, caret ? caret : terminal.cell_w / 8 ? terminal.cell_w / 8 : 1, terminal.cell_h, ink, true);
 }
 
 #define TERMINAL_BANDS 8
@@ -684,7 +687,7 @@ static struct terminal_painter terminal_painters[TERMINAL_BANDS];
 static void terminal_rec_glyphs(struct terminal_painter address_to painter, unsigned int address_to pixels, unsigned int from,
                                 unsigned int count, b32 heavy, p32 flags, int y, unsigned int ink, unsigned int paper)
 {
-        font_target target = {pixels, terminal.pitch, (b32)terminal.width, (b32)terminal.height};
+        font_target target = {pixels, terminal.pitch, (b32)terminal_grid_w(), (b32)terminal_grid_h()};
 
         if (pixels != terminal.rec_grid)
                 return (void)(terminal.ui.scene->lost = UI_LOST_TERM_FONT);
@@ -699,7 +702,7 @@ static void terminal_rec_glyphs(struct terminal_painter address_to painter, unsi
 static void terminal_rec_wide(struct terminal_painter address_to painter, unsigned int address_to pixels, unsigned int from, b32 heavy,
                               p32 flags, unsigned int code, int y, unsigned int ink, unsigned int paper)
 {
-        font_target target = {pixels, terminal.pitch, (b32)terminal.width, (b32)terminal.height};
+        font_target target = {pixels, terminal.pitch, (b32)terminal_grid_w(), (b32)terminal_grid_h()};
 
         if (pixels != terminal.rec_grid)
                 return (void)(terminal.ui.scene->lost = UI_LOST_TERM_FONT);
@@ -717,7 +720,7 @@ static p32 terminal_style(const struct window_cell address_to cell)
 
 static void terminal_blanks(unsigned int address_to pixels, unsigned int from, unsigned int count, int y, unsigned int colour)
 {
-        terminal_fill(pixels, (int)(from * terminal.cell_w), y, count * terminal.cell_w, terminal.cell_h, colour);
+        terminal_fill(pixels, (int)(from * terminal.cell_w), y, count * terminal.cell_w, terminal.cell_h, colour, true);
 }
 
 #define TERMINAL_PLAIN_OUT (WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT | WINDOW_CELL_HIDDEN | WINDOW_CELL_SELECTED | \
@@ -759,7 +762,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                          const struct window_cell address_to now, const struct window_cell address_to old,
                          unsigned int first, unsigned int last)
 {
-        font_target target = {pixels, terminal.pitch, (b32)terminal.width, (b32)terminal.height};
+        font_target target = {pixels, terminal.pitch, (b32)terminal_grid_w(), (b32)terminal_grid_h()};
         int y = (int)(row * terminal.cell_h);
         unsigned int run = 0, run_from = 0, run_colour = 0;
         unsigned int glyphs = 0, glyphs_from = 0, glyphs_ink = 0, glyphs_paper = 0, glyphs_bits = 0;
@@ -893,7 +896,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                                           (b32)(at * terminal.cell_w), y, ink, paper);
                 }
                 else
-                        terminal_fill(pixels, (int)(at * terminal.cell_w), y, cells * terminal.cell_w, terminal.cell_h, paper);
+                        terminal_fill(pixels, (int)(at * terminal.cell_w), y, cells * terminal.cell_w, terminal.cell_h, paper, true);
                 if (decor && here && !terminal_caret_block)
                 {
                         struct window_cell rest = *cell, own = *cell;
@@ -938,15 +941,15 @@ static void terminal_margin(unsigned int address_to whole, const struct window_c
 
         terminal_band(row, &top, &height);
         if (!first)
-                terminal_fill(whole, 0, (int)top, terminal.pad, height, terminal_ground(frame, row, 0));
+                terminal_fill(whole, 0, (int)top, terminal.pad, height, terminal_ground(frame, row, 0), false);
         if (!row)
                 for (unsigned int column = first; column < last; column++)
                         terminal_fill(whole, (int)(terminal.pad + column * terminal.cell_w), 0, terminal.cell_w,
-                                      terminal.pad_y, terminal_ground(frame, 0, column));
+                                      terminal.pad_y, terminal_ground(frame, 0, column), false);
         if (row + 1 == ROWS && terminal.height > below)
                 for (unsigned int column = first; column < last; column++)
                         terminal_fill(whole, (int)(terminal.pad + column * terminal.cell_w), (int)below, terminal.cell_w,
-                                      terminal.height - below, terminal_ground(frame, row, column));
+                                      terminal.height - below, terminal_ground(frame, row, column), false);
 }
 
 static unsigned int terminal_bar_from(void)
@@ -967,7 +970,7 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
         for (unsigned int row = 0; row < ROWS; row++)
                 terminal_band(row, &top, &height),
                 terminal_fill(whole, (int)x, (int)top, terminal.width > x ? terminal.width - x : 0, height,
-                              terminal_ground(frame, row, COLUMNS - 1));
+                              terminal_ground(frame, row, COLUMNS - 1), false);
         if (terminal.width < UI_SCROLL_WIDTH * (unsigned int)terminal_scale() / 100 || total <= shown)
                 return;
         kit = terminal_kit(whole);
@@ -1710,10 +1713,14 @@ static positive terminal_select_text(p8 address_to address_to into, positive add
         if (!terminal_selecting())
                 return 0;
         terminal_select_span(&fl, &fc, &ll, &lc);
-        if (window->head - ll > window->history)
+        if (window->head - ll == 0 || window->head - ll > window->history)
                 return 0;
         if (window->head - fl > window->history)
+        {
                 fl = window->head - window->history;
+                if (!terminal.select_box)
+                        fc = 0;
+        }
         for (unsigned int line = fl;; line++)
         {
                 unsigned int slot = line % window->history, stored = min(window_lengths(window)[slot], window->stride), start, stop, finish;
@@ -1758,7 +1765,7 @@ static fn terminal_clip_act(int action)
 {
         if (action == 1)
                 terminal_copy(WINDOWS_CLIP_CLIPBOARD);
-        else if (action == 2)
+        else if (action == 2 && !terminal.reading)
                 windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
         else if (action == 3)
                 terminal.select_box = false,
@@ -1779,7 +1786,7 @@ static fn terminal_menu_open(int x, int y, b32 touch)
 
         m->count = 0;
         ui_menu_clip_rows(m, TERMINAL_MENU_COPY, "Ctrl+Shift+C", terminal_selecting() ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_PASTE,
-                          "Ctrl+Shift+V", 0, TERMINAL_MENU_ALL, null, 0);
+                          "Ctrl+Shift+V", terminal.reading ? UI_MENU_DISABLED : 0, TERMINAL_MENU_ALL, null, 0);
         ui_popmenu_build(m, specs, (int)(sizeof(specs) / sizeof(specs[0])));
         ui_popmenu_open(&terminal_menu, &terminal.own, &terminal.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
@@ -1848,7 +1855,8 @@ static int terminal_op_items(void address_to self, int address_to ids)
         (void)self;
         if (terminal_selecting())
                 ids[count++] = UI_SELECT_COPY;
-        ids[count++] = UI_SELECT_PASTE;
+        if (!terminal.reading)
+                ids[count++] = UI_SELECT_PASTE;
         if (terminal.sel_anchor != terminal_place(terminal_oldest(), 0) || terminal.sel_active != terminal_place(window->head - 1, window->stride))
                 ids[count++] = UI_SELECT_ALL;
         return count;
@@ -1934,7 +1942,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         if (mouse_mode && !shift && (event->type == WINDOW_EVENT_BUTTON ? (event->flags & WINDOW_KEY_DOWN) || !s->dragging : !s->dragging))
                 return s->dragging = false;
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_MIDDLE && (event->flags & WINDOW_KEY_DOWN))
-                return windows_clip_ask(&terminal.own, WINDOWS_CLIP_PRIMARY), true;
+                return terminal.reading ? true : (windows_clip_ask(&terminal.own, WINDOWS_CLIP_PRIMARY), true);
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
@@ -2475,7 +2483,7 @@ static long terminal_tick(long timeout, long address_to other)
                 else
                         terminal.title_owed = true;
         }
-        if (!terminal.gone && !term_send(terminal.master))
+        if (!terminal.reading && !terminal.gone && !term_send(terminal.master))
                 terminal.gone = true;
         if (touched_bottom > touched_top)
                 terminal.changed = true;

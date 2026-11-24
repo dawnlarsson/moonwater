@@ -443,11 +443,14 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
                 return FONT_BAD;
 
         face->units = font_u16(face, at[HEAD] + 18);
-        face->long_loca = (p8)font_u16(face, at[HEAD] + 50);
+        p32 long_loca = font_u16(face, at[HEAD] + 50);
         face->glyphs = font_u16(face, at[MAXP] + 4);
         face->metrics = font_u16(face, at[HHEA] + 34);
+        if (face->units < 16 || face->units > 16384 || long_loca > 1 || !face->glyphs || !face->metrics)
+                return FONT_BAD;
+        face->long_loca = (p8)long_loca;
         positive covered = length[LOCA] / (face->long_loca ? 4 : 2);
-        if (face->units < 16 || face->units > 16384 || face->long_loca > 1 || !face->glyphs || !face->metrics || covered < 2)
+        if (covered < 2)
                 return FONT_BAD;
 
         if (face->glyphs > covered - 1)
@@ -3608,20 +3611,21 @@ static fn font_order_marks(font_item address_to items, p32 n, p8 arabic)
                                         if (font_mccc(items[from].code) > cc)
                                                 continue;
 
-                                        p32 to = from;
+                                        p32 last = from;
 
-                                        while (to < stop && font_mccc(items[to].code) == cc && font_arabic_modifier(items[to].code))
-                                                to++;
-                                        if (from == to)
-                                                continue;
+                                        while (last < stop && font_mccc(items[last].code) == cc)
+                                                last++;
+                                        for (p32 k = from; k < last; k++)
+                                        {
+                                                if (!font_arabic_modifier(items[k].code))
+                                                        continue;
+                                                font_item one = items[k];
 
-                                        font_item moved[32];
-
-                                        memory_copy(moved, items + from, (to - from) * sizeof(font_item));
-                                        memory_copy(items + at + (to - from), items + at, (from - at) * sizeof(font_item));
-                                        memory_copy(items + at, moved, (to - from) * sizeof(font_item));
-                                        at += to - from;
-                                        from = to;
+                                                if (k > at)
+                                                        memory_copy(items + at + 1, items + at, (k - at) * sizeof(font_item));
+                                                items[at++] = one;
+                                        }
+                                        from = last;
                                 }
                         }
                 }

@@ -275,6 +275,8 @@ static fn reach(unsigned int r, unsigned int to)
                 cells_blank(r, address_to length, to - address_to length), address_to length = to;
 }
 
+static fn unpair(struct window_cell address_to cells, unsigned int length, unsigned int at);
+
 static fn open_gap(unsigned int at, unsigned int count)
 {
         unsigned int address_to length = row_length(row), last;
@@ -288,7 +290,11 @@ static fn open_gap(unsigned int at, unsigned int count)
         last = min(address_to length + count, COLUMNS);
         reach(row, last);
         cells = row_cells(row);
+        if (cells[at].flags & WINDOW_CELL_WIDE_RIGHT)
+                unpair(cells, address_to length, at), cells[at].character = ' ', cells[at].flags &= (unsigned short)~WINDOW_CELL_WIDE_RIGHT;
         memory_copy(cells + at + count, cells + at, (positive)(last - at - count) * sizeof(struct window_cell));
+        if (last == COLUMNS && (cells[COLUMNS - 1].flags & WINDOW_CELL_WIDE))
+                cells[COLUMNS - 1].character = ' ', cells[COLUMNS - 1].flags &= (unsigned short)~WINDOW_CELL_WIDE;
         cells_clear(row, at, min(count, last - at));
         touch(row);
 }
@@ -1286,14 +1292,19 @@ HOT static fn csi_final(unsigned int final)
                 unsigned int address_to length, last, gone;
                 struct window_cell address_to cells;
 
-                if (paper_set() && column < COLUMNS)
+                if (column >= COLUMNS)
+                        break;
+                if (paper_set())
                         reach(row, COLUMNS);
-                length = row_length(row), cells = row_cells(row), last = address_to length;
+                length = row_length(row), cells = row_cells(row), last = min(address_to length, COLUMNS);
                 if (column >= last)
                         break;
                 gone = min(a, last - column);
+                unpair(cells, last, column);
+                if (gone > 1)
+                        unpair(cells, last, column + gone - 1);
                 memory_copy(cells + column, cells + column + gone, (positive)(last - column - gone) * sizeof(struct window_cell));
-                if (paper_set())
+                if (paper_set() || address_to length > COLUMNS)
                         cells_clear(row, last - gone, gone);
                 else
                         address_to length = last - gone;
@@ -2124,21 +2135,25 @@ static fn line_accept()
 #define KEY_ENTER 28
 #define KEY_KPENTER 96
 
+static fn line_anchor_start(void)
+{
+        if (line_anchored)
+                return;
+        positive prompt;
+
+        line_anchor = window->head - ROWS + row;
+        line_anchor_column = column < COLUMNS ? column : COLUMNS - 1;
+        prompt = line_anchor_column;
+        if (array_store_reserve(line_prompt, line_prompt_room, line_prompt_length, prompt, 64))
+                memory_copy_apart(line_prompt, row_cells(row), prompt * sizeof(*line_prompt)), line_prompt_length = prompt;
+        else
+                line_prompt_length = 0;
+        line_anchored = true, line_drawn = 0;
+}
+
 static b32 line_key(unsigned int character, unsigned int code)
 {
-        if (!line_anchored)
-        {
-                positive prompt;
-
-                line_anchor = window->head - ROWS + row;
-                line_anchor_column = column < COLUMNS ? column : COLUMNS - 1;
-                prompt = line_anchor_column;
-                if (array_store_reserve(line_prompt, line_prompt_room, line_prompt_length, prompt, 64))
-                        memory_copy_apart(line_prompt, row_cells(row), prompt * sizeof(*line_prompt)), line_prompt_length = prompt;
-                else
-                        line_prompt_length = 0;
-                line_anchored = true, line_drawn = 0;
-        }
+        line_anchor_start();
         switch (code)
         {
         case KEY_LEFT:   character = 2; break;
@@ -2341,9 +2356,20 @@ static fn SPARE term_paste(const p8 address_to text, positive length)
         {
                 memory_utf8_state state = {0, 0, 0};
 
+                line_anchor_start();
                 for (positive at = 0; at < size; at++)
                         if (memory_utf8_feed(address_of state, filtered[at]) > 0)
-                                line_insert(state.value == '\r' ? '\n' : state.value);
+                        {
+                                if (state.value == '\r')
+                                {
+                                        line_show();
+                                        line_accept();
+                                        if (at + 1 < size)
+                                                line_anchor_start();
+                                }
+                                else if (state.value == '\t' || state.value >= ' ')
+                                        line_insert(state.value);
+                        }
                 return line_show();
         }
         if (bracketed_paste)
