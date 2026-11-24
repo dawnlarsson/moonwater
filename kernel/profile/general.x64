@@ -1,0 +1,14 @@
+#
+# general on x86-64: what only an x86-64 machine has.
+#
+# Intel's Volume Management Device. A machine whose firmware has Intel RST
+# or VMD on (many OEM Alder Lake and later machines ship so) puts its NVMe
+# drives, and on some its SATA ports, behind a host bridge of their own,
+# a RAID-class device (8086:467f on Alder Lake), and the disks are not on
+# the PCI bus anywhere else. Without the driver the machine saw no disk at
+# all: ecstatic-elk, an Alder Lake Celeron, booted with only zram0 in
+# /proc/partitions, and ahci, which matches the device's class, failed its
+# probe (error -12). With it the drives behind the bridge come up as
+# NVMe and AHCI devices of their own domain.
+#
+CONFIG_VMD=y
