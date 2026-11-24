@@ -2262,6 +2262,9 @@ static void compositor_leave(int row)
         compositor_osk_held[row] = 0;
         compositor_owed_drop(row);
         compositor_owner[row] = 0;
+        // Whatever took the row before, its controls go with it: a kit window that takes a row an X window had (the mixer after Aseprite)
+        // is not read for a bar, and keeps the kit's own buttons.
+        compositor_controls[row] = (struct compositor_controls_row){0, 0, 0, 0};
         for (int o = 0; o < (int)compositor_rows_in_use; o++)
                 if (compositor_owner[o] == row + 1)
                         compositor_owner[o] = 0;

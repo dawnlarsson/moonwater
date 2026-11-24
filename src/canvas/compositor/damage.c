@@ -402,6 +402,8 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         grows to take the whole box in, as often as another box is touched by
         the growing.
 */
+static int compositor_controls_wanted(int row); // the bar's buttons, placed by the picture (compositor_controls, below)
+
 static void compositor_close_join(int *rectangle)
 {
         int grown = 1;
@@ -420,7 +422,7 @@ static void compositor_close_join(int *rectangle)
                         // frame's while it neither glides nor lands (those move or shrink the frame, which is then made whole). Its whole
                         // frame (compositor_frame_of: the picture settled, the land and glide, the lit edge, the preview) was made for every
                         // window at every rectangle damaged, a client's commit included, to find two discs.
-                        if (compositor.glide[row] || compositor.landing[row])
+                        if (compositor.glide[row] || compositor.landing[row] || compositor_controls_wanted(row))
                                 compositor_frame_of(row, &frame);
                         else
                         {
@@ -1549,6 +1551,11 @@ struct compositor_controls_row
 };
 static struct compositor_controls_row *compositor_controls;
 
+static int compositor_controls_wanted(int row)
+{
+        return compositor_controls && row >= 0 && row < COMPOSITOR_ROWS && compositor_controls[row].want;
+}
+
 static void compositor_controls_want(int row, int want)
 {
         if (!compositor_controls || row < 0 || row >= COMPOSITOR_ROWS || compositor_controls[row].want == (want != 0))
@@ -1557,24 +1564,29 @@ static void compositor_controls_want(int row, int want)
         compositor_damage_row(row);
 }
 
-// The buttons on the bar found: as tall as the bar leaves room for, at most the kit's, centred down it, inset a fifth of the bar.
+// The buttons on the bar found, where every window of the system has them: the kit's size and its inset from the top and the side
+// (compositor_close_box's own place) when the bar is as deep as that; on a shallower bar the kit's inset across and as large as the bar
+// leaves room for, centred down it.
 static void compositor_controls_apply(int row, struct compositor_frame *frame)
 {
-        int band, in, side, most;
+        int band, in, box, side;
 
         if (!compositor_controls || !compositor_controls[row].want)
                 return;
         frame->close = frame->minimize = 0;
         if (!(band = compositor_controls[row].band) || compositor.fullscreen[row])
                 return;
-        most = UI_CLOSE * frame->scale / 100;
-        in = band / 5 < UI_CLOSE_IN * frame->scale / 100 ? band / 5 : UI_CLOSE_IN * frame->scale / 100;
-        in = in < 1 ? 1 : in;
-        side = band - 2 * in < most ? band - 2 * in : most;
-        if (side < 4)
-                return;
-        frame->ctl_side = side, frame->ctl_in = in, frame->ctl_top = (band - side) / 2;
+        box = UI_CLOSE * frame->scale / 100, in = UI_CLOSE_IN * frame->scale / 100;
         frame->close = 1, frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
+        if (band >= box + in)
+                return; // the kit's place: ctl_side 0
+        side = band - 2;
+        if (side < 4)
+        {
+                frame->close = frame->minimize = 0;
+                return;
+        }
+        frame->ctl_side = side, frame->ctl_in = in, frame->ctl_top = (band - side) / 2;
 }
 
 static int compositor_controls_near(unsigned int a, unsigned int b)
