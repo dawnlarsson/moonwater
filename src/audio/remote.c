@@ -146,6 +146,8 @@ struct audio_remote_stream
         int fades;
         unsigned long long lost, resyncs, underruns;
         unsigned long long now, raised;      // the pull's time, and when the target was last raised by an underrun
+        unsigned long long said_at;          // the log's last line of it
+        int said_live;
 };
 
 static struct
@@ -567,11 +569,14 @@ static void audio_remote_accept(void)
 
 /* ---- the hooks the loop calls ---- */
 
+// The descriptors the loop waits on for the link, put in `into` (room of them); with no `into`, how many there are.
 static int audio_remote_poll(struct audio_poll *into, int room)
 {
         int n = 0;
 
         audio_remote_listen(AUDIO_REMOTE_NOW());
+        if (!into)
+                return (audio_remote.listen >= 0) + (audio_remote.link >= 0);
         if (audio_remote.listen >= 0 && n < room)
                 into[n++] = (struct audio_poll){audio_remote.listen, AUDIO_POLLIN, 0};
         if (audio_remote.link >= 0 && n < room)
@@ -673,6 +678,19 @@ static void audio_remote_pass(unsigned long long now)
                              (wanted && (row->way == AUDIO_NODE_REMOTE_OUTPUT ? st->out != 0 : st->in && written && st->fades < AUDIO_REMOTE_FADES)
                                   ? AUDIO_NODE_LIVE : 0);
                 row->lost = (unsigned int)st->lost;
+                // The log says when sound starts and stops flowing, and every ten seconds while it does, in numbers.
+                if (!!(row->flags & AUDIO_NODE_LIVE) != st->said_live || ((row->flags & AUDIO_NODE_LIVE) && now - st->said_at >= 10000000000ull))
+                {
+                        st->said_live = !!(row->flags & AUDIO_NODE_LIVE), st->said_at = now;
+                        if (row->way == AUDIO_NODE_REMOTE_SOURCE)
+                                string_format(log, "audio: %s %s: %p us behind its mix there, a buffer of %p blocks, %p concealed, %p underruns, %p resyncs\n",
+                                              row->name, st->said_live ? "plays" : "stopped", (positive)row->latency_us, (positive)st->target,
+                                              (positive)st->lost, (positive)st->underruns, (positive)st->resyncs);
+                        else
+                                string_format(log, "audio: %s %s: %p blocks sent\n", row->name, st->said_live ? "is sent to" : "stopped",
+                                              (positive)st->out_block);
+                        log_flush();
+                }
         }
 }
 
