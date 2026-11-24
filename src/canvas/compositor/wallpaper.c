@@ -20,6 +20,7 @@ static positive compositor_map_file(string_address path, positive address_to siz
 
 static const char *compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH;
 static const char *compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+static const char *compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH;
 static const char *compositor_walls_ask_dir = SETTING_WALLPAPER_ASK_DIR;
 
 struct compositor_wall_line
@@ -37,6 +38,9 @@ static struct
         char (*name)[SETTING_WALLPAPER_NAME]; // the pictures remembered, the most recent first
         unsigned long name_bytes;
         unsigned int names;
+        char (*curated)[SETTING_WALLPAPER_WORD]; // the feed's the command verified (curated:HEX), in the feed's order
+        unsigned long curated_bytes;
+        unsigned int curateds;
         unsigned int gen;   // one more at every change of a word or the list, which the wallpaper is made again for
         unsigned int listed; // and of the list alone, which a picture's miniature is read again for
 } compositor_walls;
@@ -249,7 +253,9 @@ static unsigned int compositor_walls_sum(int list)
         unsigned int sum = 2166136261u;
 
         if (list)
-                return hash_fnv1a(sum ^ compositor_walls.names, compositor_walls.name, (positive)compositor_walls.names * SETTING_WALLPAPER_NAME);
+                return hash_fnv1a(hash_fnv1a(sum ^ compositor_walls.names, compositor_walls.name, (positive)compositor_walls.names * SETTING_WALLPAPER_NAME) ^
+                                      compositor_walls.curateds,
+                                  compositor_walls.curated, (positive)compositor_walls.curateds * SETTING_WALLPAPER_WORD);
         return hash_fnv1a(sum ^ compositor_walls.lines, compositor_walls.line, (positive)compositor_walls.lines * sizeof(compositor_walls.line[0]));
 }
 
@@ -276,6 +282,31 @@ static void compositor_walls_pictures_read(void)
                         memory_copy(compositor_walls.name[compositor_walls.names], text + at, stop - at);
                         if (!compositor_wall_listed(compositor_walls.name[compositor_walls.names]))
                                 compositor_walls.names++;
+                }
+                at = stop + 1;
+        }
+        if (mapped)
+                compositor_call(syscall(munmap), mapped, size, 0, 0, 0, 0);
+        // The feed's, as the command verified them: a line each, the picture's digest in hex and its id.
+        mapped = compositor_map_file((string_address)compositor_walls_curated_path, &size), text = (const char *)mapped;
+        compositor_walls.curateds = 0;
+        for (positive at = 0; mapped && at < size;)
+        {
+                positive stop = at;
+                void *p = compositor_walls.curated;
+                char word[SETTING_WALLPAPER_WORD];
+
+                while (stop < size && text[stop] != '\n')
+                        stop++;
+                memory_zero(word, sizeof(word));
+                if (stop - at > 65 && text[at + 64] == ' ')
+                        memory_copy(word, "curated:", 8), memory_copy(word + 8, text + at, 64);
+                if (setting_wallpaper_word_ok(word, string_length((string_address)word)) &&
+                    mem_buf_grow(&p, &compositor_walls.curated_bytes, (unsigned long)(compositor_walls.curateds + 1) * SETTING_WALLPAPER_WORD,
+                                 MEM_BUF_KEEP | MEM_BUF_GROW_2X))
+                {
+                        compositor_walls.curated = (char (*)[SETTING_WALLPAPER_WORD])p;
+                        memory_copy(compositor_walls.curated[compositor_walls.curateds++], word, SETTING_WALLPAPER_WORD);
                 }
                 at = stop + 1;
         }
@@ -354,7 +385,10 @@ static void compositor_wall_ask_line(char *line)
                 while (*walk && *walk != ' ')
                         walk++;
         }
-        if (count == 2 && string_equals((string_address)word[0], "edit"))
+        // A curated picture fetched (canvas wallpaper curated get): the wallpaper and the miniatures made again with it.
+        if (count == 1 && string_equals((string_address)word[0], "made"))
+                compositor_walls.listed++, compositor_wall_changed();
+        else if (count == 2 && string_equals((string_address)word[0], "edit"))
                 compositor_wall_edit(compositor_space_current_screen(),
                                      string_equals((string_address)word[1], "on") ? 1 : string_equals((string_address)word[1], "off") ? 0 : -1);
         else if (count == 2 && string_equals((string_address)word[0], "current"))
@@ -627,7 +661,7 @@ static void compositor_wall_editor_damage(void)
 // The cards laid out again: their words (the moon's three, the pictures, the folder last) and their rects, in rows of the screen's shape.
 static void compositor_wall_editor_lay(void)
 {
-        unsigned int count = 0, n = 3 + compositor_walls.names + 1, cols, rows;
+        unsigned int count = 0, n = 3 + compositor_walls.names + compositor_walls.curateds + 1, cols, rows;
         const int (*screens)[4] = compositor_screens(&count);
         int screen = compositor_wall_editor.screen, gap = compositor_scenes_gap(), room[4], s[4], width, most;
         long long cw, ch;
@@ -652,6 +686,8 @@ static void compositor_wall_editor_lay(void)
                 string_copy((string_address)compositor_wall_editor.word[3 + at], "picture:");
                 string_append_bounded((p8 *)compositor_wall_editor.word[3 + at], (string_address)compositor_walls.name[at], SETTING_WALLPAPER_WORD);
         }
+        for (unsigned int at = 0; at < compositor_walls.curateds; at++)
+                memory_copy(compositor_wall_editor.word[3 + compositor_walls.names + at], compositor_walls.curated[at], SETTING_WALLPAPER_WORD);
         compositor_wall_editor.word[n - 1][0] = 0;
         // As the overview's Scene cards: a fifth of the room high, the screen's shape; in rows, smaller, when one row would not hold them.
         compositor_room(s, room);
@@ -713,6 +749,8 @@ static int compositor_wall_editor_on_close(int card, int px, int py)
         return compositor_wall_editor_close(card, &x, &y, &side) && px >= x && px < x + side && py >= y && py < y + side;
 }
 
+static void compositor_wall_start_program(string_address *argv);
+
 // The editor opened on a screen (how 1), shut (0), or turned (-1). The overview shuts when it opens, as the editor does when the overview opens.
 static void compositor_wall_edit(int screen, int how)
 {
@@ -732,6 +770,15 @@ static void compositor_wall_edit(int screen, int how)
         taskbar_menu_shut();
         if (compositor_wall_editor.open && compositor_wall_editor.screen != screen)
                 compositor_wall_editor_damage();
+        if (!compositor_wall_editor.open)
+        {
+                // The feed's curated wallpapers asked again (the command keeps the feed it verified and asks the network only when that is
+                // hours old; with no feed that verifies there are none, and the cards are the moon's and the pictures').
+                string_address argv[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "curated",
+                                          (string_address) "fetch", null};
+
+                compositor_wall_start_program(argv);
+        }
         compositor_wall_editor.open = 1, compositor_wall_editor.screen = screen;
         compositor_wall_editor.pressed = 0, compositor_wall_editor.hover = compositor_wall_editor.press_card = -1, compositor_wall_editor.hover_close = 0;
         compositor_wall_editor_lay();
@@ -739,9 +786,11 @@ static void compositor_wall_edit(int screen, int how)
 }
 
 // A program started apart from the compositor, its own session with nothing on its standard files (as compositor_alert_show starts one).
+// The checks start none (compositor_wall_starts 0): what they press is the compositor's half alone.
+static int compositor_wall_starts = 1;
 static void compositor_wall_start_program(string_address *argv)
 {
-        bipolar child = system_fork();
+        bipolar child = compositor_wall_starts ? system_fork() : -1;
 
         if (child < 0)
                 return;
@@ -794,6 +843,14 @@ static void compositor_wall_editor_click(int x, int y)
                 return;
         }
         compositor_wall_put(screen, compositor_wall_current(screen), word);
+        if (!memory_compare(word, "curated:", 8))
+        {
+                // The feed's picture fetched and checked if it is not here yet; the wallpaper is made again with it when it is (the ask made).
+                string_address argv[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "curated",
+                                          (string_address) "get", (string_address)word + 8, null};
+
+                compositor_wall_start_program(argv);
+        }
         compositor_wall_editor_damage();
 }
 

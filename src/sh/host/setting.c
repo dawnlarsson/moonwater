@@ -472,7 +472,7 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         A file that is not a PNG the desktop can read, or one over 64 MiB, is refused before root is asked for.
 */
 #define LOCALE_WALLPAPER_MOST (64ul << 20)
-#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE or forget NAME\n"
+#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE, forget NAME or curated [fetch|get HEX]\n"
 
 #ifndef SHELL_UTILITY_PROGRAM
 static unsigned int address_to ui_png_decode_most(const p8 address_to restrict file, positive size, int address_to restrict width_out,
@@ -755,6 +755,297 @@ static b32 locale_wallpaper_forget(string_address name)
         return 0;
 }
 
+/*
+        canvas wallpaper curated [fetch|get HEX]: the curated wallpapers of the owner's signed feed (src/net/feed.c, MWFD_URL_WALLPAPERS).
+
+        fetch asks the feed again over HTTPS unless the one kept was issued less than LOCALE_CURATED_FRESH ago, verifies it against the pinned
+        key, the highest sequence seen (kept in LOCALE_CURATED_SEQUENCE, so an older feed is refused) and the clock (an expired feed is none)
+        before a byte of it is read, keeps it, and for each wallpaper whose id is a name fetches its thumbnail, checks its size and digest
+        against the feed's, and makes its miniature (curated/HEX.mini, HEX the picture's digest); then the list the compositor shows
+        (SETTING_WALLPAPER_CURATED_PATH). get HEX fetches that wallpaper's picture, checked the same, into curated/HEX.png, and asks the
+        compositor to make the wallpaper again with it. Bare, the wallpapers of the feed kept, verified again. Every failure is closed: no
+        feed that verifies is an empty list and no curated card, and a picture whose digest is not the feed's is never kept. The editor runs
+        fetch when it opens and get when a curated card is pressed.
+*/
+#define LOCALE_CURATED_DIR SETTING_WALLPAPER_DIR "/curated"
+#define LOCALE_CURATED_FEED LOCALE_CURATED_DIR "/feed.mwf"
+#define LOCALE_CURATED_SEQUENCE "/root/feed.wallpapers.sequence"
+#define LOCALE_CURATED_FRESH (6ull * 3600ull)
+#define LOCALE_CURATED_RECORD 93u // the fewest bytes a wallpaper's record is: a feed of more than its body holds is no feed
+
+static p64 locale_curated_now(void)
+{
+        timespec real = {0, 0};
+
+        clock_gettime(CLOCK_REALTIME, address_of real);
+        return real.tv_sec > 0 ? (p64)real.tv_sec : 0;
+}
+
+static fn locale_curated_hex(const p8 address_to bytes, p8 address_to into)
+{
+        static const char digits[] = "0123456789abcdef";
+
+        for (positive at = 0; at < 32; at++)
+                into[2 * at] = (p8)digits[bytes[at] >> 4], into[2 * at + 1] = (p8)digits[bytes[at] & 15];
+        into[64] = end;
+}
+
+static p64 locale_curated_sequence(void)
+{
+        p8 word[24];
+        positive used = 0;
+        p64 value;
+
+        if (host_read_word((string_address)LOCALE_CURATED_SEQUENCE, word, sizeof(word)) <= 0)
+                return 0;
+        value = (p64)string_digits_max(word, 19, address_of used);
+        return used && !word[used] ? value : 0;
+}
+
+// The wallpapers of a verified feed's body, as many as it has (memory_free them with *room); null when its records are not what it says.
+static mwfd_wallpaper address_to locale_curated_items(const p8 address_to bytes, const mwfd_header address_to h, positive address_to room)
+{
+        mwfd_wallpaper address_to items;
+
+        *room = 0;
+        if (!h->count || (positive)h->count > (positive)h->body_len / LOCALE_CURATED_RECORD)
+                return null;
+        *room = (positive)h->count * sizeof(mwfd_wallpaper);
+        if (!(items = (mwfd_wallpaper address_to)memory_checked(*room)))
+                return *room = 0, null;
+        if (!mwfd_decode_wallpapers(bytes + MWFD_HEADER_LEN, h->body_len, h->count, items, h->count))
+                return memory_free(items, *room), *room = 0, null;
+        return items;
+}
+
+// The feed kept, verified again as the network's would be: the pinned key's, at the highest sequence seen, and not expired now.
+static p8 address_to locale_curated_kept(positive address_to used, positive address_to room, mwfd_header address_to h)
+{
+        p8 address_to bytes = locale_wallpaper_text((string_address)LOCALE_CURATED_FEED, used, room);
+
+        if (bytes && !mwfd_verify(bytes, *used, mwfd_pinned_pubkey, MWFD_KIND_WALLPAPERS, locale_curated_sequence(), locale_curated_now(), h))
+        {
+                memory_free(bytes, *room);
+                bytes = null;
+        }
+        return bytes;
+}
+
+// A slice of a verified feed as a string, ended, for a URL or a name (false when it does not fit).
+static bool locale_curated_text(mwfd_slice slice, p8 address_to into, positive room)
+{
+        if (!slice.bytes || (positive)slice.length >= room)
+                return false;
+        memory_copy(into, slice.bytes, slice.length);
+        into[slice.length] = end;
+        return true;
+}
+
+// A PNG of the feed's (verified bytes) unpacked and made a miniature at path.
+static bipolar locale_curated_mini(string_address path, const p8 address_to bytes, positive size)
+{
+        unsigned int address_to picture = null;
+        int width = 0, height = 0;
+        bipolar failed;
+
+#ifndef SHELL_UTILITY_PROGRAM
+        picture = ui_png_decode_most(bytes, size, &width, &height, 16384);
+#endif
+        if (!picture)
+                return -EBADMSG;
+        failed = locale_wallpaper_mini(path, picture, width, height);
+        memory_free(picture, (positive)width * (positive)height * 4);
+        return failed;
+}
+
+// The list the compositor shows: a line a wallpaper of the feed whose miniature is made, or none.
+static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive count)
+{
+        positive room = count * (64 + SETTING_WALLPAPER_NAME + 2) + 1, at = 0;
+        p8 address_to text = (p8 address_to)memory_checked(room);
+        p8 path[sizeof(LOCALE_CURATED_DIR "/") + 64 + 8];
+        file_facts facts;
+        bipolar failed;
+
+        if (!text)
+                return host_fail("canvas wallpaper curated", -ENOMEM);
+        for (positive k = 0; k < count; k++)
+        {
+                if (!setting_wallpaper_name_ok((const char address_to)items[k].id.bytes, items[k].id.length))
+                        continue;
+                locale_curated_hex(items[k].sha256, text + at);
+                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", text + at);
+                string_append_bounded(path, (string_address) ".mini", sizeof(path));
+                if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
+                        continue;
+                at += 64, text[at++] = ' ';
+                memory_copy(text + at, items[k].id.bytes, items[k].id.length), at += items[k].id.length;
+                text[at++] = '\n';
+        }
+        failed = host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, text, at, 0644, true);
+        memory_free(text, room);
+        return failed < 0 ? host_fail("canvas wallpaper curated", failed) : 0;
+}
+
+static b32 locale_curated_fetch(void)
+{
+        positive used = 0, room = 0, items_room = 0, made = 0, digits;
+        p8 address_to kept, url[HTTP_URL_MAX], hex[65], path[sizeof(LOCALE_CURATED_DIR "/") + 64 + 8], word[24];
+        mwfd_header h;
+        mwfd_wallpaper address_to items;
+        http_buffer body;
+        p64 now = locale_curated_now();
+        bipolar status, failed;
+
+        host_need_root();
+        kept = locale_curated_kept(address_of used, address_of room, address_of h);
+        if (!kept || h.issued_at + LOCALE_CURATED_FRESH <= now)
+        {
+                status = mwfd_fetch((string_address)MWFD_URL_WALLPAPERS, MWFD_KIND_WALLPAPERS, locale_curated_sequence(), now, address_of body, address_of h);
+                if (status && !kept)
+                {
+                        // Closed: no feed that verifies, no curated wallpaper.
+                        (void)host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, (p8 address_to) "", 0, 0644, true);
+                        return host_refuse("no curated wallpapers: the feed at %s %s\n", (string_address)MWFD_URL_WALLPAPERS,
+                                           status == MWFD_FETCH_UNVERIFIED ? (string_address) "does not verify against the pinned key (none is pinned yet), or is old or expired"
+                                                                           : (string_address) "could not be fetched");
+                }
+                if (!status)
+                {
+                        if (kept)
+                                memory_free(kept, room);
+                        failed = host_make_directory((string_address)SETTING_WALLPAPER_DIR, 0755, false);
+                        if (failed >= 0)
+                                failed = host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false);
+                        if (failed >= 0)
+                                failed = host_write_file((string_address)LOCALE_CURATED_FEED, body.bytes, body.used, 0644, true);
+                        digits = positive_into_string(word, h.sequence), word[digits] = '\n';
+                        if (failed >= 0)
+                                failed = host_write_file((string_address)LOCALE_CURATED_SEQUENCE, word, digits + 1, 0644, true);
+                        kept = body.bytes, used = body.used, room = body.room;
+                        memory_fill(address_of body, 0, sizeof(body));
+                        if (failed < 0)
+                                return memory_free(kept, room), host_fail("canvas wallpaper curated", failed);
+                }
+        }
+        if (!(items = locale_curated_items(kept, &h, address_of items_room)))
+        {
+                memory_free(kept, room);
+                (void)host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, (p8 address_to) "", 0, 0644, true);
+                return host_refuse("the curated feed verified but its wallpapers are not well made: none is shown\n");
+        }
+        for (positive k = 0; k < h.count; k++)
+        {
+                file_facts facts;
+
+                if (!setting_wallpaper_name_ok((const char address_to)items[k].id.bytes, items[k].id.length))
+                        continue;
+                locale_curated_hex(items[k].sha256, hex);
+                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", hex);
+                string_append_bounded(path, (string_address) ".mini", sizeof(path));
+                if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
+                {
+                        made++;
+                        continue;
+                }
+                if (!locale_curated_text(items[k].thumb_url, url, sizeof(url)) ||
+                    mwfd_fetch_asset((string_address)url, items[k].thumb_bytes, items[k].thumb_sha256, address_of body))
+                        continue;
+                if (locale_curated_mini(path, body.bytes, body.used) >= 0)
+                        made++;
+                byte_store_release(address_of body);
+        }
+        failed = locale_curated_list(items, h.count);
+        memory_free(items, items_room), memory_free(kept, room);
+        if (failed)
+                return failed;
+        host_say(log, host_label "%p curated wallpapers, from the feed of sequence %p\n", made, (positive)h.sequence);
+        return 0;
+}
+// canvas wallpaper curated get HEX: the picture of the feed's wallpaper whose digest is HEX, fetched and checked, then made the wallpaper.
+static b32 locale_curated_get(string_address want)
+{
+        positive used = 0, room = 0, items_room = 0;
+        p8 address_to kept, url[HTTP_URL_MAX], hex[65], path[sizeof(LOCALE_CURATED_DIR "/") + 64 + 8];
+        mwfd_header h;
+        mwfd_wallpaper address_to items = null;
+        http_buffer body;
+        file_facts facts;
+        bipolar failed = 0;
+        bool found = false;
+
+        p8 word[SETTING_WALLPAPER_WORD];
+
+        string_join(word, sizeof(word), (string_address) "curated:", want);
+        if (!setting_wallpaper_word_ok((const char address_to)word, string_length(word)))
+                return host_refuse("a curated wallpaper is the 64 hex digits of its digest, as canvas wallpaper curated lists them\n");
+        host_need_root();
+        if (!(kept = locale_curated_kept(address_of used, address_of room, address_of h)) || !(items = locale_curated_items(kept, &h, address_of items_room)))
+        {
+                if (kept)
+                        memory_free(kept, room);
+                return host_refuse("no curated wallpapers: no feed kept verifies (canvas wallpaper curated fetch)\n");
+        }
+        for (positive k = 0; k < h.count && !found; k++)
+        {
+                locale_curated_hex(items[k].sha256, hex);
+                if (!string_equals((string_address)hex, want) || !setting_wallpaper_name_ok((const char address_to)items[k].id.bytes, items[k].id.length))
+                        continue;
+                found = true;
+                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", hex);
+                string_append_bounded(path, (string_address) ".png", sizeof(path));
+                if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
+                        break;
+                if (items[k].bytes > LOCALE_WALLPAPER_MOST || !locale_curated_text(items[k].url, url, sizeof(url)))
+                        failed = -EFBIG;
+                else if (!(failed = mwfd_fetch_asset((string_address)url, items[k].bytes, items[k].sha256, address_of body)))
+                {
+                        failed = host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false);
+                        if (failed >= 0)
+                                failed = host_write_file(path, body.bytes, body.used, 0644, true);
+                        byte_store_release(address_of body);
+                }
+        }
+        memory_free(items, items_room), memory_free(kept, room);
+        if (!found)
+                return host_refuse("no wallpaper of the feed has the digest %s\n", want);
+        if (failed < 0)
+                return host_refuse("the curated wallpaper %s could not be fetched, or is not the picture the feed names\n", want);
+        if (locale_wallpaper_ask((string_address) "made\n"))
+                return 1;
+        host_say(log, host_label "the curated wallpaper %s is kept as %s\n", want, path);
+        return 0;
+}
+
+// canvas wallpaper curated: the feed kept, verified again, its wallpapers each a line.
+static b32 locale_curated_say(void)
+{
+        positive used = 0, room = 0, items_room = 0;
+        p8 address_to kept, hex[65], id[SETTING_WALLPAPER_NAME], title[96], author[96], license[48];
+        mwfd_header h;
+        mwfd_wallpaper address_to items = null;
+
+        if (!(kept = locale_curated_kept(address_of used, address_of room, address_of h)) || !(items = locale_curated_items(kept, &h, address_of items_room)))
+        {
+                if (kept)
+                        memory_free(kept, room);
+                host_say(log, host_label "curated none: no feed kept verifies against the pinned key (canvas wallpaper curated fetch)\n");
+                return 0;
+        }
+        for (positive k = 0; k < h.count; k++)
+        {
+                if (!setting_wallpaper_name_ok((const char address_to)items[k].id.bytes, items[k].id.length) ||
+                    !locale_curated_text(items[k].id, id, sizeof(id)) || !locale_curated_text(items[k].title, title, sizeof(title)) ||
+                    !locale_curated_text(items[k].author, author, sizeof(author)) || !locale_curated_text(items[k].license, license, sizeof(license)))
+                        continue;
+                locale_curated_hex(items[k].sha256, hex);
+                host_say(log, host_label "curated %s: %w by %w, %w (curated:%s)\n", (string_address)id, writer_terminal_name, (string_address)title,
+                         writer_terminal_name, (string_address)author, writer_terminal_name, (string_address)license, (string_address)hex);
+        }
+        memory_free(items, items_room), memory_free(kept, room);
+        return 0;
+}
+
 static b32 locale_canvas_wallpaper(string_address address_to arguments, positive count)
 {
         p8 line[SETTING_WALLPAPER_WORD + WINDOWS_OUTPUT_NAME + 32], word[SETTING_WALLPAPER_WORD], screen[WINDOWS_OUTPUT_NAME];
@@ -808,6 +1099,12 @@ static b32 locale_canvas_wallpaper(string_address address_to arguments, positive
                 return locale_wallpaper_remember(arguments[4]);
         if (string_equals(form, "forget") && count == 5)
                 return locale_wallpaper_forget(arguments[4]);
+        if (string_equals(form, "curated") && count == 4)
+                return locale_curated_say();
+        if (string_equals(form, "curated") && count == 5 && string_equals(arguments[4], "fetch"))
+                return locale_curated_fetch();
+        if (string_equals(form, "curated") && count == 6 && string_equals(arguments[4], "get"))
+                return locale_curated_get(arguments[5]);
         if (string_equals(form, "scene") && (count == 6 || count == 7))
         {
                 positive used = 0, number = string_digits_max(arguments[4], 4, address_of used), length = string_length(arguments[5]);

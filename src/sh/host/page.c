@@ -77,6 +77,7 @@ static const host_row host_rows[] = {
     {null, "canvas wallpaper scene N CHOICE [SCREEN]", "Scene N's: auto, dark, white (the moon) or a picture's name, on SCREEN or the one you are on", 'b'},
     {null, "canvas wallpaper picture FILE", "remember a PNG and make it the wallpaper of the Scene you are on", 'b'},
     {null, "canvas wallpaper forget NAME", "remember a picture no more; a Scene that had it has the moon", 'b'},
+    {null, "canvas wallpaper curated [fetch|get HEX]", "the feed's curated wallpapers: those kept, fetched and verified anew, or one's picture by its digest", 'b'},
     {null, "canvas record [SECONDS]", "record the presents of the compositor for SECONDS (1 to 10, 3 by default)", 'b'},
     {null, "canvas record report", "the report of the presents: the paths, flips, late and held presents", 'b'},
     {null, "canvas shot", "the screen as the compositor last composed it, to a file of the record (root)", 'b'},

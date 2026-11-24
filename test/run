@@ -5738,6 +5738,8 @@ net_fast()
         job hard python3 test/differential.py --harness wire_constants
         job hard python3 test/differential.py --harness net_dependency_closure
         job hard python3 test/differential.py --harness security_hygiene
+        #       The signed feeds' client (src/net/feed.c): verified and decoded against the bytes of the feed's own encoder.
+        job hard one_target_lane x86_64 freestanding_checks_one feed feed
         jobs_wait
         return 0
 }

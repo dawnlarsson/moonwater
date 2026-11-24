@@ -412,4 +412,55 @@ static bool mwfd_verify_asset(const p8 address_to data, positive length,
         return crypto_same(digest, (p8 address_to)expected_sha256, 32);
 }
 
+/*
+        A feed fetched and verified, and an asset it names fetched and checked: net.c's HTTPS client in its confined child (the certificate
+        checked, redirects followed, never down to plain HTTP, the body held in memory to the most the caller allows), and nothing of the
+        bytes read before mwfd_verify has said they are the pinned key's, of the kind asked, at the least sequence asked (the highest seen,
+        so an older feed is none), and not expired now. A URL that is not https:// is refused. Zero and the bytes in *body (byte_store_release
+        them); negative, and nothing, else. The caller keeps what it trusts (the sequence, the bytes for a later start with no network): this
+        is the network's half only, for every feed of MWFD_BASE_URL.
+*/
+#ifdef STANDARD_MODERN_C_NET_APART
+#define MWFD_FETCH_BAD_STATUS (-71) // EPROTO: the server answered but not 200
+#define MWFD_FETCH_UNVERIFIED (-74) // EBADMSG: the bytes are not the pinned key's feed, or not this one, or old, or expired
+
+static bipolar mwfd_fetch_bytes(string_address url, positive most, http_buffer address_to body)
+{
+        http_manners how = http_manners_wget;
+        b32 code = 0;
+        bipolar status;
+
+        memory_fill(body, 0, sizeof(*body));
+        if (string_length(url) < 9 || memory_compare(url, "https://", 8))
+                return MWFD_FETCH_UNVERIFIED;
+        how.agent = (string_address) "Moonwater", how.body_most = most;
+        status = http_run_apart(url, address_of how, true, -1, body, address_of code, null, null);
+        if (!status && code != 200)
+                status = MWFD_FETCH_BAD_STATUS;
+        if (status)
+                byte_store_release(body);
+        return status;
+}
+
+static bipolar mwfd_fetch(string_address url, p8 kind, p64 min_sequence, p64 now_seconds, http_buffer address_to body,
+                          mwfd_header address_to header)
+{
+        bipolar status = mwfd_fetch_bytes(url, MWFD_MAX_BYTES, body);
+
+        if (!status && !mwfd_verify(body->bytes, body->used, mwfd_pinned_pubkey, kind, min_sequence, now_seconds, header))
+                byte_store_release(body), status = MWFD_FETCH_UNVERIFIED;
+        return status;
+}
+
+// An asset of a verified feed (a wallpaper, its thumbnail), held to the feed's byte count for it and to its SHA-256.
+static bipolar mwfd_fetch_asset(string_address url, p32 bytes, const p8 address_to sha256, http_buffer address_to body)
+{
+        bipolar status = mwfd_fetch_bytes(url, (positive)bytes, body);
+
+        if (!status && !mwfd_verify_asset(body->bytes, body->used, bytes, sha256))
+                byte_store_release(body), status = MWFD_FETCH_UNVERIFIED;
+        return status;
+}
+#endif
+
 #endif // STANDARD_MODERN_C_NET_FEED

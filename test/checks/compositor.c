@@ -3438,7 +3438,7 @@ static void check_wallpaper_ground(void)
     memory_copy(scenes_path, "/tmp/moonwater-walls-s.", 23), scenes_path[23 + length] = 0;
     memory_copy(pictures_path, scenes_path, 24 + length), pictures_path[21] = 'p';
     system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
-    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path;
+    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path, compositor_walls_curated_path = pictures_path;
     compositor_zero();
     windows_scratch_zero(table_at);
     table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u;
@@ -3510,8 +3510,9 @@ static void check_wallpaper_ground(void)
         removed = string_equals((string_address)compositor_wall_word_of(compositor_space_find(second)), "dark") &&
                   compositor_wall_find("-", 2) < 0 && compositor_walls.lines == 1;
     }
-    compositor_walls.lines = compositor_walls.names = 0;
+    compositor_walls.lines = compositor_walls.names = compositor_walls.curateds = 0;
     compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+    compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH;
     system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
     compositor_wall_rows.ready = 0;
     compositor_zero();
@@ -3534,19 +3535,22 @@ static void check_wallpaper_ground(void)
 static void check_wallpaper_editor(void)
 {
     static struct windows *table_scratch;
-    static char scenes_path[64], pictures_path[64];
+    static char scenes_path[64], pictures_path[64], curated_path[64];
     static struct compositor_frame frames[16];
     static unsigned int rows[16];
     struct windows *const table_at = windows_scratch_table(&table_scratch);
     unsigned int made = 0, px, want;
     positive length;
-    b32 opened, veiled, framed, chose, shut, overview, pointed;
+    b32 opened, veiled, framed, chose, shut, overview, pointed, curated;
 
     length = positive_into_string((p8 address_to)scenes_path + 23, (positive)system_call(syscall(getpid)));
     memory_copy(scenes_path, "/tmp/moonwater-walls-e.", 23), scenes_path[23 + length] = 0;
     memory_copy(pictures_path, scenes_path, 24 + length), pictures_path[21] = 'p';
+    memory_copy(curated_path, scenes_path, 24 + length), curated_path[21] = 'c';
     system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
-    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path;
+    system_remove_at(AT_FDCWD, (string_address)curated_path, 0);
+    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path, compositor_walls_curated_path = curated_path;
+    compositor_wall_starts = 0; // no program started: the feed's fetch, Files, the forget
     compositor_zero();
     windows_scratch_zero(table_at);
     table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u, table_at->motion = 1; // reduced: no spring
@@ -3578,15 +3582,28 @@ static void check_wallpaper_editor(void)
     compositor.pointer_x = 160, compositor.pointer_y = 190;
     compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
     shut = !compositor_wall_editing();
+    // The feed's the command verified: a card each after the pictures, before the folder; a line that is not one is none.
+    {
+        static const char list[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef dusk\nnot a line\n";
+
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)curated_path, list, sizeof(list) - 1, 0644);
+        compositor_walls_read();
+        compositor_wall_edit(0, 1);
+        curated = compositor_wall_editor.cards == 5 && !compositor_wall_editor.word[4][0] &&
+                  string_equals((string_address)compositor_wall_editor.word[3], "curated:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        compositor_wall_edit(0, 0);
+    }
     compositor_wall_edit(0, 1);
     compositor_scenes_open(0);
     overview = !compositor_wall_editing() && compositor.scenes.open;
     compositor_scenes_shut();
     compositor_wall_editor.shown = 0, compositor_wall_editor.open = 0;
     compositor_wall_veil_keep();
-    compositor_walls.lines = compositor_walls.names = 0;
+    compositor_walls.lines = compositor_walls.names = compositor_walls.curateds = 0;
     compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+    compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH, compositor_wall_starts = 1;
     system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    system_remove_at(AT_FDCWD, (string_address)curated_path, 0);
     compositor_wall_drop();
     compositor_wall_rows.ready = 0;
     compositor_zero();
@@ -3598,6 +3615,7 @@ static void check_wallpaper_editor(void)
     check("wallpaper editor: a card pressed is the Scene's word, and the editor stays open", chose);
     check("wallpaper editor: a press off the cards shuts it", shut);
     check("wallpaper editor: the overview opened shuts it", overview);
+    check("wallpaper editor: a curated wallpaper the command verified is a card after the pictures, before the folder", curated);
 }
 
 /*

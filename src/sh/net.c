@@ -13,6 +13,7 @@
 #define STANDARD_MODERN_C_SHELL_NET
 
 #include "../net/net.c"
+#include "../net/feed.c"      // the signed feeds of MWFD_BASE_URL: verified and decoded, and fetched (canvas wallpaper curated's)
 #include "../net/discovery.c" // how this machine is reached; it brings host_words.h, the state words read below
 
 #define NET_STATE_DIR "/run/moonwater"

@@ -69,6 +69,7 @@ moonwater canvas wallpaper edit [on|off]  the editor over the desktop, of the Sc
 moonwater canvas wallpaper scene N CHOICE [SCREEN]  Scene N's: auto, dark, white (the moon) or a picture's name, on SCREEN or the one you are on
 moonwater canvas wallpaper picture FILE  remember a PNG and make it the wallpaper of the Scene you are on
 moonwater canvas wallpaper forget NAME  remember a picture no more; a Scene that had it has the moon
+moonwater canvas wallpaper curated [fetch|get HEX]  the feed's curated wallpapers: those kept, fetched and verified anew, or one's picture by its digest
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 

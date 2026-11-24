@@ -142,6 +142,9 @@
 // of the feed's is curated/HEX.png by its digest.
 #define SETTING_WALLPAPER_SCENES_PATH "/root/canvas.wallpaper.scenes"
 #define SETTING_WALLPAPER_PICTURES_PATH "/root/canvas.wallpaper.pictures"
+// The feed's curated wallpapers the command verified (canvas wallpaper curated fetch): a line each, the digest of its picture in hex and its id,
+// the compositor's to show; empty while no feed verifies (the key not pinned yet, an expired feed), so none is shown that is not the feed's.
+#define SETTING_WALLPAPER_CURATED_PATH "/root/canvas.wallpaper.curated"
 #define SETTING_WALLPAPER_DIR "/root/wallpapers"
 #define SETTING_WALLPAPER_ASK_DIR "/run/moonwater"
 #define SETTING_WALLPAPER_ASK "wallpaper.ask."
