@@ -970,6 +970,9 @@ SHELL_OPTIMIZE_OS_POP
 #if MOONWATER_UI_NOTICES
 #include "../canvas/ui/notices.c"
 #endif
+#if MOONWATER_UI_SOFTWARE
+#include "../canvas/ui/software.c"
+#endif
 #if MOONWATER_UI_KEYBOARD
 #include "../canvas/ui/osk.c"
 #endif

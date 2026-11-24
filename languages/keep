@@ -8,6 +8,7 @@ src/canvas/ui/files.c	Files
 src/canvas/ui/files.c	Enter
 src/canvas/ui/files.c	Delete
 src/canvas/ui/mixer.c	Mixer
+src/canvas/ui/software.c	Software
 src/canvas/ui/mixer.c	Automatic
 src/canvas/ui/settings.c	Normal
 src/canvas/ui/settings.c	Turned right
@@ -92,6 +93,8 @@ src/canvas/ui/ui.c	Files
 src/canvas/ui/ui.c	files folders browser directory
 src/canvas/ui/ui.c	Editor
 src/canvas/ui/ui.c	editor code text hex
+src/canvas/ui/ui.c	Software
+src/canvas/ui/ui.c	software apps store install packages flatpak pacman apt dnf apk
 src/canvas/ui/ui.c	Install Moonwater
 src/canvas/ui/ui.c	install installer disk drive
 src/canvas/ui/ui.c	GenericName

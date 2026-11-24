@@ -29,6 +29,7 @@
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 # machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
+# machine-made 2026-11-24 (the software window), not yet read by a person: software_cannot_start software_confirm_remove software_confirm_take_away software_failed_one software_gone_one software_install software_installed software_installed_one software_installing software_none_installed software_not_set_up software_nothing software_other software_reading software_ready software_remove software_removed_one software_removing software_search software_search_first software_search_hint software_set_up software_set_up_one software_setting_up software_sources software_take_away software_taking_away software_title software_unavailable software_update software_updated_one software_updating software_wait =Software
 @language es
 @name Español
 @translated machine
@@ -522,6 +523,39 @@ settings_unknown	9fb9	desconocido
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 settings_virtual_refused	4202	un dispositivo virtual no puede activar esto: use un teclado o ratón conectado a la máquina, o moonwater ssh en un terminal de root
+software_cannot_start	69cd	No se pudo iniciar el comando
+software_confirm_remove	be0f	quitar %s
+software_confirm_take_away	8d4f	eliminar el bowl %s y todo lo que contiene
+software_failed_one	b799	%1$s no terminó: %2$s
+software_gone_one	807a	Se eliminó %s
+software_install	bd40	Instalar
+software_installed	a76f	Apps instaladas
+software_installed_one	f749	Se instaló %s
+software_installing	7c32	Instalando %s...
+software_none_installed	1735	Todavía no hay apps instaladas en los bowls
+software_not_set_up	eacf	Sin configurar
+software_nothing	827a	No se encontró nada
+software_other	91a5	Una carpeta de /bowls
+software_reading	f847	Leyendo...
+software_ready	3294	Listo
+software_remove	901d	Quitar
+software_removed_one	3aa3	Se quitó %s
+software_removing	cd30	Quitando %s...
+software_search	a2c9	Buscar
+software_search_first	d018	Escriba lo que busca en el campo de búsqueda y pulse Enter
+software_search_hint	3c7b	Buscar apps y paquetes
+software_set_up	6abc	Configurar
+software_set_up_one	f014	Se configuró %s
+software_setting_up	86be	Configurando %s...
+software_sources	88d9	Gestores de paquetes
+software_take_away	42d8	Eliminar
+software_taking_away	604b	Eliminando %s...
+software_title	f4b0	Software
+software_unavailable	aaa9	No disponible
+software_update	0e94	Actualizar
+software_updated_one	e487	%s está al día
+software_updating	ec0d	Actualizando %s...
+software_wait	2b27	Espere a que termine el cambio en curso
 taskbar_tab_exit	44a5	Salir
 taskbar_tab_pin	d57f	Anclar a la barra de tareas
 taskbar_tab_stop	3684	Forzar detención
@@ -743,6 +777,7 @@ ui_field_full	fe02	no cabe más
 =Simultaneous threads (SMT)	e836	Hilos simultáneos (SMT)
 =Slow keys (ms, off or default)	8f8e	Teclas lentas (ms, off o default)
 =Smooth mouse wheel	0dab	Rueda del ratón suave
+=Software	f4b0	Software
 =Sound	9a34	Sonido
 =Sound server	84bf	Servidor de sonido
 =Start the desktop	be4c	Iniciar el escritorio

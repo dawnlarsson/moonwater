@@ -574,8 +574,9 @@ static fn check_launcher(void)
 
         launcher_type_text("");
         check("launcher: with nothing typed there are no rows, and the grid is the desktop's programs in their order",
-              launcher_list_is("") && launcher.app_count == 6 && launcher.apps[0] == 0 && launcher.apps[1] == 1 && launcher.apps[2] == 2 &&
-                  launcher.apps[3] == 3 && launcher.apps[4] == 4 && launcher.apps[5] == 5); // Editor (f197336fd, 11-20) is the sixth kit program
+              launcher_list_is("") && launcher.app_count == 7 && launcher.apps[0] == 0 && launcher.apps[1] == 1 && launcher.apps[2] == 2 &&
+                  launcher.apps[3] == 3 && launcher.apps[4] == 4 && launcher.apps[5] == 5 &&
+                  launcher.apps[6] == 6); // Editor (f197336fd, 11-20) is the sixth kit program, Software the seventh
         launcher_type_text("ls");
         check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
               launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.list.focus == 0);

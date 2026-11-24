@@ -2147,7 +2147,7 @@ static unsigned int taskbar_proc_kind(int self, int pid, const char *comm)
             {"sessionbus", TASKBAR_PROC_SYSTEM}, {"bowl", TASKBAR_PROC_SYSTEM}, {"osk", TASKBAR_PROC_SYSTEM}, {"kthreadd", TASKBAR_PROC_SYSTEM},
             {"terminal", TASKBAR_PROC_DESKTOP}, {"settings", TASKBAR_PROC_DESKTOP}, {"launcher", TASKBAR_PROC_DESKTOP}, {"klog", TASKBAR_PROC_DESKTOP},
             {"mixer", TASKBAR_PROC_DESKTOP}, {"notices", TASKBAR_PROC_DESKTOP}, {"files", TASKBAR_PROC_DESKTOP}, {"gallery", TASKBAR_PROC_DESKTOP},
-            {"editor", TASKBAR_PROC_DESKTOP}, {"identify", TASKBAR_PROC_DESKTOP},
+            {"editor", TASKBAR_PROC_DESKTOP}, {"identify", TASKBAR_PROC_DESKTOP}, {"software", TASKBAR_PROC_DESKTOP},
             {"steam", TASKBAR_PROC_LAUNCHER}, {"lutris", TASKBAR_PROC_LAUNCHER}, {"heroic", TASKBAR_PROC_LAUNCHER}, {"bottles", TASKBAR_PROC_LAUNCHER},
             {"prismlauncher", TASKBAR_PROC_LAUNCHER}, {"itch", TASKBAR_PROC_LAUNCHER}, {"legendary", TASKBAR_PROC_LAUNCHER},
             {"steamwebhelper", TASKBAR_PROC_LAUNCHER_HELPER}, {"steamerrorrepor", TASKBAR_PROC_LAUNCHER_HELPER},

@@ -491,6 +491,39 @@ settings_unknown	9fb9	unknown
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENTS]
 settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
+software_cannot_start	69cd	The command could not start
+software_confirm_remove	be0f	remove %s
+software_confirm_take_away	8d4f	take away the %s bowl and everything in it
+software_failed_one	b799	%1$s did not finish: %2$s
+software_gone_one	807a	%s is taken away
+software_install	bd40	Install
+software_installed	a76f	Installed apps
+software_installed_one	f749	%s is installed
+software_installing	7c32	Installing %s...
+software_none_installed	1735	No apps are installed in the bowls yet
+software_not_set_up	eacf	Not set up
+software_nothing	827a	Nothing found
+software_other	91a5	A folder of /bowls
+software_reading	f847	Reading...
+software_ready	3294	Ready
+software_remove	901d	Remove
+software_removed_one	3aa3	%s is removed
+software_removing	cd30	Removing %s...
+software_search	a2c9	Search
+software_search_first	d018	Type what to look for in the search field, then press Enter
+software_search_hint	3c7b	Search apps and packages
+software_set_up	6abc	Set up
+software_set_up_one	f014	%s is set up
+software_setting_up	86be	Setting up %s...
+software_sources	88d9	Package managers
+software_take_away	42d8	Take away
+software_taking_away	604b	Taking away %s...
+software_title	f4b0	Software
+software_unavailable	aaa9	Unavailable
+software_update	0e94	Update
+software_updated_one	e487	%s is up to date
+software_updating	ec0d	Updating %s...
+software_wait	2b27	Wait for the change running to finish
 taskbar_tab_exit	44a5	Exit
 taskbar_tab_pin	d57f	Pin to taskbar
 taskbar_tab_stop	3684	Force stop
@@ -712,6 +745,7 @@ ui_field_full	fe02	that is as much as it holds
 =Simultaneous threads (SMT)	e836	Simultaneous threads (SMT)
 =Slow keys (ms, off or default)	8f8e	Slow keys (ms, off or default)
 =Smooth mouse wheel	0dab	Smooth mouse wheel
+=Software	f4b0	Software
 =Sound	9a34	Sound
 =Sound server	84bf	Sound server
 =Start the desktop	be4c	Start the desktop

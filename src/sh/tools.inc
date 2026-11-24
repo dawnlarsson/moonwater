@@ -236,6 +236,9 @@ SHELL_TOOL(SYSTEM, mixer, mixer_main)
 #if MOONWATER_UI_NOTICES
 SHELL_TOOL(SYSTEM, notices, notices_main)
 #endif
+#if MOONWATER_UI_SOFTWARE
+SHELL_TOOL(SYSTEM, software, software_main)
+#endif
 #if MOONWATER_UI_KEYBOARD
 SHELL_TOOL(SYSTEM, osk, osk_main)
 #endif

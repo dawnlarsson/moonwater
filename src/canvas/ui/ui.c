@@ -151,7 +151,12 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #define MOONWATER_UI_INSTALLER 1
 #endif
 
-#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES || MOONWATER_UI_INSTALLER)
+// Software: the apps of the bowls, searched for, installed and removed, and their package managers (ui/software.c, moonwater apps).
+#ifndef MOONWATER_UI_SOFTWARE
+#define MOONWATER_UI_SOFTWARE 1
+#endif
+
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES || MOONWATER_UI_INSTALLER || MOONWATER_UI_SOFTWARE)
 
 #endif /* MOONWATER_CANVAS_UI_SWITCHES */
 
@@ -6965,6 +6970,39 @@ LANGUAGE_ID(settings_unknown, "unknown") \
 LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
+LANGUAGE_ID(software_cannot_start, "The command could not start") \
+LANGUAGE_ID(software_confirm_remove, "remove %s") \
+LANGUAGE_ID(software_confirm_take_away, "take away the %s bowl and everything in it") \
+LANGUAGE_ID(software_failed_one, "%1$s did not finish: %2$s") \
+LANGUAGE_ID(software_gone_one, "%s is taken away") \
+LANGUAGE_ID(software_install, "Install") \
+LANGUAGE_ID(software_installed, "Installed apps") \
+LANGUAGE_ID(software_installed_one, "%s is installed") \
+LANGUAGE_ID(software_installing, "Installing %s...") \
+LANGUAGE_ID(software_none_installed, "No apps are installed in the bowls yet") \
+LANGUAGE_ID(software_not_set_up, "Not set up") \
+LANGUAGE_ID(software_nothing, "Nothing found") \
+LANGUAGE_ID(software_other, "A folder of /bowls") \
+LANGUAGE_ID(software_reading, "Reading...") \
+LANGUAGE_ID(software_ready, "Ready") \
+LANGUAGE_ID(software_remove, "Remove") \
+LANGUAGE_ID(software_removed_one, "%s is removed") \
+LANGUAGE_ID(software_removing, "Removing %s...") \
+LANGUAGE_ID(software_search, "Search") \
+LANGUAGE_ID(software_search_first, "Type what to look for in the search field, then press Enter") \
+LANGUAGE_ID(software_search_hint, "Search apps and packages") \
+LANGUAGE_ID(software_set_up, "Set up") \
+LANGUAGE_ID(software_set_up_one, "%s is set up") \
+LANGUAGE_ID(software_setting_up, "Setting up %s...") \
+LANGUAGE_ID(software_sources, "Package managers") \
+LANGUAGE_ID(software_take_away, "Take away") \
+LANGUAGE_ID(software_taking_away, "Taking away %s...") \
+LANGUAGE_ID(software_title, "Software") \
+LANGUAGE_ID(software_unavailable, "Unavailable") \
+LANGUAGE_ID(software_update, "Update") \
+LANGUAGE_ID(software_updated_one, "%s is up to date") \
+LANGUAGE_ID(software_updating, "Updating %s...") \
+LANGUAGE_ID(software_wait, "Wait for the change running to finish") \
 LANGUAGE_ID(taskbar_tab_exit, "Exit") \
 LANGUAGE_ID(taskbar_tab_pin, "Pin to taskbar") \
 LANGUAGE_ID(taskbar_tab_stop, "Force stop") \
@@ -20265,7 +20303,7 @@ static int ui_icon_of(const char *app_id)
         static const struct { const char *name; int which; } known[] = {
                 {"settings", UI_ICON_SETTINGS}, {"files", UI_ICON_FILES}, {"terminal", UI_ICON_TERMINAL}, {"editor", UI_ICON_EDITOR},
                 {"mixer", UI_ICON_MIXER}, {"mixer-quick", UI_ICON_MIXER}, {"launcher", UI_ICON_APPS}, {"klog", UI_ICON_NOTE},
-                {"notices", UI_ICON_NOTE}, {"gallery", UI_ICON_WINDOW},
+                {"notices", UI_ICON_NOTE}, {"gallery", UI_ICON_WINDOW}, {"software", UI_ICON_APPS},
         };
         for (unsigned int at = 0; app_id && at < sizeof(known) / sizeof(known[0]); at++)
                 if (string_equals((string_address)app_id, (string_address)known[at].name))
@@ -20702,6 +20740,9 @@ static const struct ui_kit_program
 #endif
 #if MOONWATER_UI_EDITOR
         {"Editor", "editor code text hex", "/editor", 0},
+#endif
+#if MOONWATER_UI_SOFTWARE
+        {"Software", "software apps store install packages flatpak pacman apt dnf apk", "/software", 0},
 #endif
 #if MOONWATER_UI_INSTALLER // last, and listed only where the launcher offers it
         {"Install Moonwater", "install installer disk drive", "/installer", 0},
@@ -21939,6 +21980,34 @@ static unsigned int address_to ui_apps_picture_make(const char address_to root, 
                 picture = ui_apps_picture_decode(handle, side_out);
         system_close(handle);
         return picture;
+}
+
+/*
+        An icon's picture by its name, looked for in a bowl's root as an entry's is (the root's themes and pixmaps, its Flatpak exports,
+        then Flathub's AppStream, where every app of the remote has one by its id): UI_APP_PICTURE each way at most, premultiplied, its
+        side into *side_out; null none. For an app that is no entry of the registry yet (a search's result). It reads and decodes a file,
+        so a window makes it off its draw (in its tick, a few a pass), keeps it at the size it draws, and gives the picture back with
+        ui_icon_picture_free.
+*/
+static unsigned int address_to ui_icon_picture_make(const char address_to root, const char address_to icon, int address_to side_out)
+{
+        bipolar handle;
+        unsigned int address_to picture;
+
+        *side_out = 0;
+        if (!root || !root[0] || !icon || !icon[0] || string_first_of((string_address)icon, '/'))
+                return null;
+        if ((handle = ui_apps_picture_open(root, icon, false)) < 0)
+                return null;
+        picture = ui_apps_picture_decode(handle, side_out);
+        system_close(handle);
+        return picture;
+}
+
+static fn ui_icon_picture_free(unsigned int address_to picture)
+{
+        if (picture)
+                memory_free(picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
 }
 
 /* ---- apps: their pictures kept across processes ----

@@ -30,6 +30,7 @@
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 # machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
+# machine-made 2026-11-24 (the software window), not yet read by a person: software_cannot_start software_confirm_remove software_confirm_take_away software_failed_one software_gone_one software_install software_installed software_installed_one software_installing software_none_installed software_not_set_up software_nothing software_other software_reading software_ready software_remove software_removed_one software_removing software_search software_search_first software_search_hint software_set_up software_set_up_one software_setting_up software_sources software_take_away software_taking_away software_title software_unavailable software_update software_updated_one software_updating software_wait =Software
 @language ar
 @name العربية
 @translated machine
@@ -523,6 +524,39 @@ settings_unknown	9fb9	غير معروف
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	الفعل [الوسائط]
 settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
+software_cannot_start	69cd	تعذّر بدء الأمر
+software_confirm_remove	be0f	إزالة %s
+software_confirm_take_away	8d4f	حذف bowl %s وكل ما فيه
+software_failed_one	b799	لم يكتمل %1$s: %2$s
+software_gone_one	807a	تم حذف %s
+software_install	bd40	تثبيت
+software_installed	a76f	التطبيقات المثبتة
+software_installed_one	f749	تم تثبيت %s
+software_installing	7c32	يجري تثبيت %s
+software_none_installed	1735	لا توجد تطبيقات مثبتة في bowl بعد
+software_not_set_up	eacf	غير مُعدّ
+software_nothing	827a	لم يُعثر على شيء
+software_other	91a5	مجلد في /bowls
+software_reading	f847	تجري القراءة...
+software_ready	3294	جاهز
+software_remove	901d	إزالة
+software_removed_one	3aa3	تمت إزالة %s
+software_removing	cd30	تجري إزالة %s
+software_search	a2c9	بحث
+software_search_first	d018	اكتب ما تبحث عنه في حقل البحث، ثم اضغط Enter
+software_search_hint	3c7b	ابحث عن التطبيقات والحزم
+software_set_up	6abc	إعداد
+software_set_up_one	f014	تم إعداد %s
+software_setting_up	86be	يجري إعداد %s
+software_sources	88d9	مديرو الحزم
+software_take_away	42d8	حذف
+software_taking_away	604b	يجري حذف %s
+software_title	f4b0	البرامج
+software_unavailable	aaa9	غير متاح
+software_update	0e94	تحديث
+software_updated_one	e487	أصبح %s محدَّثًا
+software_updating	ec0d	يجري تحديث %s
+software_wait	2b27	انتظر حتى ينتهي التغيير الجاري
 taskbar_tab_exit	44a5	خروج
 taskbar_tab_pin	d57f	تثبيت في شريط المهام
 taskbar_tab_stop	3684	إيقاف إجباري
@@ -744,6 +778,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Simultaneous threads (SMT)	e836	الخيوط المتزامنة (SMT)
 =Slow keys (ms, off or default)	8f8e	المفاتيح البطيئة (ms، off أو default)
 =Smooth mouse wheel	0dab	عجلة الماوس السلسة
+=Software	f4b0	البرامج
 =Sound	9a34	الصوت
 =Sound server	84bf	خادم الصوت
 =Start the desktop	be4c	تشغيل سطح المكتب

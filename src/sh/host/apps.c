@@ -8,8 +8,9 @@
                 moonwater apps remove SOURCE NAME       and gone again: a package's name, or an installed app's id
                 moonwater apps update [SOURCE]          every source brought up to date, or one
                 moonwater apps sources                  the sources: each one's state, its bowl, the bowl's size
-                moonwater apps source setup BOWL        a bowl set up (its distribution downloaded and checked)
-                moonwater apps source remove BOWL yes   a whole bowl gone, everything installed in it with it
+                moonwater apps source setup BOWL        a bowl set up (its distribution downloaded and checked), or flatpak
+                moonwater apps source remove BOWL yes   a whole bowl gone, everything installed in it with it; flatpak, its
+                                                        profile and its apps, Arch's bowl kept
 
         A source is a package manager of a bowl (pacman in Arch's, apk in Alpine's, apt in Debian's, dnf in Fedora's) or
         Flatpak, whose installation is in Arch's bowl (the flatpak profile). Every install, removal and update runs in the
@@ -886,7 +887,24 @@ static b32 apps_bowl_setup(string_address name)
 {
         const struct bowl_distro address_to distro = bowl_find_distro(name);
 
+        // Flatpak is a profile of Arch's bowl, not a bowl: set up is its install (the bowl first, where it is not there).
+        if (string_equals(name, "flatpak"))
+                return apps_make_ready(apps_source_find("flatpak"));
         return distro ? bowl_setup_distro(distro) : host_refuse("no bowl is called %s\n", name);
+}
+
+// Flatpak's removal: its profile's (flatpak, its Flathub remote and every Flatpak app with it), Arch's bowl left as it is.
+static b32 apps_flatpak_remove(bool yes)
+{
+        const struct bowl_profile address_to profile = bowl_find_profile("flatpak");
+
+        if (!profile)
+                return host_refuse("this build has no flatpak profile\n");
+        if (!apps_ready(apps_source_find("flatpak")))
+                return host_refuse("flatpak is not set up\n");
+        if (!yes)
+                return host_refuse("this takes away Flatpak and every Flatpak app with it: moonwater apps source remove flatpak yes\n");
+        return bowl_profile_remove(profile);
 }
 
 /* ---- the verb ---- */
@@ -944,6 +962,8 @@ static b32 host_apps(string_address address_to arguments, positive count)
         if (string_equals(sub, "source") && (count == 5 || count == 6) && string_equals(arguments[3], "remove"))
         {
                 host_need_root();
+                if (string_equals(arguments[4], "flatpak"))
+                        return apps_flatpak_remove(count == 6 && string_equals(arguments[5], HOST_YES));
                 return apps_bowl_remove(arguments[4], count == 6 && string_equals(arguments[5], HOST_YES));
         }
         return host_usage();

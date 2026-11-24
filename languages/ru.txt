@@ -29,6 +29,7 @@
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 # machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
+# machine-made 2026-11-24 (the software window), not yet read by a person: software_cannot_start software_confirm_remove software_confirm_take_away software_failed_one software_gone_one software_install software_installed software_installed_one software_installing software_none_installed software_not_set_up software_nothing software_other software_reading software_ready software_remove software_removed_one software_removing software_search software_search_first software_search_hint software_set_up software_set_up_one software_setting_up software_sources software_take_away software_taking_away software_title software_unavailable software_update software_updated_one software_updating software_wait =Software
 @language ru
 @name Русский
 @translated machine
@@ -522,6 +523,39 @@ settings_unknown	9fb9	неизвестно
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ГЛАГОЛ [АРГУМЕНТЫ]
 settings_virtual_refused	4202	виртуальное устройство не может это включить: клавиатура или мышь машины, или moonwater ssh в терминале root
+software_cannot_start	69cd	Не удалось запустить команду
+software_confirm_remove	be0f	удалить %s
+software_confirm_take_away	8d4f	стереть bowl %s и всё, что в нём
+software_failed_one	b799	%1$s не завершено: %2$s
+software_gone_one	807a	Стёрто: %s
+software_install	bd40	Установить
+software_installed	a76f	Установленные приложения
+software_installed_one	f749	Установлено: %s
+software_installing	7c32	Установка %s...
+software_none_installed	1735	В bowl пока не установлено ни одного приложения
+software_not_set_up	eacf	Не настроено
+software_nothing	827a	Ничего не найдено
+software_other	91a5	Папка в /bowls
+software_reading	f847	Чтение...
+software_ready	3294	Готово
+software_remove	901d	Удалить
+software_removed_one	3aa3	Удалено: %s
+software_removing	cd30	Удаление %s...
+software_search	a2c9	Поиск
+software_search_first	d018	Введите в поле поиска, что ищете, и нажмите Enter
+software_search_hint	3c7b	Поиск приложений и пакетов
+software_set_up	6abc	Настроить
+software_set_up_one	f014	Настроено: %s
+software_setting_up	86be	Настройка %s...
+software_sources	88d9	Менеджеры пакетов
+software_take_away	42d8	Стереть
+software_taking_away	604b	Стирание %s...
+software_title	f4b0	Программы
+software_unavailable	aaa9	Недоступно
+software_update	0e94	Обновить
+software_updated_one	e487	Обновлено: %s
+software_updating	ec0d	Обновление %s...
+software_wait	2b27	Дождитесь окончания текущего изменения
 taskbar_tab_exit	44a5	Выход
 taskbar_tab_pin	d57f	Закрепить на панели задач
 taskbar_tab_stop	3684	Принудительно остановить
@@ -743,6 +777,7 @@ ui_field_full	fe02	больше не помещается
 =Simultaneous threads (SMT)	e836	Одновременные потоки (SMT)
 =Slow keys (ms, off or default)	8f8e	Медленные клавиши (мс, off или default)
 =Smooth mouse wheel	0dab	Плавное колесо мыши
+=Software	f4b0	Программы
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковой сервер
 =Start the desktop	be4c	Запускать рабочий стол
