@@ -3560,8 +3560,8 @@ static void check_wallpaper_editor(void)
     compositor_wall_finish();
     compositor_spaces_ensure();
     compositor_wall_edit(0, 1);
-    opened = compositor_wall_editing() && compositor_wall_editor.cards == 4 && compositor_wall_editor_shown() &&
-             string_equals((string_address)compositor_wall_editor.word[1], "dark") && !compositor_wall_editor.word[3][0];
+    opened = compositor_wall_editing() && compositor_wall_editor.cards == 2 && compositor_wall_editor_shown() &&
+             string_equals((string_address)compositor_wall_editor.word[0], "auto") && !compositor_wall_editor.word[1][0];
     compositor_wall_veil_keep();
     px = compositor_wall ? compositor_wall[100 * 320 + 160] : 0;
     want = ((px >> 16 & 255) * 245 + 127) / 255;
@@ -3569,15 +3569,27 @@ static void check_wallpaper_editor(void)
              compositor_wall_editor.veil[100 * 320 + 160] >> 24 == 245 &&
              ((compositor_wall_editor.veil[100 * 320 + 160] >> 16 & 255) + 1 >= want && (compositor_wall_editor.veil[100 * 320 + 160] >> 16 & 255) <= want + 1);
     made = compositor_wall_editor_frames(frames, rows, 0, 16);
-    framed = made == 1 + 4 + 2 && frames[0].blend && frames[0].pixels == compositor_wall_editor.veil && frames[0].width == 320 &&
-             frames[1].pixels && frames[1].edge == (compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu) && frames[2].edge != frames[1].edge &&
-             frames[4].fill && !frames[4].pixels;
-    // The dark moon's card pressed and let go: the Scene's word, and the editor still open.
-    compositor.pointer_x = compositor_wall_editor.card[1][0] + compositor_wall_editor.card[1][2] / 2;
-    compositor.pointer_y = compositor_wall_editor.card[1][1] + compositor_wall_editor.card[1][3] / 2;
-    pointed = compositor_wall_editor_point(compositor.pointer_x, compositor.pointer_y) && compositor_wall_editor_takes(COMPOSITOR_BTN_LEFT, 1);
-    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
-    chose = compositor_wall_editing() && string_equals((string_address)compositor_wall_word(0, 1), "dark");
+    framed = made == 1 + 2 + 1 + 2 && frames[0].blend && frames[0].pixels == compositor_wall_editor.veil && frames[0].width == 320 &&
+             frames[1].pixels && frames[1].edge == (compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu) &&
+             frames[2].pixels && frames[2].radius == frames[2].height / 2 &&
+             frames[3].fill && !frames[3].pixels;
+    // The Dark | Light | Auto rounded switch on card 0: each segment switches the Scene's word and keeps the editor open.
+    {
+        int pill[4];
+
+        compositor_wall_editor_pill(compositor_wall_editor.card[0], 100, pill);
+        compositor.pointer_x = pill[0] + pill[2] / 6;
+        compositor.pointer_y = pill[1] + pill[3] / 2;
+        pointed = compositor_wall_editor_point(compositor.pointer_x, compositor.pointer_y) && compositor_wall_editor_takes(COMPOSITOR_BTN_LEFT, 1);
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        chose = compositor_wall_editing() && string_equals((string_address)compositor_wall_word(0, 1), "dark");
+        compositor.pointer_x = pill[0] + pill[2] / 2;
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        chose = chose && compositor_wall_editing() && string_equals((string_address)compositor_wall_word(0, 1), "white");
+        compositor.pointer_x = pill[0] + pill[2] * 5 / 6;
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        chose = chose && compositor_wall_editing() && string_equals((string_address)compositor_wall_word(0, 1), "auto");
+    }
     // Off the cards: shut.
     compositor.pointer_x = 160, compositor.pointer_y = 190;
     compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
@@ -3589,8 +3601,8 @@ static void check_wallpaper_editor(void)
         (void)file_write_atomic_at(AT_FDCWD, (string_address)curated_path, list, sizeof(list) - 1, 0644);
         compositor_walls_read();
         compositor_wall_edit(0, 1);
-        curated = compositor_wall_editor.cards == 5 && !compositor_wall_editor.word[4][0] &&
-                  string_equals((string_address)compositor_wall_editor.word[3], "curated:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        curated = compositor_wall_editor.cards == 3 && !compositor_wall_editor.word[2][0] &&
+                  string_equals((string_address)compositor_wall_editor.word[1], "curated:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         compositor_wall_edit(0, 0);
     }
     compositor_wall_edit(0, 1);
@@ -3607,7 +3619,7 @@ static void check_wallpaper_editor(void)
     compositor_wall_drop();
     compositor_wall_rows.ready = 0;
     compositor_zero();
-    check("wallpaper editor: opened, its cards are auto, dark, white and the folder", opened);
+    check("wallpaper editor: opened, its cards are the Moonwater dynamic card (with Dark | Light | Auto switch) and the folder", opened);
     check("wallpaper editor: all the way open its veil is the wallpaper at 245 of 255, premultiplied", veiled);
     check("wallpaper editor: its frames are the veil, blended, then the cards, the Scene's own ringed in the accent, and the folder's plate and shape",
           framed);

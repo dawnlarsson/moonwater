@@ -621,13 +621,73 @@ static struct
         char (*word)[SETTING_WALLPAPER_WORD];
         unsigned long word_bytes;
         unsigned int cards, gen;
-        int hover, hover_close, pressed, press_card, at_x, at_y;
+        int hover, hover_close, hover_seg, pressed, press_card, press_seg, at_x, at_y;
         unsigned int *veil; // the veil, the screen's size, its rect, its step and the wallpaper it was made from at its turn
         unsigned long veil_bytes;
         int veil_rect[4], veil_level;
         const unsigned int *veil_of;
         b64 veil_turn;
-} compositor_wall_editor = {.hover = -1, .press_card = -1};
+        unsigned int *pill; // the rounded Dark | Light | Auto segmented switch drawn over the Moonwater dynamic wallpaper card
+        unsigned long pill_bytes;
+        int pill_w, pill_h, pill_active, pill_hover;
+        unsigned int pill_key;
+} compositor_wall_editor = {.hover = -1, .hover_seg = -1, .press_card = -1, .press_seg = -1};
+
+static int compositor_wall_is_moon(const char *word)
+{
+        return word && (string_equals((string_address)word, "auto") || string_equals((string_address)word, "dark") || string_equals((string_address)word, "white"));
+}
+
+static int compositor_wall_moon_seg(const char *word)
+{
+        if (!word)
+                return -1;
+        if (string_equals((string_address)word, "dark"))
+                return 0;
+        if (string_equals((string_address)word, "white"))
+                return 1;
+        if (string_equals((string_address)word, "auto"))
+                return 2;
+        return -1;
+}
+
+static const char *compositor_wall_seg_word(int seg)
+{
+        return seg == 0 ? "dark" : seg == 1 ? "white" : "auto";
+}
+
+// The rounded Dark | Light | Auto switch rect inside the Moonwater dynamic card (card 0).
+static int compositor_wall_editor_pill(const int card[4], int scale, int out[4])
+{
+        int pad = 6 * scale / 100, h = 24 * scale / 100, w;
+
+        if (card[2] < 18 || card[3] < 18)
+                return 0;
+        if (pad < 3)
+                pad = 3;
+        if (h > card[3] / 3)
+                h = card[3] / 3;
+        if (h < 10)
+                h = 10;
+        w = card[2] - 2 * pad;
+        if (w < 18)
+                w = card[2];
+        out[0] = card[0] + (card[2] - w) / 2, out[1] = card[1] + card[3] - h - pad, out[2] = w, out[3] = h;
+        return 1;
+}
+
+static int compositor_wall_editor_pill_seg(int x, int y)
+{
+        int screen = compositor_wall_editor.screen, scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
+        int pill[4], seg;
+
+        if (!compositor_wall_editor.open || !compositor_wall_editor.cards || !compositor_wall_editor_pill(compositor_wall_editor.card[0], scale, pill))
+                return -1;
+        if (x < pill[0] || x >= pill[0] + pill[2] || y < pill[1] || y >= pill[1] + pill[3])
+                return -1;
+        seg = (x - pill[0]) * 3 / pill[2];
+        return seg < 0 ? 0 : seg > 2 ? 2 : seg;
+}
 
 static int compositor_wall_editing(void)
 {
@@ -658,10 +718,10 @@ static void compositor_wall_editor_damage(void)
                 compositor_damage(0, 0, compositor.width, compositor.height);
 }
 
-// The cards laid out again: their words (the moon's three, the pictures, the folder last) and their rects, in rows of the screen's shape.
+// The cards laid out again: the Moonwater dynamic wallpaper (with its Dark | Light | Auto switch), the pictures, the curated feed's, and the folder last.
 static void compositor_wall_editor_lay(void)
 {
-        unsigned int count = 0, n = 3 + compositor_walls.names + compositor_walls.curateds + 1, cols, rows;
+        unsigned int count = 0, n = 1 + compositor_walls.names + compositor_walls.curateds + 1, cols, rows;
         const int (*screens)[4] = compositor_screens(&count);
         int screen = compositor_wall_editor.screen, gap = compositor_scenes_gap(), room[4], s[4], width, most;
         long long cw, ch;
@@ -679,15 +739,14 @@ static void compositor_wall_editor_lay(void)
         if (!mem_buf_grow(&p, &compositor_wall_editor.word_bytes, (unsigned long)n * SETTING_WALLPAPER_WORD, 0))
                 return;
         compositor_wall_editor.word = (char (*)[SETTING_WALLPAPER_WORD])p;
-        string_copy((string_address)compositor_wall_editor.word[0], "auto"), string_copy((string_address)compositor_wall_editor.word[1], "dark");
-        string_copy((string_address)compositor_wall_editor.word[2], "white");
+        string_copy((string_address)compositor_wall_editor.word[0], "auto");
         for (unsigned int at = 0; at < compositor_walls.names; at++)
         {
-                string_copy((string_address)compositor_wall_editor.word[3 + at], "picture:");
-                string_append_bounded((p8 *)compositor_wall_editor.word[3 + at], (string_address)compositor_walls.name[at], SETTING_WALLPAPER_WORD);
+                string_copy((string_address)compositor_wall_editor.word[1 + at], "picture:");
+                string_append_bounded((p8 *)compositor_wall_editor.word[1 + at], (string_address)compositor_walls.name[at], SETTING_WALLPAPER_WORD);
         }
         for (unsigned int at = 0; at < compositor_walls.curateds; at++)
-                memory_copy(compositor_wall_editor.word[3 + compositor_walls.names + at], compositor_walls.curated[at], SETTING_WALLPAPER_WORD);
+                memory_copy(compositor_wall_editor.word[1 + compositor_walls.names + at], compositor_walls.curated[at], SETTING_WALLPAPER_WORD);
         compositor_wall_editor.word[n - 1][0] = 0;
         // As the overview's Scene cards: a fifth of the room high, the screen's shape; in rows, smaller, when one row would not hold them.
         compositor_room(s, room);
@@ -842,6 +901,13 @@ static void compositor_wall_editor_click(int x, int y)
                 compositor_wall_start_program(argv);
                 return;
         }
+        if (card == 0)
+        {
+                int seg = compositor_wall_editor_pill_seg(x, y);
+                const char *cur = compositor_wall_word(screen, compositor_wall_current(screen));
+
+                word = seg >= 0 ? compositor_wall_seg_word(seg) : compositor_wall_is_moon(cur) ? cur : "auto";
+        }
         compositor_wall_put(screen, compositor_wall_current(screen), word);
         if (!memory_compare(word, "curated:", 8))
         {
@@ -878,10 +944,12 @@ static void compositor_wall_editor_button(unsigned int code, int down)
         {
                 compositor_wall_editor.pressed = 1, compositor_wall_editor.at_x = compositor.pointer_x, compositor_wall_editor.at_y = compositor.pointer_y;
                 compositor_wall_editor.press_card = compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y);
+                compositor_wall_editor.press_seg = compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y);
                 return;
         }
         compositor_wall_editor.pressed = 0;
-        if (compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_card)
+        if (compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_card &&
+            compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_seg)
                 compositor_wall_editor_click(compositor.pointer_x, compositor.pointer_y);
 }
 
@@ -914,6 +982,9 @@ static void compositor_wall_veil_keep(void)
         {
                 if (compositor_wall_editor.veil && !compositor_wall_editor_shown() && !compositor_card_holds())
                         p = compositor_wall_editor.veil, mem_buf_free(&p, &compositor_wall_editor.veil_bytes, MEM_BUF_GPU_FORGET), compositor_wall_editor.veil = 0;
+                if (compositor_wall_editor.pill && !compositor_wall_editor_shown() && !compositor_card_holds())
+                        p = compositor_wall_editor.pill, mem_buf_free(&p, &compositor_wall_editor.pill_bytes, MEM_BUF_GPU_FORGET),
+                        compositor_wall_editor.pill = 0, compositor_wall_editor.pill_w = compositor_wall_editor.pill_h = 0;
                 compositor_wall_editor.veil_level = 0;
                 return;
         }
@@ -986,9 +1057,93 @@ static const unsigned int *compositor_wall_editor_auto(int w, int h)
         return m->pixels;
 }
 
+// Rounded segmented switch ("Dark | Light | Auto") rendered into a cached ARGB buffer for the Moonwater dynamic wallpaper card.
+static const unsigned int *compositor_wall_editor_pill_pixels(int w, int h, int active, int hover, int scale)
+{
+        static const char *const labels[3] = {"Dark", "Light", "Auto"};
+        unsigned int track = compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+        unsigned int accent = compositor_ink_role(UI_PRIMARY) | 0xff000000u;
+        unsigned int on_accent = compositor_ink_role(UI_ON_PRIMARY) | 0xff000000u;
+        unsigned int on_track = compositor_ink_role(UI_ON_SURFACE) | 0xff000000u;
+        unsigned int hover_fill = compositor_ink_role(UI_SURFACE_HIGH) | 0xff000000u;
+        unsigned int key = (((track ^ accent) * 16777619u ^ on_track) * 16777619u ^ (unsigned int)scale);
+        int pad = 2 * scale / 100, inner_h, rad;
+        void *p;
+
+        if (w <= 0 || h <= 0)
+                return 0;
+        if (compositor_wall_editor.pill && compositor_wall_editor.pill_w == w && compositor_wall_editor.pill_h == h &&
+            compositor_wall_editor.pill_active == active && compositor_wall_editor.pill_hover == hover &&
+            compositor_wall_editor.pill_key == key)
+                return compositor_wall_editor.pill;
+        if (compositor_card_holds())
+                return compositor_wall_editor.pill && compositor_wall_editor.pill_w == w && compositor_wall_editor.pill_h == h ? compositor_wall_editor.pill : 0;
+        p = compositor_wall_editor.pill;
+        if (!mem_buf_grow(&p, &compositor_wall_editor.pill_bytes, (unsigned long)w * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
+                return compositor_wall_editor.pill = 0, compositor_wall_editor.pill_bytes = 0, (const unsigned int *)0;
+        compositor_wall_editor.pill = (unsigned int *)p;
+        compositor_wall_editor.pill_w = w, compositor_wall_editor.pill_h = h;
+        compositor_wall_editor.pill_active = active, compositor_wall_editor.pill_hover = hover, compositor_wall_editor.pill_key = key;
+
+        memory_fill_u32_rect(compositor_wall_editor.pill, (positive)w, (positive)w, (positive)h, track);
+        if (pad < 1)
+                pad = 1;
+        inner_h = h - 2 * pad;
+        rad = inner_h / 2;
+        for (int seg = 0; seg < 3; seg++)
+        {
+                int sx0 = seg * w / 3 + pad, sx1 = (seg + 1) * w / 3 - pad, sy0 = pad, sy1 = h - pad;
+                unsigned int bg = seg == active ? accent : seg == hover ? hover_fill : track;
+                unsigned int fg = seg == active ? on_accent : on_track;
+
+                if (bg != track && sx1 > sx0 && sy1 > sy0)
+                {
+                        int r = rad;
+                        if (r > (sx1 - sx0) / 2)
+                                r = (sx1 - sx0) / 2;
+                        for (int y = sy0; y < sy1; y++)
+                        {
+                                int dy = y < sy0 + r ? (sy0 + r - y) : y >= sy1 - r ? (y - (sy1 - 1 - r)) : 0;
+                                int cut = 0;
+                                if (dy > 0)
+                                {
+                                        int rem = r * r - dy * dy;
+                                        while (cut < r && (r - cut) * (r - cut) > rem)
+                                                cut++;
+                                }
+                                if (sx1 - cut > sx0 + cut)
+                                        memory_fill_u32_rect(compositor_wall_editor.pill + (long)y * w + sx0 + cut, (positive)w,
+                                                             (positive)(sx1 - sx0 - 2 * cut), 1, bg);
+                        }
+                }
+                if (compositor.engine && sx1 > sx0 && inner_h >= 8)
+                {
+                        const font_face address_to faces[1] = {&compositor.face};
+                        font_target target = {compositor_wall_editor.pill, (p32)w, (b32)w, (b32)h};
+                        p32 em = (p32)((inner_h * 56 / 100) << 6);
+                        font_metrics fm;
+                        positive len = string_length((string_address)labels[seg]);
+                        int tw, tx, ty;
+
+                        if (em < (8u << 6))
+                                em = 8u << 6;
+                        fm = font_metrics_at(&compositor.face, em);
+                        tw = (int)(font_draw(compositor.engine, faces, 1, (const p8 address_to)labels[seg], len, em, 0, null, 0, 0, 0, 0) >> 16);
+                        tx = sx0 + ((sx1 - sx0) - tw) / 2;
+                        if (tx < sx0)
+                                tx = sx0;
+                        ty = sy0 + (inner_h - (int)fm.cell_height) / 2 + (int)fm.baseline;
+                        font_draw(compositor.engine, faces, 1, (const p8 address_to)labels[seg], len, em, 0, &target,
+                                  (b32)(tx << 16), (b32)ty, fg & 0xffffffu, bg & 0xffffffu);
+                }
+        }
+        memory_or_u32(compositor_wall_editor.pill, compositor_wall_editor.pill, (positive)w * (positive)h, 0xff000000u);
+        return compositor_wall_editor.pill;
+}
+
 /*
         The editor's frames at frames[at] (room of them at the most), after every window's: the veil over its screen, then the cards, each a
-        word's miniature, and the folder's card, a plate of the kit's surface with a folder drawn on it. Answers how many.
+        word's miniature, the rounded Dark | Light | Auto switch on card 0, and the folder's card, a plate of the kit's surface with a folder drawn on it. Answers how many.
 */
 static unsigned int compositor_wall_editor_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room)
 {
@@ -1023,22 +1178,47 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                 const char *word = compositor_wall_editor.word[card];
                 int c[4], lit = compositor_wall_editor.open && compositor_wall_editor.hover == (int)card;
                 const unsigned int *mini;
+                int selected = card == 0 ? compositor_wall_is_moon(current) : word[0] && string_equals((string_address)word, (string_address)current);
 
                 compositor_wall_editor_card_shown(card, s, t, c);
                 if (!compositor_scenes_plain(frames, rows, at, room, filler, c, clip, scale))
                         continue;
-                mini = !word[0] ? 0 : string_equals((string_address)word, "auto") ? compositor_wall_editor_auto(c[2], c[3]) : compositor_wall_mini(word, c[2], c[3]);
+                if (card == 0)
+                        mini = string_equals((string_address)current, "dark") ? compositor_wall_mini("dark", c[2], c[3])
+                               : string_equals((string_address)current, "white") ? compositor_wall_mini("white", c[2], c[3])
+                                                                                 : compositor_wall_editor_auto(c[2], c[3]);
+                else
+                        mini = !word[0] ? 0 : compositor_wall_mini(word, c[2], c[3]);
                 if (mini)
                         frames[at].pixels = mini + (frames[at].y - c[1]) * c[2] + (frames[at].x - c[0]), frames[at].pitch = (unsigned long)c[2];
                 else
                         frames[at].fill = compositor_ink_role(UI_SURFACE_CONTAINER) | 0xff000000u;
                 frames[at].radius = radius, frames[at].line = line;
-                frames[at].edge = word[0] && string_equals((string_address)word, (string_address)current) ? accent : compositor_line_unlit();
+                frames[at].edge = selected ? accent : compositor_line_unlit();
                 if (lit)
                         frames[at].lit = COMPOSITOR_LIT_ALL, frames[at].lit_w = lit_w, frames[at].lit_ink = COMPOSITOR_INK_LINE_HOVER;
                 if (lit && compositor_wall_editor_close((int)card, &(int){0}, &(int){0}, &(int){0}))
                         frames[at].close = 1;
                 at++;
+                if (card == 0)
+                {
+                        int pill[4];
+
+                        if (compositor_wall_editor_pill(c, scale, pill) && compositor_scenes_plain(frames, rows, at, room, filler, pill, clip, scale))
+                        {
+                                const unsigned int *px = compositor_wall_editor_pill_pixels(
+                                    pill[2], pill[3], compositor_wall_moon_seg(current),
+                                    compositor_wall_editor.open ? compositor_wall_editor.hover_seg : -1, scale);
+
+                                if (px)
+                                        frames[at].pixels = px + (frames[at].y - pill[1]) * pill[2] + (frames[at].x - pill[0]),
+                                        frames[at].pitch = (unsigned long)pill[2];
+                                else
+                                        frames[at].fill = compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+                                frames[at].radius = pill[3] / 2, frames[at].line = line, frames[at].edge = compositor_line_unlit();
+                                at++;
+                        }
+                }
                 if (!word[0])
                 {
                         // A folder: its tab, and its body under it, in the quiet ink.
@@ -1098,10 +1278,11 @@ static void compositor_wall_editor_hover(void)
 {
         int x = compositor.pointer_x, y = compositor.pointer_y, card = compositor_wall_editor_card_at(x, y);
         int close = card >= 0 && compositor_wall_editor_on_close(card, x, y);
+        int seg = compositor_wall_editor_pill_seg(x, y);
 
-        if (card != compositor_wall_editor.hover || close != compositor_wall_editor.hover_close)
+        if (card != compositor_wall_editor.hover || close != compositor_wall_editor.hover_close || seg != compositor_wall_editor.hover_seg)
                 compositor_wall_editor_damage();
-        compositor_wall_editor.hover = card, compositor_wall_editor.hover_close = close;
+        compositor_wall_editor.hover = card, compositor_wall_editor.hover_close = close, compositor_wall_editor.hover_seg = seg;
 }
 
 // When the loop is owed its next pass for the spring: a frame after the last present while it is on its way, 0 at rest.
