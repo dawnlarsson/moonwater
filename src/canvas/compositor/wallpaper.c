@@ -1102,13 +1102,14 @@ static const unsigned int *compositor_wall_editor_pill_pixels(int w, int h, int 
         if (compositor_card_holds())
                 return compositor_wall_editor.pill && compositor_wall_editor.pill_w == w && compositor_wall_editor.pill_h == h ? compositor_wall_editor.pill : 0;
         p = compositor_wall_editor.pill;
-        if (!mem_buf_grow(&p, &compositor_wall_editor.pill_bytes, (unsigned long)w * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
+        if (!mem_buf_grow(&p, &compositor_wall_editor.pill_bytes, compositor_whole_lines(w) * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
                 return compositor_wall_editor.pill = 0, compositor_wall_editor.pill_bytes = 0, (const unsigned int *)0;
         compositor_wall_editor.pill = (unsigned int *)p;
         compositor_wall_editor.pill_w = w, compositor_wall_editor.pill_h = h;
         compositor_wall_editor.pill_active = active, compositor_wall_editor.pill_hover = hover, compositor_wall_editor.pill_key = key;
 
-        memory_fill_u32_rect(compositor_wall_editor.pill, (positive)w, (positive)w, (positive)h, track);
+        // (its rows on whole 64-byte lines, as the editor's other pictures: compositor_whole_lines)
+        memory_fill_u32_rect(compositor_wall_editor.pill, (positive)compositor_whole_lines(w), (positive)w, (positive)h, track);
         if (pad < 1)
                 pad = 1;
         inner_h = h - 2 * pad;
@@ -1135,14 +1136,14 @@ static const unsigned int *compositor_wall_editor_pill_pixels(int w, int h, int 
                                                 cut++;
                                 }
                                 if (sx1 - cut > sx0 + cut)
-                                        memory_fill_u32_rect(compositor_wall_editor.pill + (long)y * w + sx0 + cut, (positive)w,
+                                        memory_fill_u32_rect(compositor_wall_editor.pill + (unsigned long)y * compositor_whole_lines(w) + sx0 + cut, (positive)compositor_whole_lines(w),
                                                              (positive)(sx1 - sx0 - 2 * cut), 1, bg);
                         }
                 }
                 if (compositor.engine && sx1 > sx0 && inner_h >= 8)
                 {
                         const font_face address_to faces[1] = {&compositor.face};
-                        font_target target = {compositor_wall_editor.pill, (p32)w, (b32)w, (b32)h};
+                        font_target target = {compositor_wall_editor.pill, (positive)compositor_whole_lines(w), (b32)w, (b32)h};
                         p32 em = (p32)((inner_h * 56 / 100) << 6);
                         font_metrics fm;
                         positive len = string_length((string_address)labels[seg]);
@@ -1162,7 +1163,7 @@ static const unsigned int *compositor_wall_editor_pill_pixels(int w, int h, int 
                                   (b32)(tx << 16), (b32)ty, fg & 0xffffffu, bg & 0xffffffu);
                 }
         }
-        memory_or_u32(compositor_wall_editor.pill, compositor_wall_editor.pill, (positive)w * (positive)h, 0xff000000u);
+        memory_or_u32(compositor_wall_editor.pill, compositor_wall_editor.pill, (positive)compositor_whole_lines(w) * (positive)h, 0xff000000u);
         return compositor_wall_editor.pill;
 }
 
@@ -1237,8 +1238,8 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                                     compositor_wall_editor.open ? compositor_wall_editor.hover_seg : -1, scale);
 
                                 if (px)
-                                        frames[at].pixels = px + (frames[at].y - pill[1]) * pill[2] + (frames[at].x - pill[0]),
-                                        frames[at].pitch = (unsigned long)pill[2];
+                                        frames[at].pixels = px + (unsigned long)(frames[at].y - pill[1]) * compositor_whole_lines(pill[2]) + (frames[at].x - pill[0]),
+                                        frames[at].pitch = compositor_whole_lines(pill[2]);
                                 else
                                         frames[at].fill = compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u;
                                 frames[at].radius = pill[3] / 2, frames[at].line = line, frames[at].edge = compositor_line_unlit();
