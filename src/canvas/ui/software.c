@@ -7,6 +7,8 @@
                 Installed apps          every app the bowls have, each with Remove
                 Package managers        the sources (Flatpak, pacman, apk, apt, dnf, Nix's bowl, Snap): each one's state and its
                                         bowl's size, with Set up or Update, and the bowl's removal in its menu and on Delete
+                Default apps            what opens a page, mail, a folder, text, images, video, music and documents (moonwater
+                                        defaults): each kind's app, and pressed, every app that opens it to choose from, or Automatic
 
         Every list and every change is moonwater apps (src/sh/host/apps.c), run as a job of the kit's: its lines, a field a tab
         apart, are taken as they come and made rows, so a search's results come in source by source and a list has no most; a
@@ -35,7 +37,9 @@ enum
         SOFTWARE_SEARCH,
         SOFTWARE_INSTALLED,
         SOFTWARE_SOURCES,
-        SOFTWARE_GROUPS
+        SOFTWARE_DEFAULTS,
+        SOFTWARE_GROUPS,
+        SOFTWARE_CHOICES = SOFTWARE_GROUPS // the apps that open the kind whose menu is open (moonwater defaults KIND): no group of the page
 };
 
 // What a job is: a group's rows read, or a change (and which, for the words its end is said in).
@@ -47,7 +51,9 @@ enum
         SOFTWARE_JOB_REMOVE,
         SOFTWARE_JOB_SETUP,
         SOFTWARE_JOB_UPDATE,
-        SOFTWARE_JOB_TAKE_AWAY
+        SOFTWARE_JOB_TAKE_AWAY,
+        SOFTWARE_JOB_CHOICES, // the apps that open a kind read, for its row's menu
+        SOFTWARE_JOB_DEFAULT  // a kind's app chosen
 };
 
 // A row: its line's fields, each an offset into its group's text (a tab of the line made its end).
@@ -85,7 +91,8 @@ static struct
         int width, height, shown;
         unsigned int ground;
         b32 focused;
-        struct software_rows rows[SOFTWARE_GROUPS];
+        struct software_rows rows[SOFTWARE_GROUPS + 1]; // each group's, and SOFTWARE_CHOICES
+        int choosing; // the Default apps row whose apps are read for its menu, -1 none
         int job_kind, job_group; // the job's kind, and the group whose rows its lines are (a list's)
         char job_name[SOFTWARE_TEXT]; // what a change is of: a package's, an app's or a source's name
         char buf[SOFTWARE_BUFFER];
@@ -158,7 +165,7 @@ static b32 software_line(int group, const char address_to line, positive length)
 
         for (positive at = 0; at < length; at++)
                 fields += line[at] == '\t';
-        if (fields < 4)
+        if (fields < (group == SOFTWARE_CHOICES ? 2u : 4u))
                 return false;
         {
                 positive room = (positive)r->room * sizeof(struct software_row);
@@ -279,6 +286,23 @@ static b32 software_icons_make(void)
         return made != 0;
 }
 
+// A kind of moonwater defaults by its word, in the language.
+static const char address_to software_kind_words(string_address kind)
+{
+        static const struct
+        {
+                const char address_to kind;
+                p32 words;
+        } kinds[] = {{"browser", LANGUAGE_software_kind_browser}, {"mail", LANGUAGE_software_kind_mail}, {"folders", LANGUAGE_software_kind_folders},
+                     {"text", LANGUAGE_software_kind_text}, {"images", LANGUAGE_software_kind_images}, {"video", LANGUAGE_software_kind_video},
+                     {"music", LANGUAGE_software_kind_music}, {"documents", LANGUAGE_software_kind_documents}};
+
+        for (positive at = 0; at < sizeof(kinds) / sizeof(kinds[0]); at++)
+                if (string_equals(kind, (string_address)kinds[at].kind))
+                        return language_text(kinds[at].words);
+        return (const char address_to)kind;
+}
+
 static fn software_describe(int id, struct ui_row address_to row)
 {
         int group = software.page.chosen;
@@ -305,6 +329,17 @@ static fn software_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_BUTTON, row->words = WORDS(software_remove), row->dim = software_busy();
                 row->remove = true;
                 ui_apps_symbol(software_app_of(id), row), row->tile_picture = software_installed_picture;
+                return;
+        }
+        // A kind: what opens it (No app where nothing does), Automatic where the person chose none, and pressed, the apps to choose from.
+        if (group == SOFTWARE_DEFAULTS)
+        {
+                b32 none = software_is(group, id, 1, "-");
+
+                row->label = software_kind_words(software_field(group, id, 0));
+                row->value = none ? WORDS(software_no_app) : (const char address_to)software_field(group, id, 2);
+                row->note = !none && software_is(group, id, 3, "found") ? WORDS(software_automatic) : null;
+                row->kind = UI_ROW_CHOICE, row->dim = software_busy() || none;
                 return;
         }
         // A source: its label, its state and its bowl's size; Set up where it is not, Update where it is ready.
@@ -369,7 +404,8 @@ static fn software_job_data(struct ui_job address_to j)
                 if (j->buf[at] == '\n')
                 {
                         j->buf[at] = 0;
-                        if (software.job_kind == SOFTWARE_JOB_LIST && software_line(software.job_group, j->buf + start, at - start))
+                        if ((software.job_kind == SOFTWARE_JOB_LIST || software.job_kind == SOFTWARE_JOB_CHOICES) &&
+                            software_line(software.job_group, j->buf + start, at - start))
                                 added = true;
                         else if (at > start)
                                 software_say(j->buf + start);
@@ -382,6 +418,7 @@ static fn software_job_data(struct ui_job address_to j)
 }
 
 static fn software_list(int group);
+static fn software_choices_open(void);
 
 static fn software_job_done(struct ui_job address_to j, b32 killed, positive status)
 {
@@ -392,7 +429,20 @@ static fn software_job_done(struct ui_job address_to j, b32 killed, positive sta
         if (j->length)
                 j->buf[j->length] = '\n', j->length++, software_job_data(j);
         software.job_kind = SOFTWARE_JOB_NONE;
-        if (kind == SOFTWARE_JOB_LIST)
+        if (kind == SOFTWARE_JOB_CHOICES)
+        {
+                if (!failed && software.page.chosen == SOFTWARE_DEFAULTS)
+                        software_choices_open();
+                else
+                        software.choosing = -1;
+        }
+        else if (kind == SOFTWARE_JOB_DEFAULT)
+        {
+                if (!failed)
+                        software.status[0] = 0;
+                software.rows[SOFTWARE_DEFAULTS].read = false, software.again = SOFTWARE_DEFAULTS + 1;
+        }
+        else if (kind == SOFTWARE_JOB_LIST)
         {
                 software.rows[group].read = true;
                 if (!failed || software.rows[group].count)
@@ -458,6 +508,8 @@ static fn software_list(int group)
         }
         else if (group == SOFTWARE_SOURCES)
                 words[2] = (string_address) "sources", count = 3;
+        else if (group == SOFTWARE_DEFAULTS)
+                words[1] = (string_address) "defaults", count = 2;
         software_rows_drop(&software.rows[group]);
         if (software_start(words, count, SOFTWARE_JOB_LIST, group))
                 software_rebuild();
@@ -532,6 +584,17 @@ static fn software_act(int id, int way)
                 return;
         if (software_busy())
                 return software_say(WORDS(software_wait));
+        if (group == SOFTWARE_DEFAULTS)
+        {
+                string_address words[4] = {software.moonwater, (string_address) "defaults", software_field(group, id, 0), null};
+
+                ui_confirm_drop(&software.confirm);
+                software_rows_drop(&software.rows[SOFTWARE_CHOICES]);
+                software.choosing = id;
+                if (!software_start(words, 3, SOFTWARE_JOB_CHOICES, SOFTWARE_CHOICES))
+                        software.choosing = -1;
+                return;
+        }
         if (group == SOFTWARE_SEARCH && !software_is(group, id, 3, "installed"))
                 return ui_confirm_drop(&software.confirm),
                        software_change(SOFTWARE_JOB_INSTALL, (string_address) "install", software_field(group, id, 0), software_field(group, id, 1), false);
@@ -544,6 +607,45 @@ static fn software_act(int id, int way)
                 return software_take_away(id);
         if (!software_is(group, id, 1, "unavailable"))
                 software_change(SOFTWARE_JOB_SETUP, (string_address) "setup", null, software_field(group, id, 0), false);
+}
+
+/*
+        A kind's menu, its apps read (moonwater defaults KIND: a handler, a tab, its name, and * for the one that opens it): each app by
+        its name, then Automatic; the one ticked is the person's choice, or Automatic where they chose none. A choice is moonwater
+        defaults KIND HANDLER (auto for Automatic).
+*/
+static const char address_to software_choice_label(int row, int k)
+{
+        const struct software_rows address_to r = &software.rows[SOFTWARE_CHOICES];
+
+        (void)row;
+        return k < r->count ? (const char address_to)software_field(SOFTWARE_CHOICES, k, 1) : k == r->count ? WORDS(software_automatic) : null;
+}
+
+static fn software_choices_open(void)
+{
+        int id = software.choosing;
+        const char address_to current = software_is(SOFTWARE_DEFAULTS, id, 3, "chosen") ? (const char address_to)software_field(SOFTWARE_DEFAULTS, id, 2)
+                                                                                         : WORDS(software_automatic);
+
+        if (id < 0 || !ui_page_menu_open(&software.ui, &software.page, &software.list, &software.popup, &software.own, id, software_choice_label, current))
+                software.choosing = -1;
+        ui_page_redraw(&software.page);
+}
+
+static fn software_choice_take(int k)
+{
+        int id = software.choosing;
+        const struct software_rows address_to r = &software.rows[SOFTWARE_CHOICES];
+        string_address words[5] = {software.moonwater, (string_address) "defaults", software_field(SOFTWARE_DEFAULTS, id, 0), null, null};
+
+        software.choosing = -1;
+        ui_page_menu_close(&software.page, &software.popup);
+        if (id < 0 || k < 0 || k > r->count)
+                return;
+        words[3] = k == r->count ? (string_address) "auto" : software_field(SOFTWARE_CHOICES, k, 0);
+        software_start(words, 4, SOFTWARE_JOB_DEFAULT, SOFTWARE_DEFAULTS);
+        software_rebuild();
 }
 
 // The kit's management of the rows: a row's Remove (its menu, or Delete on it).
@@ -610,7 +712,10 @@ static b32 software_search_typed(void) { return software.search_open && doc_leng
 
 static const char address_to software_group_name(int group)
 {
-        return group == SOFTWARE_SEARCH ? WORDS(software_search) : group == SOFTWARE_INSTALLED ? WORDS(software_installed) : WORDS(software_sources);
+        return group == SOFTWARE_SEARCH      ? WORDS(software_search)
+               : group == SOFTWARE_INSTALLED ? WORDS(software_installed)
+               : group == SOFTWARE_SOURCES   ? WORDS(software_sources)
+                                             : WORDS(software_defaults);
 }
 
 static fn software_group_choose(int group)
@@ -648,7 +753,15 @@ static b32 software_key(const struct window_event address_to event)
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
         if (software.popup.open)
-                return ui_popmenu_event(&software.ui, &software.popup.menu, event, 0, 0), ui_page_redraw(&software.page), true;
+        {
+                int answer = ui_popmenu_event(&software.ui, &software.popup.menu, event, 0, 0);
+
+                if (software.page.menu_row >= 0 && answer >= 0)
+                        software_choice_take(answer);
+                else if (software.page.menu_row >= 0 && answer == UI_MENU_GONE)
+                        software.choosing = -1, ui_page_menu_close(&software.page, &software.popup);
+                return ui_page_redraw(&software.page), true;
+        }
         if (ui_page_context_key(&software.ui, &software.page, &software.list, event))
                 return true;
         if (software_search_typed() || software_search_starts(event) || (software.search.focused && event->a != UI_KEY_TAB))
@@ -779,6 +892,8 @@ static b32 software_focus(b32 focused)
 
 static fn software_chose(int id)
 {
+        if (software.page.menu_row >= 0)
+                return software_choice_take(id), ui_page_redraw(&software.page);
         if (ui_list_menu_do(&software.popup, &software.own, id))
                 return software_managed(), ui_page_redraw(&software.page);
         if (software.popup.field == &software.search)
@@ -806,7 +921,7 @@ static int software_open(void)
                 return 0;
         software.list.describe = software_describe, software.list.wrap = true, software.list.menu = &software_menu;
         software.list.hover = software.list.down = software.list.focus = -1;
-        software.page.chosen = SOFTWARE_INSTALLED, software.page.menu_row = -1, software.page.pane = 1;
+        software.page.chosen = SOFTWARE_INSTALLED, software.page.menu_row = -1, software.page.pane = 1, software.choosing = -1;
         software_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
         ui_free(t, software.own.row, software.width, software.height, ui_px(&software.ui, 12));
         ui_apps_fresh((b64)ui_kit_time());

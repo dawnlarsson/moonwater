@@ -6983,15 +6983,26 @@ LANGUAGE_ID(share_screen_of, "Screen %1$d, %2$s") \
 LANGUAGE_ID(share_stop, "Stop sharing %1$s with %2$s") \
 LANGUAGE_ID(share_stop_all, "Stop all sharing") \
 LANGUAGE_ID(share_the_screen, "the screen") \
+LANGUAGE_ID(software_automatic, "Automatic") \
 LANGUAGE_ID(software_cannot_start, "The command could not start") \
 LANGUAGE_ID(software_confirm_remove, "remove %s") \
 LANGUAGE_ID(software_confirm_take_away, "take away the %s bowl and everything in it") \
+LANGUAGE_ID(software_defaults, "Default apps") \
 LANGUAGE_ID(software_failed_one, "%1$s did not finish: %2$s") \
 LANGUAGE_ID(software_gone_one, "%s is taken away") \
 LANGUAGE_ID(software_install, "Install") \
 LANGUAGE_ID(software_installed, "Installed apps") \
 LANGUAGE_ID(software_installed_one, "%s is installed") \
 LANGUAGE_ID(software_installing, "Installing %s...") \
+LANGUAGE_ID(software_kind_browser, "Web browser") \
+LANGUAGE_ID(software_kind_documents, "Documents") \
+LANGUAGE_ID(software_kind_folders, "Folders") \
+LANGUAGE_ID(software_kind_images, "Images") \
+LANGUAGE_ID(software_kind_mail, "Email") \
+LANGUAGE_ID(software_kind_music, "Music") \
+LANGUAGE_ID(software_kind_text, "Text") \
+LANGUAGE_ID(software_kind_video, "Video") \
+LANGUAGE_ID(software_no_app, "No app") \
 LANGUAGE_ID(software_none_installed, "No apps are installed in the bowls yet") \
 LANGUAGE_ID(software_not_set_up, "Not set up") \
 LANGUAGE_ID(software_nothing, "Nothing found") \

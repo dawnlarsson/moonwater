@@ -30,6 +30,7 @@
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 # machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 # machine-made 2026-11-24 (the software window), not yet read by a person: software_cannot_start software_confirm_remove software_confirm_take_away software_failed_one software_gone_one software_install software_installed software_installed_one software_installing software_none_installed software_not_set_up software_nothing software_other software_reading software_ready software_remove software_removed_one software_removing software_search software_search_first software_search_hint software_set_up software_set_up_one software_setting_up software_sources software_take_away software_taking_away software_title software_unavailable software_update software_updated_one software_updating software_wait =Software
+# machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 @language pt
 @name Português
 @translated machine
@@ -523,15 +524,26 @@ settings_unknown	9fb9	desconhecido
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 settings_virtual_refused	4202	um dispositivo virtual não pode ativar isto: use um teclado ou rato ligado à máquina, ou moonwater ssh num terminal root
+software_automatic	6784	Automático
 software_cannot_start	69cd	Não foi possível iniciar o comando
 software_confirm_remove	be0f	remover %s
 software_confirm_take_away	8d4f	excluir o bowl %s e tudo o que há nele
+software_defaults	35ee	Apps padrão
 software_failed_one	b799	%1$s não terminou: %2$s
 software_gone_one	807a	%s foi excluído
 software_install	bd40	Instalar
 software_installed	a76f	Apps instalados
 software_installed_one	f749	%s está instalado
 software_installing	7c32	Instalando %s...
+software_kind_browser	8a49	Navegador
+software_kind_documents	6285	Documentos
+software_kind_folders	ed8a	Pastas
+software_kind_images	53cb	Imagens
+software_kind_mail	2167	E-mail
+software_kind_music	1d74	Música
+software_kind_text	2d5e	Texto
+software_kind_video	c80c	Vídeo
+software_no_app	f385	Nenhum app
 software_none_installed	1735	Ainda não há apps instalados nos bowls
 software_not_set_up	eacf	Não configurado
 software_nothing	827a	Nada encontrado

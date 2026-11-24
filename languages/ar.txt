@@ -31,6 +31,7 @@
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 # machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 # machine-made 2026-11-24 (the software window), not yet read by a person: software_cannot_start software_confirm_remove software_confirm_take_away software_failed_one software_gone_one software_install software_installed software_installed_one software_installing software_none_installed software_not_set_up software_nothing software_other software_reading software_ready software_remove software_removed_one software_removing software_search software_search_first software_search_hint software_set_up software_set_up_one software_setting_up software_sources software_take_away software_taking_away software_title software_unavailable software_update software_updated_one software_updating software_wait =Software
+# machine-made 2026-11-24 (the default apps), not yet read by a person: software_automatic software_defaults software_kind_browser software_kind_documents software_kind_folders software_kind_images software_kind_mail software_kind_music software_kind_text software_kind_video software_no_app
 @language ar
 @name العربية
 @translated machine
@@ -524,15 +525,26 @@ settings_unknown	9fb9	غير معروف
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	الفعل [الوسائط]
 settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
+software_automatic	6784	تلقائي
 software_cannot_start	69cd	تعذّر بدء الأمر
 software_confirm_remove	be0f	إزالة %s
 software_confirm_take_away	8d4f	حذف bowl %s وكل ما فيه
+software_defaults	35ee	التطبيقات الافتراضية
 software_failed_one	b799	لم يكتمل %1$s: %2$s
 software_gone_one	807a	تم حذف %s
 software_install	bd40	تثبيت
 software_installed	a76f	التطبيقات المثبتة
 software_installed_one	f749	تم تثبيت %s
 software_installing	7c32	يجري تثبيت %s
+software_kind_browser	8a49	متصفح الويب
+software_kind_documents	6285	المستندات
+software_kind_folders	ed8a	المجلدات
+software_kind_images	53cb	الصور
+software_kind_mail	2167	البريد
+software_kind_music	1d74	الموسيقى
+software_kind_text	2d5e	النص
+software_kind_video	c80c	الفيديو
+software_no_app	f385	لا تطبيق
 software_none_installed	1735	لا توجد تطبيقات مثبتة في bowl بعد
 software_not_set_up	eacf	غير مُعدّ
 software_nothing	827a	لم يُعثر على شيء

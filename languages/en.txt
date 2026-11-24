@@ -491,15 +491,26 @@ settings_unknown	9fb9	unknown
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENTS]
 settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
+software_automatic	6784	Automatic
 software_cannot_start	69cd	The command could not start
 software_confirm_remove	be0f	remove %s
 software_confirm_take_away	8d4f	take away the %s bowl and everything in it
+software_defaults	35ee	Default apps
 software_failed_one	b799	%1$s did not finish: %2$s
 software_gone_one	807a	%s is taken away
 software_install	bd40	Install
 software_installed	a76f	Installed apps
 software_installed_one	f749	%s is installed
 software_installing	7c32	Installing %s...
+software_kind_browser	8a49	Web browser
+software_kind_documents	6285	Documents
+software_kind_folders	ed8a	Folders
+software_kind_images	53cb	Images
+software_kind_mail	2167	Email
+software_kind_music	1d74	Music
+software_kind_text	2d5e	Text
+software_kind_video	c80c	Video
+software_no_app	f385	No app
 software_none_installed	1735	No apps are installed in the bowls yet
 software_not_set_up	eacf	Not set up
 software_nothing	827a	Nothing found
