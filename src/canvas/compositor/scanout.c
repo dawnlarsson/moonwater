@@ -83,6 +83,7 @@ enum
         DRV_CURSOR_PROBED   = 1u << 5, // the cursor plane is kept only after its probe (kms.c's compositor_cursor_probed)
         DRV_AMD             = 1u << 6,
         DRV_INTEL           = 1u << 7,
+        DRV_SCANS_PAST_CACHE = 1u << 8, // the display reads memory behind the processor's cache: no table picture is its framebuffer (compositor_window_fb)
 };
 
 // Whether the card's driver is one of count names (still used by wayland_host.c).
@@ -104,8 +105,8 @@ static unsigned int drm_driver_flags(const char *name)
                 {"amdgpu",      DRV_NO_IMPORT_FB | DRV_APART_VRAM | DRV_AMD},
                 {"radeon",      DRV_APART_VRAM},
                 {"nouveau",     DRV_APART_VRAM},
-                {"i915",        DRV_CURSOR_PROBED | DRV_INTEL},
-                {"xe",          DRV_CURSOR_PROBED | DRV_INTEL},
+                {"i915",        DRV_CURSOR_PROBED | DRV_INTEL | DRV_SCANS_PAST_CACHE},
+                {"xe",          DRV_CURSOR_PROBED | DRV_INTEL | DRV_SCANS_PAST_CACHE},
                 {"bochs-drm",   DRV_APART_VRAM | DRV_VIRTUAL},
                 {"qxl",         DRV_APART_VRAM | DRV_VIRTUAL},
                 {"vmwgfx",      DRV_APART_VRAM | DRV_VIRTUAL},
@@ -136,6 +137,15 @@ static void compositor_window_fb_refused(unsigned int step, long error)
         compositor.table->refused_error = (compositor.driver_flags & DRV_NO_IMPORT_FB) ? 0 : (unsigned int)-error;
 }
 
+/*
+        A table picture is memory its program writes through the processor's cache, and Intel's display engine reads memory behind that cache (i915's own
+        words: the display engine is not coherent with the LLC; it flushes a buffer it knows the processor wrote when it pins it for the display, and it
+        knows nothing of a write through the table's map). Shown straight, the screen had what was in memory, not what was drawn: the lines still in the
+        cache were those of the frame two flips before, for as long as they stayed there (the Editor, the one opaque window of the kit, the first to go on
+        the overlay once i915's pointer was on its plane: a typed letter late, stale lines, 2026-11-24 on Haswell). So on i915 and xe no table picture is
+        a framebuffer: the card composes it, reading it through the cache as it reads every other (a userptr's pages are snooped), and a client's own
+        dma-buf, which a card drew, is shown straight as before (compositor_lent_fb). Refused once a session (step 12, no error: nothing the owner can mend).
+*/
 // The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
 // or the card refuses (a card that cannot show memory it did not make), and then none is asked for again.
 static unsigned int compositor_window_fb(int row, unsigned int which)
@@ -157,6 +167,11 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
                 return 0;
         if (compositor.scan_fb[row][which] || !compositor.table_memfd || compositor.direct_refused)
                 return compositor.scan_fb[row][which];
+        if (compositor.driver_flags & DRV_SCANS_PAST_CACHE)
+        {
+                compositor_window_fb_refused(12, 0);
+                return 0;
+        }
         if (!compositor.udmabuf)
         {
                 long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW);
@@ -1573,7 +1588,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
                 return compositor_direct_why = COMPOSITOR_DIRECT_BUSY, -1;
         row = rows[windows - 1];
         if (!compositor_client_scans(row) &&
-            (compositor.direct_refused || !compositor.table_memfd || __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)))
+            (compositor.direct_refused || !compositor.table_memfd || (compositor.driver_flags & DRV_SCANS_PAST_CACHE) ||
+             __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)))
                 return compositor_direct_why = COMPOSITOR_DIRECT_TABLE, -1;
         if (!compositor_client_scans(row) && compositor_retry_held(&compositor_flip_retry, 0, clock_monotonic_nanoseconds()))
                 return compositor_direct_why = COMPOSITOR_DIRECT_HELD, -1;
@@ -2847,6 +2863,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         if (!windows || compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw) return *why = 4, -1;
         if (compositor_spots_any(0)) return *why = 14, -1;
         row = rows[windows - 1], frame = &frames[windows - 1];
+        if (!compositor_client_scans(row) && (compositor.driver_flags & DRV_SCANS_PAST_CACHE)) return *why = 23, -1;
         if (!compositor_client_scans(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return *why = compositor.direct_refused ? 11 : 2, -1;
         if (!compositor_client_scans(row) && compositor_retry_held(&compositor_flip_retry, 0, clock_monotonic_nanoseconds()))

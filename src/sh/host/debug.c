@@ -518,7 +518,8 @@ static b32 host_debug(string_address address_to arguments, positive count)
             "nothing", "there is no /dev/udmabuf", "udmabuf refused a buffer", "the card refused a buffer's import",
             "the card refused a buffer's framebuffer", "the card refused a flip", "the table is no memfd (memfd_create)",
             "the table is no memfd", "the table is no memfd (its size)", "the table is no memfd (its seals)",
-            "the table is no memfd (its mode)", "the table is no memfd (its link)"};
+            "the table is no memfd (its mode)", "the table is no memfd (its link)",
+            "the display reads memory behind the processor's cache (i915, xe): a window's own picture is composed by the card, a client's dma-buf is shown straight"};
         static const string_address reasons[] = {
             "shown straight", "no card", "the table is no memfd", "the pointer is drawn in software",
             "no window, or one dragged or resized", "it is glass", "it is not at the size it drew",
@@ -529,7 +530,8 @@ static b32 host_debug(string_address address_to arguments, positive count)
             "it has subsurfaces composed over it", "something the desktop draws is over it",
             "it is not opaque where the overlay would show it (its alpha is blended over what is under it)",
             "the owner's /run/moonwater/planes-off is there",
-            "its client's picture is no dma-buf read in place (copied into the table, or shared memory)"};
+            "its client's picture is no dma-buf read in place (copied into the table, or shared memory)",
+            "its picture is the processor's, and this card's display reads memory behind the processor's cache (the card composes it)"};
         const struct windows address_to table;
         char driver[17];
         unsigned int screens;
