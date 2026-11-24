@@ -731,14 +731,22 @@ static inline unsigned int compositor_gpu_scaled_pitch(int width)
         return gpu_backend == &gpu_i915_row ? ((unsigned int)width + 15u) & ~15u : ((unsigned int)width + 3u) & ~3u;
 }
 
-// A frame of the present that is scaled and meets the damage, so the card makes its picture: 1; 0 for one that is not; -1 for one the card cannot make.
+// A frame of the present whose picture the card makes for the scene, and that meets the damage: 1; 0 for one that is not; -1 for one the card cannot
+// make. A scaled frame (a landing, a Scene's window) is made at its drawn size; and a frame whose picture i915 does not read where it is (a pitch that
+// is not whole 64-byte lines: a client's buffer of any stride, compositor_gpu_copied) is made as it is, on whole lines, by the same kernel, which
+// reads a source of any pitch: no pixel of either is the processor's. One too large to make is refused when scaled, and left to the processor's copy
+// (compositor_gpu_rect) when it is only the pitch.
 static int compositor_gpu_scale_wanted(const struct compositor_frame *f, const int dmg[4])
 {
-        if (f->builtin || !f->pixels || !compositor_scaled(f) || (dmg && !compositor_frame_meets(f, dmg)))
+        b32 scaled = compositor_scaled(f) != 0, pitched = !scaled && compositor_gpu_copied(f);
+        int sw = scaled ? f->source_w : f->width, sh = scaled ? f->source_h : f->height;
+
+        if (f->builtin || !f->pixels || (!scaled && !pitched) || (dmg && !compositor_frame_meets(f, dmg)))
                 return 0;
-        if (f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 || f->source_w > 16384 ||
-            f->source_h > 16384 || f->pitch < (unsigned long)f->source_w || 4ull * (positive)compositor_gpu_scaled_pitch(f->width) * (positive)f->height > COMPOSITOR_GPU_SCALED_MOST)
-                return -1;
+        if (f->width <= 0 || f->height <= 0 || sw <= 0 || sh <= 0 || f->width > 16384 || f->height > 16384 || sw > 16384 || sh > 16384 ||
+            f->pitch < (unsigned long)sw || f->pitch > 65535 ||
+            4ull * (positive)compositor_gpu_scaled_pitch(f->width) * (positive)f->height > COMPOSITOR_GPU_SCALED_MOST)
+                return scaled ? -1 : 0;
         return 1;
 }
 
@@ -820,66 +828,86 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 positive tables_at = COMPOSITOR_GPU_BINS_AT + tabled, bytes, src_va, dst_va = dst_base + at;
                 unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + tables_at);
                 unsigned int dp;
-                // i915's scale kernel is a thread and eight messages for four pixels: a landing window's picture (1200 by 800 made 1000 by 667) took it
-                // 8.4 ms on a Haswell and an Ivy Bridge and 2.7 ms on an Alder Lake, where the processor's rows (memory_resample_u32_rect, the same
-                // pixels) took 0.9, 0.5 and 0.5 ms (CHECK_gpu_scene's scale rows). There the processor makes the picture, and the card composes with it.
-                b32 by_rows = gpu_backend == &gpu_i915_row && !f->tiled_kind;
+                b32 scaled = compositor_scaled(f) != 0, intel = gpu_backend == &gpu_i915_row && !f->tiled_kind;
+                int sw = scaled ? f->source_w : f->width, sh = scaled ? f->source_h : f->height;
+                int rx1 = 0, ry1 = 0, rx2 = f->width, ry2 = f->height; // the part of the picture made: all of it, or on i915 what the damage holds
 
                 if (compositor_gpu_scale_wanted(f, dmg) <= 0)
                         continue;
                 dp = compositor_gpu_scaled_pitch(f->width);
                 bytes = 4ull * (positive)dp * (positive)f->height;
                 source = *f;
-                source.width = f->source_w, source.height = f->source_h, source.source_w = source.source_h = 0;
-                src_va = 0;
-                if (!by_rows && (!compositor_gpu_picture(&source) || !(src_va = compositor_gpu_va(&source))))
+                source.width = sw, source.height = sh, source.source_w = source.source_h = 0;
+                // The source's address: a picture on a pitch i915 does not read is not mapped by compositor_gpu_picture (it was the processor's to
+                // copy), so it is mapped here; one that cannot be (a client's own memory on a chip with no maps to read) stays the processor's copy.
+                if (!compositor_gpu_picture(&source))
                         return COMPOSITOR_GPU_WHY_PICTURE;
-                if (by_rows)
+                if (!(src_va = compositor_gpu_va(&source)) && f->pixels && !f->tiled_kind)
+                        gpu_map(f->pixels, 4 * (f->pitch * (positive)(sh - 1) + (positive)sw)), src_va = compositor_gpu_va(&source);
+                if (!src_va && !f->tiled_kind)
                 {
-                        // The part of it the damage meets, which is all the scene's jobs read (they draw whole patches inside the damage's box).
-                        int x1 = dmg && f->x < dmg[0] ? dmg[0] : f->x, y1 = dmg && f->y < dmg[1] ? dmg[1] : f->y;
-                        int x2 = dmg && f->x + f->width > dmg[2] ? dmg[2] : f->x + f->width, y2 = dmg && f->y + f->height > dmg[3] ? dmg[3] : f->y + f->height;
+                        if (scaled)
+                                return COMPOSITOR_GPU_WHY_PICTURE;
+                        continue;
+                }
+                // i915's scale is a job of a few microseconds a thousand pixels: only what the damage holds of the picture is made (in whole 64-byte
+                // lines across, which the pool's pitch has room for), and that is all the scene's jobs read of it.
+                if (intel && dmg)
+                {
+                        rx1 = (dmg[0] > f->x ? dmg[0] - f->x : 0) & ~15, ry1 = dmg[1] > f->y ? dmg[1] - f->y : 0;
+                        rx2 = dmg[2] - f->x < f->width ? dmg[2] - f->x : f->width, ry2 = dmg[3] - f->y < f->height ? dmg[3] - f->y : f->height;
+                        rx2 = ((rx2 + 15) & ~15) < (int)dp ? (rx2 + 15) & ~15 : (int)dp;
+                }
+                if (rx2 > rx1 && ry2 > ry1)
+                {
+                        positive step_x = scaled ? ((positive)sw << 24) / (positive)f->width : 1ull << 24, fx = scaled ? ((positive)sw << 23) / (positive)f->width : 0;
+                        positive step_y = scaled ? ((positive)sh << 24) / (positive)f->height : 1ull << 24, fy = scaled ? ((positive)sh << 23) / (positive)f->height : 0;
+                        positive made_va = dst_va + 4ull * ((positive)ry1 * dp + (positive)rx1);
+                        unsigned int mw = (unsigned int)(rx2 - rx1), mh = (unsigned int)(ry2 - ry1);
+                        // i915's scale takes a source from a 64-byte line (a window's picture begins 8 bytes into one): the line before it is
+                        // the source, and the pixels between are added to every column of the table.
+                        positive lead = intel ? (src_va & 63) / 4 : 0;
 
-                        if (x2 > x1 && y2 > y1)
-                                memory_resample_u32_rect(compositor_gpu_scaled_pool.memory + at / 4 + (unsigned long)(y1 - f->y) * dp + (unsigned long)(x1 - f->x), dp,
-                                                         (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), f->pixels, f->pitch, (unsigned long)f->source_w,
-                                                         (unsigned long)f->source_h, (unsigned long)f->width, (unsigned long)f->height, (unsigned long)(x1 - f->x),
-                                                         (unsigned long)(y1 - f->y));
-                }
-                else
-                {
-                        positive step_x = ((positive)f->source_w << 24) / (positive)f->width, fx = ((positive)f->source_w << 23) / (positive)f->width;
-                        positive step_y = ((positive)f->source_h << 24) / (positive)f->height, fy = ((positive)f->source_h << 23) / (positive)f->height;
+                        src_va -= 4 * lead;
 
-                        for (int x = 0; x < f->width; x++, fx += step_x)
-                                tables[x] = (unsigned int)(fx >> 24);
-                        for (int y = 0; y < f->height; y++, fy += step_y)
-                                tables[f->width + y] = (unsigned int)(fy >> 24);
-                }
-                // A client's tiled or DCC picture is scaled in place with its descriptor (gpu_image_scaled, C2 op 8's scale bit), gated on
-                // gpu_scaled_ready: the processor cannot read a tiled picture either, so a card without it refuses the frame.
-                if (by_rows)
-                        ;
-                else if (f->tiled_kind)
-                {
-                        if (!gpu_scaled_ready() || !gpu_image_scaled(f->tiled_desc, f->tiled_kind, GPU_VA + tables_at, 0, 0, dst_va, dp,
-                                                                     (unsigned int)f->width, (unsigned int)f->height))
-                                return COMPOSITOR_GPU_WHY_SCALED;
-                }
-                else if (compositor_card.nowait && compositor_card.looped && gpu_backend != &gpu_i915_row)
-                {
-                        // A job of the present's, submitted with the scenes (compositor_card_go): the scene that reads this picture runs after it on the ring.
-                        const struct compositor_card_step blit = {COMPOSITOR_CARD_SCALE, (unsigned int)f->width, (unsigned int)f->height, (unsigned int)f->pitch,
-                                                                  dp, src_va, dst_va, GPU_VA + tables_at, {0, 0, 0, 0}};
+                        // The tables of the part made: the source's column of each column, then its row of each row (a column past the picture's
+                        // width, in the pool's padding, reads the last).
+                        for (int x = rx1; x < rx2; x++)
+                        {
+                                positive from = (fx + (positive)x * step_x) >> 24;
 
-                        if (!compositor_card_add(&blit))
-                                return COMPOSITOR_GPU_WHY_SCALED;
+                                tables[x - rx1] = (unsigned int)((from < (positive)sw ? from : (positive)sw - 1) + lead);
+                        }
+                        for (int y = ry1; y < ry2; y++)
+                        {
+                                positive from = (fy + (positive)y * step_y) >> 24;
+
+                                tables[mw + (unsigned int)(y - ry1)] = (unsigned int)(from < (positive)sh ? from : (positive)sh - 1);
+                        }
+                        // A client's tiled or DCC picture is scaled in place with its descriptor (gpu_image_scaled, C2 op 8's scale bit), gated on
+                        // gpu_scaled_ready: the processor cannot read a tiled picture either, so a card without it refuses the frame.
+                        if (f->tiled_kind)
+                        {
+                                if (!gpu_scaled_ready() || !gpu_image_scaled(f->tiled_desc, f->tiled_kind, GPU_VA + tables_at, 0, 0, dst_va, dp,
+                                                                             (unsigned int)f->width, (unsigned int)f->height))
+                                        return COMPOSITOR_GPU_WHY_SCALED;
+                        }
+                        else if (compositor_card.nowait && compositor_card.looped)
+                        {
+                                // A job of the present's, submitted with the scenes (compositor_card_go): the scene that reads this picture runs after it on the ring.
+                                const struct compositor_card_step blit = {COMPOSITOR_CARD_SCALE, mw, mh, (unsigned int)f->pitch, dp, src_va, made_va, GPU_VA + tables_at, {0, 0, 0, 0}};
+
+                                if (!compositor_card_add(&blit))
+                                        return COMPOSITOR_GPU_WHY_SCALED;
+                        }
+                        else if (!gpu_blit(src_va, (unsigned int)f->pitch, made_va, dp, GPU_VA + tables_at, 7, mw, mh))
+                        {
+                                compositor_gpu_fail(0);
+                                return compositor_gpu_job_why();
+                        }
                 }
-                else if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, dp, GPU_VA + tables_at, 7, (unsigned int)f->width, (unsigned int)f->height))
-                {
-                        compositor_gpu_fail(0);
-                        return compositor_gpu_job_why();
-                }
+                else if (!scaled)
+                        continue;
                 if (*io == frames)
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
                 compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool.memory + at / 4, compositor_gpu_scaled_copy[k].pitch = (unsigned long)dp;

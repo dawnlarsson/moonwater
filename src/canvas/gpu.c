@@ -2181,9 +2181,10 @@ static b32 gpu_start(positive bytes)
                                                                                 // immediate descriptor that names an entry past 0; its images, by the descriptor in a0) are
                                                                                 // read by the sampler cache's (4). Through the render cache's a 1080p copy took 9.3 ms on
                                                                                 // Haswell and 4.9 on Ivy Bridge, through the sampler cache's 2.7 and 2.1, the pixels the same
-                                                                                // with the pictures and lists changed between the jobs. The other kernels stay as they ran.
+                                                                                // with the pictures and lists changed between the jobs. The scale's source and tables (7) are read by
+                                                                                // the sampler cache's too. The other kernels stay as they ran.
                                                                                 if (((w[0] >> 24) & 0xfu) == 0xcu)
-                                                                                        w[0] = (w[0] & ~0x0f000000u) | ((i == 6u && (s1rf != 3u || (((w[3] >> 14) & 0x1fu) == 4u && (w[3] & 0xffu))) ? 0x4u : 0x5u) << 24);
+                                                                                        w[0] = (w[0] & ~0x0f000000u) | (((i == 6u || i == 7u) && (s1rf != 3u || (((w[3] >> 14) & 0x1fu) == 4u && (w[3] & 0xffu))) ? 0x4u : 0x5u) << 24);
                                                                                 s1type = 1u; // Gen7 send Src1Type = :d
                                                                         }
                                                                         else if (op == 0x20u && gpu.family < 750)
@@ -3375,12 +3376,23 @@ static const struct gpu_args address_to gpu_i915_args(const struct gpu_job *job,
         return (const struct gpu_args address_to)((p8 address_to)job->state_at + (long)(job->arguments - job->state));
 }
 
+// What the set last refused a scene for, kept for the compositor's log (a machine nobody sits at says it): why (GPU_SCENE_NOT_*), the record's
+// kind and a picture's pitch where it was a record, and how many scenes were refused for each.
+enum { GPU_SCENE_NOT_KIND = 1, GPU_SCENE_NOT_PITCH, GPU_SCENE_NOT_PLACE, GPU_SCENE_NOT_ROOM, GPU_SCENE_NOT_PICTURES, GPU_SCENE_NOT_PICTURE, GPU_SCENE_NOT_WHYS };
+static struct { unsigned int why, kind, pitch, counts[GPU_SCENE_NOT_WHYS]; } gpu_scene_refused;
+static unsigned int gpu_scene_not(unsigned int why, unsigned int kind, unsigned int pitch)
+{
+        gpu_scene_refused.why = why, gpu_scene_refused.kind = kind, gpu_scene_refused.pitch = pitch, gpu_scene_refused.counts[why]++;
+        return 0;
+}
+
 /*
         The Intel scale (op 7, the kernel gpu_i915_scale): d[y * dp + x] = s[ytab[y] * sp + xtab[x]] for x below w and y below the rows, 4 bytes a pixel,
         nearest, the tables the processor made at a->g (w entries of xtab, then the rows' ytab, each the source's index). Four pixels a thread, the walker
-        ceil(w / 4) by rows. The rows are taken only at 64-byte pitches, as the Intel encoders take them (the card loses rows at others): a->sp and a->dp
-        (words, in pixels) are multiples of 16, and a->dp is not below w. The kernel itself reads and writes any pitch (measured: 37 by 23 at 40 and 104
-        pixels, sources of 9, 40 and 1000 pixels), so the rule is the encoders'. Refused, 0 words (the processor draws it): a base not 16-byte aligned or
+        ceil(w / 4) by rows. The destination's rows are taken only at a 64-byte pitch (a->dp, in pixels, a multiple of 16 and not below w), as the
+        scene reads the picture made. The source is of any pitch (a->sp): the kernel reads it a pixel at a time through a surface 16384 bytes a row, so
+        a client's buffer of any stride is read where it is (the compositor makes such a picture's damaged part a picture on whole lines with this
+        job, and a landing's picture at its drawn size: no pixel of either is the processor's). Refused, 0 words (the processor draws it): a base not 16-byte aligned or
         below GPU_VA, w or rows or dp or sp past 65535 (rows 16384), w 0, a destination of more than 2^26 pixels (dp times the rows), and the usual room and
         kernel checks. The source's own height is not seen here: its pixels are indexed by the tables, so a source of more than 2^26 pixels is the caller's
         to keep off the card.
@@ -3413,9 +3425,13 @@ static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
 
-        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || (a->sp & 15) || a->dp < a->w ||
-            (positive)a->dp * a->rows > (1ull << 26) || a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
-                return 0;
+        // (each refusal said with what it was for, as the scene's are: 0x701 the sizes, 0x702 the pitches, 0x703 a base's place or alignment)
+        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u)
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0x701, a ? a->w : 0);
+        if (!a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || a->dp < a->w || (positive)a->dp * a->rows > (1ull << 26))
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0x702, a->dp);
+        if (a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0x703, (unsigned int)((a->s & 15) | (a->d & 15) << 4 | (a->g & 15) << 8 | (a->s < GPU_VA) << 12 | (a->d < GPU_VA) << 13 | (a->g < GPU_VA) << 14));
         {
                 const struct gpu_i915_surf surfs[3] = {{a->d, 16384, 16384, 16384}, {a->s, 16384, 16384, 16384}, {a->g, 16384, 16384, 16384}};
                 const unsigned int curbe[4] = {a->sp, a->w, a->dp, 0};
@@ -3444,16 +3460,6 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
 
                 return gpu_i915_emit_batch(job, words, surfs, 2, curbe, 3, blocks, a->gp);
         }
-}
-
-// What the set last refused a scene for, kept for the compositor's log (a machine nobody sits at says it): why (GPU_SCENE_NOT_*), the record's
-// kind and a picture's pitch where it was a record, and how many scenes were refused for each.
-enum { GPU_SCENE_NOT_KIND = 1, GPU_SCENE_NOT_PITCH, GPU_SCENE_NOT_PLACE, GPU_SCENE_NOT_ROOM, GPU_SCENE_NOT_PICTURES, GPU_SCENE_NOT_PICTURE, GPU_SCENE_NOT_WHYS };
-static struct { unsigned int why, kind, pitch, counts[GPU_SCENE_NOT_WHYS]; } gpu_scene_refused;
-static unsigned int gpu_scene_not(unsigned int why, unsigned int kind, unsigned int pitch)
-{
-        gpu_scene_refused.why = why, gpu_scene_refused.kind = kind, gpu_scene_refused.pitch = pitch, gpu_scene_refused.counts[why]++;
-        return 0;
 }
 
 #define GPU_SCENE_COVER(kind) (((kind) & ~1u) == 0x20u) // a cover for the image record after it (0x21: that image is opaque, its alpha the cover)

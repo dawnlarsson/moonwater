@@ -504,7 +504,7 @@ static void gpu_i915_set_rows(void)
                 a->s = GPU_VA + 0x4000, a->sp = 65536;
                 check("gpu i915 scale: a source pitch past a word is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->sp = 50;
-                check("gpu i915 scale: a source pitch of 50 pixels (200 bytes, not 64) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                check("gpu i915 scale: a source pitch of 50 pixels (200 bytes, not 64) is taken: the source is read a pixel at a time, of any pitch", gpu_i915_gen9_batch(&job, words, 64) == 64);
                 a->sp = 48;
                 a->sp = 48, a->w = 0;
                 check("gpu i915 scale: no columns is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
