@@ -544,7 +544,7 @@ software_removed_one	3aa3	تمت إزالة %s
 software_removing	cd30	تجري إزالة %s
 software_search	a2c9	بحث
 software_search_first	d018	اكتب ما تبحث عنه في حقل البحث، ثم اضغط Enter
-software_search_hint	3c7b	ابحث عن التطبيقات والحزم
+software_search_hint	da67	ابحث عن التطبيقات
 software_set_up	6abc	إعداد
 software_set_up_one	f014	تم إعداد %s
 software_setting_up	86be	يجري إعداد %s

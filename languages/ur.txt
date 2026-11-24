@@ -544,7 +544,7 @@ software_removed_one	3aa3	%s ہٹا دیا گیا
 software_removing	cd30	%s ہٹایا جا رہا ہے
 software_search	a2c9	تلاش
 software_search_first	d018	تلاش کے خانے میں وہ لکھیں جو آپ ڈھونڈ رہے ہیں، پھر Enter دبائیں
-software_search_hint	3c7b	ایپس اور پیکجز تلاش کریں
+software_search_hint	da67	ایپس تلاش کریں
 software_set_up	6abc	سیٹ اپ کریں
 software_set_up_one	f014	%s سیٹ اپ ہو گیا
 software_setting_up	86be	%s سیٹ اپ ہو رہا ہے

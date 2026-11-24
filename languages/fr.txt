@@ -543,7 +543,7 @@ software_removed_one	3aa3	%s est supprimé
 software_removing	cd30	Suppression de %s...
 software_search	a2c9	Rechercher
 software_search_first	d018	Tapez ce que vous cherchez dans le champ de recherche, puis appuyez sur Enter
-software_search_hint	3c7b	Rechercher des applications et des paquets
+software_search_hint	da67	Rechercher des apps
 software_set_up	6abc	Configurer
 software_set_up_one	f014	%s est configuré
 software_setting_up	86be	Configuration de %s...

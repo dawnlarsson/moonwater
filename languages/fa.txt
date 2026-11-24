@@ -544,7 +544,7 @@ software_removed_one	3aa3	%s حذف شد
 software_removing	cd30	در حال حذف %s
 software_search	a2c9	جستجو
 software_search_first	d018	آنچه را می‌جویید در کادر جستجو بنویسید، سپس Enter را فشار دهید
-software_search_hint	3c7b	جستجوی برنامه‌ها و بسته‌ها
+software_search_hint	da67	جستجوی برنامه‌ها
 software_set_up	6abc	راه‌اندازی
 software_set_up_one	f014	%s راه‌اندازی شد
 software_setting_up	86be	در حال راه‌اندازی %s

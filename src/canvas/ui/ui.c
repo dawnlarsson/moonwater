@@ -7001,7 +7001,7 @@ LANGUAGE_ID(software_removed_one, "%s is removed") \
 LANGUAGE_ID(software_removing, "Removing %s...") \
 LANGUAGE_ID(software_search, "Search") \
 LANGUAGE_ID(software_search_first, "Type what to look for in the search field, then press Enter") \
-LANGUAGE_ID(software_search_hint, "Search apps and packages") \
+LANGUAGE_ID(software_search_hint, "Search apps") \
 LANGUAGE_ID(software_set_up, "Set up") \
 LANGUAGE_ID(software_set_up_one, "%s is set up") \
 LANGUAGE_ID(software_setting_up, "Setting up %s...") \

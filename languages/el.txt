@@ -543,7 +543,7 @@ software_removed_one	3aa3	Αφαιρέθηκε: %s
 software_removing	cd30	Αφαίρεση %s...
 software_search	a2c9	Αναζήτηση
 software_search_first	d018	Πληκτρολογήστε αυτό που ψάχνετε στο πεδίο αναζήτησης και πατήστε Enter
-software_search_hint	3c7b	Αναζήτηση εφαρμογών και πακέτων
+software_search_hint	da67	Αναζήτηση εφαρμογών
 software_set_up	6abc	Ρύθμιση
 software_set_up_one	f014	Ρυθμίστηκε: %s
 software_setting_up	86be	Ρύθμιση %s...

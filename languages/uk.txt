@@ -543,7 +543,7 @@ software_removed_one	3aa3	Видалено: %s
 software_removing	cd30	Видалення %s...
 software_search	a2c9	Пошук
 software_search_first	d018	Введіть у поле пошуку, що шукаєте, і натисніть Enter
-software_search_hint	3c7b	Пошук застосунків і пакетів
+software_search_hint	da67	Пошук застосунків
 software_set_up	6abc	Налаштувати
 software_set_up_one	f014	Налаштовано: %s
 software_setting_up	86be	Налаштування %s...

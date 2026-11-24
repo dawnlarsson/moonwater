@@ -543,7 +543,7 @@ software_removed_one	3aa3	%s kaldırıldı
 software_removing	cd30	%s kaldırılıyor...
 software_search	a2c9	Ara
 software_search_first	d018	Aradığınızı arama alanına yazın, sonra Enter'a basın
-software_search_hint	3c7b	Uygulama ve paket ara
+software_search_hint	da67	Uygulama ara
 software_set_up	6abc	Kur
 software_set_up_one	f014	%s kuruldu
 software_setting_up	86be	%s kuruluyor...

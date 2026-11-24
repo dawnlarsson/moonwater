@@ -511,7 +511,7 @@ software_removed_one	3aa3	%s is removed
 software_removing	cd30	Removing %s...
 software_search	a2c9	Search
 software_search_first	d018	Type what to look for in the search field, then press Enter
-software_search_hint	3c7b	Search apps and packages
+software_search_hint	da67	Search apps
 software_set_up	6abc	Set up
 software_set_up_one	f014	%s is set up
 software_setting_up	86be	Setting up %s...

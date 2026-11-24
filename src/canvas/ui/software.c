@@ -94,6 +94,7 @@ static struct
         string_address moonwater;
         int again; // a group whose rows are to be read again once the job running ends (plus one; 0 none)
         int icon_side; // the side a row's symbol was last drawn at, device pixels: a search's icons are made at it
+        positive pictures_seen; // the registry's count of pictures made, as the rows were last drawn with them
 } software;
 
 static struct ui_app software_app;
@@ -409,9 +410,10 @@ static fn software_job_done(struct ui_job address_to j, b32 killed, positive sta
                 else
                         language_format(line, sizeof(line), done, (long)software.job_name);
                 software_say(line);
-                // What the change moved: every group is read again, the one shown first.
+                // What the change moved: every group is read again, the one shown first, and the registry where its folders changed.
                 for (int g = 0; g < SOFTWARE_GROUPS; g++)
                         software.rows[g].read = false;
+                ui_apps_fresh((b64)ui_kit_time());
                 software.again = software.page.chosen + 1;
         }
         if (software.again && !software_busy())
@@ -750,10 +752,11 @@ static long software_tick(long timeout, long address_to other)
         (void)other;
         if (software.search_open)
                 timeout = ui_field_tick(&software.ui, &software.page, &software.search, timeout, software.focused);
-        // The registry read again where a bowl's entries changed (an install, a removal), and the installed apps' pictures taken in.
-        if (ui_apps_fresh(ui_kit.now))
-                software_rebuild();
+        // The installed apps' pictures as the worker makes them: whoever takes one in (this tick, or the registry's own read), the
+        // count of pictures made moves, and the rows are drawn again.
         timeout = ui_apps_pictures_tick(timeout, false, &taken);
+        if (ui_apps_pictures_made != software.pictures_seen)
+                software.pictures_seen = ui_apps_pictures_made, taken = true;
         if (software.page.chosen == SOFTWARE_SEARCH && software_icons_make())
                 taken = true, timeout = 0;
         if (taken)
@@ -806,6 +809,7 @@ static int software_open(void)
         software.page.chosen = SOFTWARE_INSTALLED, software.page.menu_row = -1, software.page.pane = 1;
         software_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
         ui_free(t, software.own.row, software.width, software.height, ui_px(&software.ui, 12));
+        ui_apps_fresh((b64)ui_kit_time());
         software_list(SOFTWARE_INSTALLED);
         software_rebuild();
         software_frame();

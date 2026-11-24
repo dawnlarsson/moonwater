@@ -543,7 +543,7 @@ software_removed_one	3aa3	%s är borttagen
 software_removing	cd30	Tar bort %s...
 software_search	a2c9	Sök
 software_search_first	d018	Skriv det du letar efter i sökfältet och tryck på Enter
-software_search_hint	3c7b	Sök appar och paket
+software_search_hint	da67	Sök appar
 software_set_up	6abc	Konfigurera
 software_set_up_one	f014	%s är konfigurerad
 software_setting_up	86be	Konfigurerar %s...
