@@ -422,6 +422,7 @@ static void compositor_scenes_click(int x, int y)
         if (row != COMPOSITOR_NONE)
         {
                 compositor_scenes_close();
+                compositor_raise(row);
                 compositor_focus(row);
                 return;
         }

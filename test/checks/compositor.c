@@ -203,6 +203,277 @@ static fn check_take(void)
                 compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)sock_path, 0, 0, 0, 0);
         }
 #endif
+
+        /* COMP-001..COMP-007 regression checks */
+        {
+                /* COMP-001: adding a Scene when compositor_walls.line crosses a 4096-byte page boundary must not UAF/SIGSEGV */
+                {
+                        bipolar pid = system_fork();
+                        if (pid == 0)
+                        {
+                                static char wpath[64];
+                                positive wlen = positive_into_string((p8 address_to)wpath + 18, (positive)system_call(syscall(getpid)));
+                                void *old_line;
+                                unsigned int second;
+                                int ok;
+
+                                memory_copy(wpath, "/tmp/mw-comp001-s.", 18);
+                                wpath[18 + wlen] = 0;
+                                system_remove_at(AT_FDCWD, (string_address)wpath, 0);
+                                compositor_walls_path = wpath;
+                                compositor_wall_starts = 0;
+                                compositor_zero();
+                                windows_scratch_zero(table_at);
+                                compositor.table = table_at;
+                                compositor.width = 320, compositor.height = 200, compositor.scale = 100;
+                                old_line = compositor_walls.line;
+                                mem_buf_free(&old_line, &compositor_walls.line_bytes, 0);
+                                compositor_walls.line = 0, compositor_walls.lines = 0;
+                                compositor_spaces_ensure();
+                                compositor_wall_put(0, 1, "dark");
+                                for (unsigned int k = 1;
+                                     (unsigned long)(compositor_walls.lines + 1) * sizeof(compositor_walls.line[0]) <= compositor_walls.line_bytes;
+                                     k++)
+                                        compositor_wall_put_named("HDMI-A-99", k, "dark");
+                                {
+                                        unsigned int before_lines = compositor_walls.lines;
+                                        second = compositor_space_add_id(0, 0);
+                                        ok = second != 0 && compositor_walls.lines == before_lines + 1 &&
+                                             string_equals((string_address)compositor_wall_word(0, 2), "dark");
+                                }
+                                system_remove_at(AT_FDCWD, (string_address)wpath, 0);
+                                system_call_1(syscall(exit_group), ok ? 0 : 1);
+                        }
+                        else if (pid > 0)
+                        {
+                                int st = -1;
+                                (void)system_wait4_retry(pid, address_of(st), 0, null);
+                                check("compositor COMP-001: adding a Scene across compositor_walls.line page growth copies word safely",
+                                      st == 0);
+                        }
+                }
+
+                /* COMP-002: wallpaper helper process must unblock COMPOSITOR_SIG_MASK before execve */
+                {
+                        unsigned long mask = COMPOSITOR_SIG_MASK, old_mask = 0, sigblk = ~0ul;
+                        char out_path[64], buf[4096];
+                        positive plen;
+                        string_address argv[4];
+                        bipolar fd = -1;
+                        int got_file = 0;
+
+                        memory_copy(out_path, "/tmp/mw-comp002-", 16);
+                        plen = 16 + positive_into_string((p8 address_to)out_path + 16, (positive)system_call(syscall(getpid)));
+                        memory_copy(out_path + plen, ".txt", 5);
+                        system_remove_at(AT_FDCWD, (string_address)out_path, 0);
+
+                        argv[0] = (string_address) "/bin/cp";
+                        argv[1] = (string_address) "/proc/self/status";
+                        argv[2] = (string_address)out_path;
+                        argv[3] = null;
+
+                        compositor_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, (positive)address_of old_mask, 8, 0, 0);
+                        compositor_wall_starts = 1;
+                        compositor_wall_start_program(argv);
+                        compositor_call(syscall(rt_sigprocmask), 2, (positive)address_of old_mask, 0, 8, 0, 0);
+
+                        for (int tries = 0; tries < 100 && !got_file; tries++)
+                        {
+                                fd = system_open_at(AT_FDCWD, (string_address)out_path, FILE_READ | O_CLOEXEC);
+                                if (fd >= 0)
+                                {
+                                        bipolar n = system_call_3(syscall(read), (positive)fd, (positive)buf, sizeof(buf) - 1);
+                                        system_close(fd);
+                                        if (n > 0)
+                                        {
+                                                buf[n] = 0;
+                                                for (bipolar i = 0; i + 8 < n; i++)
+                                                        if (!memory_compare(buf + i, "SigBlk:\t", 8))
+                                                        {
+                                                                unsigned long v = 0;
+                                                                for (bipolar j = i + 8; j < n && buf[j] != '\n'; j++)
+                                                                {
+                                                                        char c = buf[j];
+                                                                        v = (v << 4) | (unsigned long)(c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
+                                                                }
+                                                                sigblk = v;
+                                                                got_file = 1;
+                                                                break;
+                                                        }
+                                        }
+                                }
+                                if (!got_file)
+                                {
+                                        long ts[2] = {0, 5000000};
+                                        compositor_call(syscall(nanosleep), (positive)ts, 0, 0, 0, 0, 0);
+                                }
+                        }
+                        system_remove_at(AT_FDCWD, (string_address)out_path, 0);
+                        check("compositor COMP-002: wallpaper helper unblocks COMPOSITOR_SIG_MASK before execve",
+                              got_file && (sigblk & COMPOSITOR_SIG_MASK) == 0);
+                }
+
+                /* COMP-003: unmatched button release must not close wallpaper editor, and open/close must reset seg state */
+                {
+                        b32 seg_reset, still_open;
+
+                        compositor_wall_starts = 0;
+                        compositor_zero();
+                        windows_scratch_zero(table_at);
+                        table_at->motion = 1;
+                        compositor.table = table_at;
+                        compositor.width = 320, compositor.height = 200, compositor.scale = 100;
+                        compositor_spaces_ensure();
+                        compositor_wall_edit(0, 1);
+                        compositor_wall_editor.press_seg = 1;
+                        compositor_wall_editor.hover_seg = 2;
+                        compositor_wall_edit(0, 0);
+                        seg_reset = compositor_wall_editor.press_seg == -1 && compositor_wall_editor.hover_seg == -1;
+                        compositor_wall_editor.press_seg = 1;
+                        compositor_wall_editor.hover_seg = 2;
+                        compositor_wall_edit(0, 1);
+                        seg_reset = seg_reset && compositor_wall_editor.press_seg == -1 && compositor_wall_editor.hover_seg == -1;
+                        compositor.pointer_x = 160, compositor.pointer_y = 195;
+                        compositor.button_down = 0;
+                        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+                        still_open = compositor_wall_editing();
+                        compositor_wall_edit(0, 0);
+                        compositor_wall_starts = 1;
+                        check("compositor COMP-003: unmatched button release keeps wallpaper editor open and resets seg state",
+                              still_open && seg_reset);
+                }
+
+                /* COMP-004: output hotplug must shut wallpaper editor and release its modal click grab */
+                {
+                        char was_names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+                        b32 opened_on_1, shut_ok;
+
+                        compositor_wall_starts = 0;
+                        compositor_zero();
+                        windows_scratch_zero(table_at);
+                        table_at->motion = 1;
+                        compositor.table = table_at;
+                        compositor.outputs = 2;
+                        compositor.width = 640, compositor.height = 200, compositor.scale = 100;
+                        string_copy((string_address)compositor.output[0].name, (string_address) "DP-1");
+                        compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 320, compositor.screen[0][3] = 200;
+                        string_copy((string_address)compositor.output[1].name, (string_address) "DP-2");
+                        compositor.screen[1][0] = 320, compositor.screen[1][1] = 0, compositor.screen[1][2] = 320, compositor.screen[1][3] = 200;
+                        compositor_spaces_ensure();
+                        compositor_wall_edit(1, 1);
+                        opened_on_1 = compositor_wall_editing() && compositor_wall_editor.screen == 1;
+                        memory_zero(was_names, sizeof(was_names));
+                        string_copy((string_address)was_names[0], (string_address) "DP-1");
+                        string_copy((string_address)was_names[1], (string_address) "DP-2");
+                        compositor.outputs = 1, compositor.width = 320;
+                        compositor_spaces_on_outputs_changed(was_names, 2);
+                        compositor.pointer_x = 160, compositor.pointer_y = 100;
+                        shut_ok = !compositor_wall_editing() && !compositor_wall_editor_shown() &&
+                                  !compositor_wall_editor_takes(COMPOSITOR_BTN_LEFT, 1);
+                        compositor_wall_edit(0, 0);
+                        compositor_wall_editor.shown = 0;
+                        compositor_wall_starts = 1;
+                        check("compositor COMP-004: output hotplug shuts wallpaper editor and releases modal click grab",
+                              opened_on_1 && shut_ok);
+                }
+
+                /* COMP-005: clicking an occluded window in Scenes overview must raise it as well as focus it */
+                {
+                        b32 b_on_top, found_a = 0, raised_ok = 0;
+                        int ax = 0, ay = 0;
+
+                        compositor_zero();
+                        windows_scratch_zero(table_at);
+                        table_at->motion = 1;
+                        compositor.table = table_at;
+                        compositor.width = 640, compositor.height = 480, compositor.scale = 100;
+                        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+                        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+                        compositor_spaces_ensure();
+                        for (int r = 1; r <= 2; r++)
+                        {
+                                table_at->width[r] = 200, table_at->height[r] = 150;
+                                table_at->x[r] = 50, table_at->y[r] = 50;
+                                table_at->frame[r] = 1, table_at->asked[r] = 1;
+                                string_copy((string_address)table_at->title[r], (string_address)(r == 1 ? "winA" : "winB"));
+                                compositor_take(r);
+                        }
+                        b_on_top = compositor.stacked >= 2 && compositor.stack[compositor.stacked - 1] == 2;
+                        compositor_scenes_open(0);
+                        for (unsigned int i = 0; i < compositor.scenes.windows; i++)
+                                if (compositor.scenes.row[i] == 1)
+                                {
+                                        ax = compositor.scenes.rect[i][0] + compositor.scenes.rect[i][2] / 2;
+                                        ay = compositor.scenes.rect[i][1] + compositor.scenes.rect[i][3] / 2;
+                                        found_a = 1;
+                                        break;
+                                }
+                        if (found_a)
+                                compositor_scenes_click(ax, ay);
+                        raised_ok = !compositor.scenes.open && compositor.focus == 1 &&
+                                    compositor.stacked >= 2 && compositor.stack[compositor.stacked - 1] == 1;
+                        compositor_scenes_shut();
+                        check("compositor COMP-005: clicking a window in Scenes overview raises it above occluding windows",
+                              b_on_top && found_a && raised_ok);
+                }
+
+                /* COMP-006: restoring a COMPOSITOR_ROOM window from fullscreen must size to compositor_room(), not full screen */
+                {
+                        int sc[4] = {0, 0, 640, 480}, room[4];
+                        b32 fs_ok, restored_ok;
+
+                        compositor_zero();
+                        windows_scratch_zero(table_at);
+                        table_at->motion = 1;
+                        compositor.table = table_at;
+                        compositor.width = 640, compositor.height = 480, compositor.scale = 100;
+                        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+                        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+                        taskbar_position_default(TASKBAR_BOTTOM);
+                        compositor_spaces_ensure();
+                        table_at->width[1] = 300, table_at->height[1] = 200;
+                        table_at->x[1] = 40, table_at->y[1] = 40;
+                        table_at->frame[1] = 1, table_at->asked[1] = 1;
+                        string_copy((string_address)table_at->title[1], (string_address) "roomwin");
+                        compositor_take(1);
+                        compositor_room(sc, room);
+                        compositor_arrange_rect(1, COMPOSITOR_ROOM, room);
+                        compositor_fullscreen_row(1);
+                        fs_ok = compositor.fullscreen[1] == 1 && compositor.fullscreen_was[1] == COMPOSITOR_ROOM;
+                        compositor_fullscreen_off(1);
+                        restored_ok = !compositor.fullscreen[1] && compositor.arranged[1] == COMPOSITOR_ROOM &&
+                                      room[3] < 480 && (int)compositor.h[1] == room[3];
+                        check("compositor COMP-006: restoring COMPOSITOR_ROOM window from fullscreen preserves taskbar room height",
+                              fs_ok && restored_ok);
+                }
+
+                /* COMP-007: compositor_band_test must use global compositor.scale on lower-DPI secondary outputs */
+                {
+                        int all_was = taskbar.all, bx = 0, by = 0, bw = 0, bh = 0, hit;
+
+                        compositor_zero();
+                        windows_scratch_zero(table_at);
+                        compositor.table = table_at;
+                        compositor.outputs = 2;
+                        compositor.width = 1600, compositor.height = 600, compositor.scale = 200;
+                        string_copy((string_address)compositor.output[0].name, (string_address) "DP-1");
+                        compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 800, compositor.screen[0][3] = 600, compositor.output[0].scale = 200;
+                        string_copy((string_address)compositor.output[1].name, (string_address) "DP-2");
+                        compositor.screen[1][0] = 800, compositor.screen[1][1] = 0, compositor.screen[1][2] = 800, compositor.screen[1][3] = 600, compositor.output[1].scale = 100;
+                        taskbar.all = 1;
+                        taskbar_position_default(TASKBAR_BOTTOM);
+                        compositor.band_at = 1;
+                        {
+                                struct taskbar_view view = compositor_band_view();
+                                taskbar_band(&view, &bx, &by, &bw, &bh);
+                        }
+                        compositor.band_at = 0;
+                        hit = compositor_band_test(bx + bw / 2, by + 4, 0);
+                        taskbar.all = all_was;
+                        check("compositor COMP-007: compositor_band_test hits taskbar on lower-DPI secondary output rendered at global scale",
+                              bh > 0 && hit != TASKBAR_HIT_NONE);
+                }
+        }
 }
 
 /*

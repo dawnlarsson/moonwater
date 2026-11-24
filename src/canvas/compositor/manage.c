@@ -288,7 +288,7 @@ static int compositor_band_test(int x, int y, int reach_ok)
 
         for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
         {
-                int sx, sy, sw, sh, scale = compositor_output_scale(compositor.band_at), strip;
+                int sx, sy, sw, sh, scale = compositor.scale, strip;
 
                 compositor_output_rect(compositor.band_at, &sx, &sy, &sw, &sh);
                 if (x < sx || x >= sx + sw || y < sy || y >= sy + sh)
@@ -1444,7 +1444,10 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
         compositor.fullscreen[row] = (unsigned char)(fullscreen != 0);
         if (!fullscreen && was_fs)
                 compositor_space_exit_fullscreen(row, 0);
-        compositor_screen_part(screens[on], target, part);
+        if (target == COMPOSITOR_ROOM)
+                compositor_room(screens[on], part);
+        else
+                compositor_screen_part(screens[on], target, part);
         compositor_arrange_rect(row, target, part);
         if (fullscreen && compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
                 compositor.glide[row] = 0, compositor_space_enter_fullscreen(row, on);
@@ -3219,6 +3222,7 @@ static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS
         if (compositor.focus >= 0 && !compositor_visible(compositor.focus))
                 compositor_refocus();
         compositor_scenes_shut();
+        compositor_wall_editor_shut();
 }
 
 /* ---- on-screen keyboard ---- */
@@ -4462,7 +4466,6 @@ static void compositor_clip_cli(void)
         else
                 compositor_door_drain(compositor_clip.door);
         compositor_clip_cli_read();
-        compositor_cast_look(0); // the clipboard's door rings for the shares too
 }
 
 static int compositor_clip_start(void)
@@ -4711,5 +4714,5 @@ HOT static void compositor_doors_done(void)
                         compositor_door_gone(row);
         }
         if (rows_has(&drained, COMPOSITOR_DOOR_MISC))
-                compositor_clip_cli_read(), compositor_cast_look(0);
+                compositor_clip_cli_read();
 }

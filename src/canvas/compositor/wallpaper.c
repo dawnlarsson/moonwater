@@ -173,12 +173,14 @@ static void compositor_wall_put_named(const char *screen, unsigned int scene, co
 {
         int at = compositor_wall_find(screen, scene);
         struct compositor_wall_line *l;
+        char saved[SETTING_WALLPAPER_WORD];
 
         if (!scene || !setting_wallpaper_word_ok(word, string_length((string_address)word)))
                 return;
         if (at >= 0 && string_equals((string_address)compositor_walls.line[at].word, (string_address)word))
                 return;
-        if (string_equals((string_address)word, "auto"))
+        string_copy_bounded((p8 *)saved, (string_address)word, SETTING_WALLPAPER_WORD);
+        if (string_equals((string_address)saved, "auto"))
         {
                 if (at < 0)
                         return;
@@ -187,14 +189,14 @@ static void compositor_wall_put_named(const char *screen, unsigned int scene, co
         else if (at >= 0)
         {
                 memory_zero(compositor_walls.line[at].word, SETTING_WALLPAPER_WORD);
-                string_copy_bounded((p8 *)compositor_walls.line[at].word, (string_address)word, SETTING_WALLPAPER_WORD);
+                string_copy_bounded((p8 *)compositor_walls.line[at].word, (string_address)saved, SETTING_WALLPAPER_WORD);
         }
         else if ((l = compositor_wall_line_add()))
         {
                 memory_zero(l, sizeof(*l));
                 string_copy_bounded((p8 *)l->screen, (string_address)screen, WINDOWS_OUTPUT_NAME);
                 l->scene = scene;
-                string_copy_bounded((p8 *)l->word, (string_address)word, SETTING_WALLPAPER_WORD);
+                string_copy_bounded((p8 *)l->word, (string_address)saved, SETTING_WALLPAPER_WORD);
         }
         compositor_walls_write();
         compositor_wall_changed();
@@ -820,7 +822,8 @@ static void compositor_wall_edit(int screen, int how)
         {
                 if (compositor_wall_editor.open)
                         compositor_wall_editor_damage();
-                compositor_wall_editor.open = compositor_wall_editor.pressed = 0, compositor_wall_editor.hover = -1;
+                compositor_wall_editor.open = compositor_wall_editor.pressed = compositor_wall_editor.hover_close = 0;
+                compositor_wall_editor.hover = compositor_wall_editor.hover_seg = compositor_wall_editor.press_card = compositor_wall_editor.press_seg = -1;
                 return;
         }
         if (screen < 0 || screen >= compositor_output_count())
@@ -840,9 +843,17 @@ static void compositor_wall_edit(int screen, int how)
                 compositor_wall_start_program(argv);
         }
         compositor_wall_editor.open = 1, compositor_wall_editor.screen = screen;
-        compositor_wall_editor.pressed = 0, compositor_wall_editor.hover = compositor_wall_editor.press_card = -1, compositor_wall_editor.hover_close = 0;
+        compositor_wall_editor.pressed = 0, compositor_wall_editor.hover_close = 0;
+        compositor_wall_editor.hover = compositor_wall_editor.hover_seg = compositor_wall_editor.press_card = compositor_wall_editor.press_seg = -1;
         compositor_wall_editor_lay();
         compositor_wall_editor_damage();
+}
+
+// The editor shut at once, with no motion (the screens changed under it).
+static void compositor_wall_editor_shut(void)
+{
+        compositor_wall_edit(-1, 0);
+        compositor_wall_editor.shown = 0, compositor_wall_editor.speed = 0, compositor_wall_editor.stepped = 0;
 }
 
 // A program started apart from the compositor, its own session with nothing on its standard files (as compositor_alert_show starts one).
@@ -858,8 +869,14 @@ static void compositor_wall_start_program(string_address *argv)
         {
                 if (system_fork() == 0)
                 {
+                        unsigned long sigmask = COMPOSITOR_SIG_MASK;
+                        bipolar oom = system_open_at(AT_FDCWD, (string_address) "/proc/self/oom_score_adj", FILE_WRITE | O_CLOEXEC);
                         bipolar quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
 
+                        compositor_ordinary(0);
+                        compositor_call(syscall(rt_sigprocmask), 1, (positive)address_of sigmask, 0, 8, 0, 0);
+                        if (oom >= 0)
+                                (void)system_write_all((positive)oom, (string_address) "0\n", 2), system_close(oom);
                         system_call(syscall(setsid));
                         for (positive at = 0; quiet >= 0 && at < 3; at++)
                                 system_call_3(syscall(dup3), (positive)quiet, at, 0);
@@ -924,9 +941,11 @@ static void compositor_wall_editor_click(int x, int y)
 // The editor takes every press while it is open but one on the band, and the release of a press it took.
 static int compositor_wall_editor_takes(unsigned int code, int down)
 {
-        unsigned int index = code - COMPOSITOR_BTN_LEFT;
+        unsigned int count = 0, index = code - COMPOSITOR_BTN_LEFT;
+        int screen = compositor_wall_editor.screen;
 
-        if (!compositor_wall_editor.open)
+        (void)compositor_screens(&count);
+        if (!compositor_wall_editor.open || screen < 0 || (unsigned int)screen >= count)
                 return 0;
         if (down)
                 return compositor_band_hit(compositor.pointer_x, compositor.pointer_y) == TASKBAR_HIT_NONE;
@@ -948,6 +967,8 @@ static void compositor_wall_editor_button(unsigned int code, int down)
                 compositor_wall_editor.press_seg = compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y);
                 return;
         }
+        if (!compositor_wall_editor.pressed)
+                return;
         compositor_wall_editor.pressed = 0;
         if (compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_card &&
             compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_seg)

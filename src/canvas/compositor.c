@@ -1039,6 +1039,10 @@ static int compositor_scenes_shown(void);
 static int compositor_scenes_point(int x, int y);
 static void compositor_scenes_let_go(int row);
 static void compositor_scenes_shut(void);
+static void compositor_wall_editor_shut(void);
+#define COMPOSITOR_SIGUSR1 10
+#define COMPOSITOR_SIGUSR2 12
+#define COMPOSITOR_SIG_MASK (1ul << 14 | 1ul << 1 | 1ul << 0 | 1ul << (COMPOSITOR_SIGUSR1 - 1) | 1ul << (COMPOSITOR_SIGUSR2 - 1))
 static void compositor_row_mode(int row, unsigned int how, int fullscreen, int screen);
 static void compositor_pointer_press(unsigned int code, int down);
 static int compositor_grab_end(int how, int drop_row);
@@ -1062,8 +1066,6 @@ static struct windows_owner windows_owner_held[WINDOWS];
 #include "compositor/wallpaper.c" // each Scene's wallpaper: its word kept and asked for, the miniatures of the words, the editor over a Scene
 #include "compositor/input.c" // what a person does: the keys and the chords, the volume, the hand's motion and buttons, the prediction, the wheel and the pad, the marks and touch
 #include "compositor/access.c" // the desktop with no mouse to hand: a controller (and next a switch, the keys as a pointer, dwell) as the pointer and the actions
-#include "../cast/cast.h"
-#include "compositor/cast.c" // the capture engine's video: the shares' rings, made when the person picks and composed into at the presents
 
 /* Sealed memfd for the window table (udmabuf zero-copy scanout; symlinked at WINDOWS_TABLE). */
 static long compositor_table_memfd(unsigned long bytes)
@@ -1212,10 +1214,6 @@ static void compositor_table_drop(void)
                 for (int wake = 0; wake < 2; wake++)
                         windows_door_name((char *)name, row, wake), compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)name, 0, 0, 0, 0);
 }
-
-#define COMPOSITOR_SIGUSR1 10
-#define COMPOSITOR_SIGUSR2 12
-#define COMPOSITOR_SIG_MASK (1ul << 14 | 1ul << 1 | 1ul << 0 | 1ul << (COMPOSITOR_SIGUSR1 - 1) | 1ul << (COMPOSITOR_SIGUSR2 - 1))
 
 static void compositor_pipe_ignore(void) { system_signal_install(13, 1, 0, 0, null); }
 static int compositor_signals(void)
@@ -2298,7 +2296,7 @@ static b32 compositor_main()
         if (!headless)
         {
                 int prio = 40;
-                compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&prio, 0, 0, 0);
+                compositor_call(syscall(sched_setscheduler), 0, 1 | 0x40000000u, (positive)&prio, 0, 0, 0);
                 compositor_pin_ccd0(), compositor_pin_irqs_ccd0();
         }
         if ((status = headless ? compositor_headless(headless, file) : compositor_card_open()) < 0)
