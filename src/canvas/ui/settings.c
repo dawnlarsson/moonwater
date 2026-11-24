@@ -808,6 +808,7 @@ static positive settings_rows_count(void) { return (positive)SETTINGS_ANY + 1 + 
 static const struct settings_generic address_to settings_generic_of(int row) { int at; return settings_domain_of(row, &at) == SETTINGS_DOM_COMMAND && at > 0 ? &settings.generic[at - 1] : null; }
 static int settings_list_of(int row) { int at; return settings_domain_of(row, &at) == SETTINGS_DOM_LIST ? at / SETTINGS_LIST_STEP : -1; }
 static int settings_device_section(const struct settings_item address_to item) { return item->where == SETTINGS_WHERE_INTERNAL ? 0 : item->where == SETTINGS_WHERE_NONE ? 2 : 1; }
+static int settings_link_section(const struct settings_item address_to item) { return item->kind != SETTINGS_LIST_ACTION && item->where == 0 ? 0 : 1; }
 static int settings_pos(int row) { return ui_list_at(&settings.list, row); }
 static int settings_editing(void) { return settings.edit.open ? settings.edit.owner : -1; }
 
@@ -951,8 +952,8 @@ static int settings_section_start(int row)
                 }
                 if (list == 3 && item)
                 {
-                        unsigned char w = item->where;
-                        while (at > 0 && settings.item[3][at - 1].where == w)
+                        int sec = settings_link_section(item);
+                        while (at > 0 && settings_link_section(&settings.item[3][at - 1]) == sec)
                                 at--;
                         return SETTINGS_LIST_ID(3, at);
                 }
@@ -978,7 +979,7 @@ static const char address_to settings_section(int row)
                 const struct settings_item address_to it = settings_item(row);
                 if (list == 2 && it && settings_device_section(it))
                         return settings_device_section(it) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
-                if (list == 3 && it && it->where == 0)
+                if (list == 3 && it && settings_link_section(it) == 0)
                         return "This machine";
                 return settings_feeds[list].heading;
         }

@@ -6961,6 +6961,9 @@ static fn check_settings_actions(void)
                                   settings.item[3][3].kind == SETTINGS_LIST_ACTION && settings.item[3][3].where == 3 &&
                                   string_equals((string_address)add.words, (string_address) "Show a code|Type another machine's code") &&
                                   string_equals((string_address)add.label, (string_address) "Link a machine"));
+                        check("settings lists: Waterlink's add and purge rows share the Linked machines section with no duplicate header",
+                              settings_section_start((int)SETTINGS_LIST_ID(3, 3)) == settings_section_start(add_id) &&
+                                  settings_section_start(add_id) == settings_section_start(link_row));
                         //      Its grants are checks in their columns, on where the machine may (zeta: run files), and a check turned is the
                         //      grant's verb, a hand's only (allowing is deliberate); its state is the Status column.
                         {

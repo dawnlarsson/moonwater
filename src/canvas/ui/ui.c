@@ -29231,7 +29231,7 @@ static fn ui_alert_open(struct ui_alert address_to a, int kind, const char addre
 
 static fn ui_alert_draw(struct ui address_to ui, struct ui_alert address_to a, int width, int height)
 {
-        b32 standalone = width <= UI_ALERT_W && height <= UI_ALERT_H;
+        b32 standalone = width <= UI_ALERT_W + 2 && height <= UI_ALERT_H + 2;
         int cw = standalone ? width : UI_ALERT_W;
         int ch = standalone ? height : UI_ALERT_H;
         int cx, cy, badge = 36, pad = 20, bw = 88, bh = 36;
