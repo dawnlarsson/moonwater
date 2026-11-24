@@ -434,21 +434,38 @@ static bool mwfd_verify_asset(const p8 address_to data, positive length,
 #define MWFD_FETCH_BAD_STATUS (-71) // EPROTO: the server answered but not 200
 #define MWFD_FETCH_UNVERIFIED (-74) // EBADMSG: the bytes are not the pinned key's feed, or not this one, or old, or expired
 
+/*
+        Who asks, as the hosts the feed links to ask a program to say (Wikimedia's User-Agent policy: the program, and how to reach
+        its makers), so a machine fetching a curated wallpaper is never taken for an anonymous scraper and throttled or refused.
+*/
+#define MWFD_AGENT "Moonwater/1 (+https://dawning.dev; wallpapers and updates)"
+// A host that says it is busy (429 Too Many Requests, 503) is asked again after a pause that grows, and given up after the last.
+#define MWFD_FETCH_TRIES 3
+#define MWFD_FETCH_PAUSE_S 3
+
 static bipolar mwfd_fetch_bytes(string_address url, positive most, http_buffer address_to body)
 {
         http_manners how = http_manners_wget;
         b32 code = 0;
-        bipolar status;
+        bipolar status = MWFD_FETCH_BAD_STATUS;
 
         memory_fill(body, 0, sizeof(*body));
         if (string_length(url) < 9 || memory_compare(url, "https://", 8))
                 return MWFD_FETCH_UNVERIFIED;
-        how.agent = (string_address) "Moonwater", how.body_most = most;
-        status = http_run_apart(url, address_of how, true, -1, body, address_of code, null, null);
-        if (!status && code != 200)
-                status = MWFD_FETCH_BAD_STATUS;
-        if (status)
-                byte_store_release(body);
+        how.agent = (string_address)MWFD_AGENT, how.body_most = most;
+        for (positive attempt = 0; attempt < MWFD_FETCH_TRIES; attempt++)
+        {
+                if (attempt)
+                        system_call_2(syscall(nanosleep), (positive)(positive[2]){MWFD_FETCH_PAUSE_S * attempt * attempt, 0}, 0);
+                code = 0;
+                status = http_run_apart(url, address_of how, true, -1, body, address_of code, null, null);
+                if (!status && code != 200)
+                        status = MWFD_FETCH_BAD_STATUS;
+                if (status)
+                        byte_store_release(body), memory_fill(body, 0, sizeof(*body));
+                if (!status || (code != 429 && code != 503))
+                        break;
+        }
         return status;
 }
 
