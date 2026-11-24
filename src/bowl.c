@@ -4076,6 +4076,9 @@ static string_address address_to bowl_environment(
             {"MESA_VK_WSI_PRESENT_MODE", "MESA_VK_WSI_PRESENT_MODE=mailbox",
              BOWL_OPT_MAILBOX, false},
             {"mesa_glthread", "mesa_glthread=true", BOWL_OPT_GLTHREAD, false},
+            // GTK and GIO ask the desktop's portals as a Flatpak app does: a link or a file a program opens goes to OpenURI (the
+            // person's default app, not the bowl's own idea of one), and a GTK file dialog is Files (FileChooser).
+            {"GTK_USE_PORTAL", "GTK_USE_PORTAL=1", BOWL_OPT_BUS, false},
             // Nobody to ask (no terminal on standard input: an install from the software window, a profile's, a script's):
             // debconf is told so, rather than trying Dialog, Readline and Teletype in turn and saying each one failed.
             {"DEBIAN_FRONTEND", "DEBIAN_FRONTEND=noninteractive", BOWL_OPT_UNASKED, false},
@@ -6150,6 +6153,54 @@ static b32 bowl_write_apk(string_address root);
 static b32 bowl_write_apt(string_address root);
 static b32 bowl_write_nix(string_address root);
 
+/*
+        A bowl's xdg-open: Moonwater's, in the bowl's /usr/local/bin where every program finds it before the distribution's (Chromium,
+        Electron's openExternal and Steam run xdg-open by name). It asks the desktop (moonwater open, the OpenURI portal), so a page, a
+        program's link (a sign-in coming back to discord: or vscode:) or a file opens with the person's default app and as the desktop
+        starts it, whichever bowl asked. Written at every configure (a setup, every package manager's run) and at every start of the
+        machine (host's disk.c), and only where it is not already this.
+*/
+#define BOWL_XDG_OPEN_DIRECTORY "/usr/local/bin"
+#define BOWL_XDG_OPEN_NAME "xdg-open"
+static const char bowl_xdg_open_script[] =
+    "#!/bin/sh\n"
+    "# Moonwater's xdg-open: a page, a program's link or a file opened with the desktop's default app (moonwater open, the OpenURI\n"
+    "# portal). Written by Moonwater (src/bowl.c), and written again where it is changed.\n"
+    "exec /moonwater open -- \"$@\"\n";
+
+static fn bowl_xdg_open_write(string_address root)
+{
+        p8 directory[BOWL_PATH_LIMIT], have[sizeof(bowl_xdg_open_script)];
+        bipolar dirfd, handle, got;
+        b32 ok;
+
+        if (!bowl_root_path(directory, sizeof(directory), root, BOWL_XDG_OPEN_DIRECTORY) ||
+            (dirfd = bowl_open_directory(directory, BOWL_MAKE_CHAIN, null)) < 0)
+                return;
+        if ((handle = system_open_at(dirfd, BOWL_XDG_OPEN_NAME, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
+        {
+                got = system_read_retry((positive)handle, have, sizeof(have));
+                system_close(handle);
+                if (got == (bipolar)(sizeof(bowl_xdg_open_script) - 1) && !memory_compare(have, bowl_xdg_open_script, (positive)got))
+                {
+                        system_close(dirfd);
+                        return;
+                }
+        }
+        system_remove_at(dirfd, BOWL_XDG_OPEN_NAME ".new", 0);
+        if ((handle = system_open_at_mode(dirfd, BOWL_XDG_OPEN_NAME ".new", FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC, 0755)) < 0)
+        {
+                system_close(dirfd);
+                return;
+        }
+        ok = system_write_all((positive)handle, bowl_xdg_open_script, sizeof(bowl_xdg_open_script) - 1) == sizeof(bowl_xdg_open_script) - 1 &&
+             system_call_2(syscall(fchmod), (positive)handle, 0755) == 0;
+        system_close(handle);
+        if (!ok || system_rename_at(dirfd, BOWL_XDG_OPEN_NAME ".new", dirfd, BOWL_XDG_OPEN_NAME, 0) < 0)
+                system_remove_at(dirfd, BOWL_XDG_OPEN_NAME ".new", 0);
+        system_close(dirfd);
+}
+
 static b32 bowl_configure(string_address root)
 {
         static const string_address locks[] = {
@@ -6188,6 +6239,10 @@ static b32 bowl_configure(string_address root)
 
         if (!failed && bowl_has(root, "/nix/.reginfo"))
                 failed = bowl_write_nix(root);
+
+        // Nix's bowl keeps its programs in its store; every other's finds /usr/local/bin first.
+        if (!failed && !bowl_has(root, "/nix/.reginfo"))
+                bowl_xdg_open_write(root);
 
         return failed;
 }

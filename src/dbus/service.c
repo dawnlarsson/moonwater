@@ -371,8 +371,72 @@ static void sessionbus_reap(void)
                 ;
 }
 
+/*
+        OpenURI's opener (dbus.c's dbus_portal_open): the open tool (src/canvas/ui/open.c) started on the desktop as the person's
+        (MOONWATER_ASKED, so what it opens takes the keys), with -asked: what a program asks never starts a program file (an AppImage,
+        an ELF, a desktop entry, a Windows program through Wine), which only the person opens. A descriptor's file is its path as this
+        process reads it (/proc/self/fd), and OpenDirectory's the folder it is in, or itself where it is one.
+*/
+static long sessionbus_open(void *context, const char *target, long length, int fd, int directory)
+{
+        static char path[4096];
+        string_address argv[5] = {(string_address) "/open", (string_address) "-asked", (string_address) "--", null, null};
+        long child;
+
+        (void)context, (void)length;
+        if (!target)
+        {
+                char link[40] = "/proc/self/fd/";
+                long got, n = 14, digits = 0;
+                unsigned long value = (unsigned long)fd;
+                char reversed[16];
+                file_facts facts;
+
+                do
+                        reversed[digits++] = (char)('0' + value % 10), value /= 10;
+                while (value && digits < (long)sizeof reversed);
+                while (digits)
+                        link[n++] = reversed[--digits];
+                link[n] = 0;
+                got = sessionbus_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)link, (positive)path, sizeof path - 1, 0, 0);
+                if (got <= 0 || path[0] != '/')
+                        return -1;
+                path[got] = 0;
+                if (directory && (file_look_code(fd, (string_address) "", AT_EMPTY_PATH, &facts) < 0 || (facts.mode & 0170000u) != 0040000u))
+                {
+                        while (got > 1 && path[got - 1] != '/')
+                                got--;
+                        path[got > 1 ? got - 1 : 1] = 0;
+                }
+                target = path;
+        }
+        argv[3] = (string_address)target;
+        child = system_fork();
+        if (child == 0)
+        {
+                string_address address_to inherited = file_environment_all();
+                positive have = 0, used = 0;
+                long quiet = sessionbus_call(syscall(openat), (positive)AT_FDCWD, (positive) "/dev/null", O_RDWR | O_CLOEXEC, 0, 0, 0);
+
+                while (inherited && inherited[have])
+                        have++;
+                string_address environment[have + 2];
+                environment[used++] = (string_address) "MOONWATER_ASKED=1";
+                for (positive at = 0; at < have; at++)
+                        if (!string_has_prefix(inherited[at], "MOONWATER_ASKED="))
+                                environment[used++] = inherited[at];
+                environment[used] = null;
+                if (quiet >= 0)
+                        sessionbus_call(syscall(dup3), (positive)quiet, 0, 0, 0, 0, 0), sessionbus_call(syscall(dup3), (positive)quiet, 1, 0, 0, 0, 0);
+                sessionbus_call(syscall(setsid), 0, 0, 0, 0, 0, 0);
+                system_execute(argv[0], argv, environment);
+                sessionbus_call(syscall(exit_group), 127, 0, 0, 0, 0, 0);
+        }
+        return child < 0 ? -1 : 0;
+}
+
 static struct dbus_host sessionbus_host = {0, sessionbus_alloc, sessionbus_release, sessionbus_now, sessionbus_random, 0, sessionbus_notices,
-                                           sessionbus_choose, sessionbus_unchoose};
+                                           sessionbus_choose, sessionbus_unchoose, sessionbus_open};
 
 /* ---- the settings ---- */
 
@@ -885,6 +949,9 @@ static b32 sessionbus_main()
         // Files is the chooser of FileChooser's requests, so the portal answers the version a browser asks for before it uses one (4:
         // OpenFile's directory and current_folder are read).
         dbus_interface_claim("org.freedesktop.portal.FileChooser", 4);
+        // OpenURI is the open tool's: a page, a program's link, a file or its folder, opened with what opens it (version 4: OpenFile's
+        // and OpenDirectory's descriptors, the activation token read and let be).
+        dbus_interface_claim("org.freedesktop.portal.OpenURI", 4);
         sessionbus_watch();
         sessionbus_settings();
         for (;;)

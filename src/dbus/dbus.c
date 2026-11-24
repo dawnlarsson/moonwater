@@ -150,6 +150,9 @@ struct dbus_host
         // dbus_choice_done; and one let go (the request closed, the client gone) before it was answered
         long (*choose)(void *context, const struct dbus_choice *choice);
         void (*unchoose)(void *context, long slot);
+        // optional: OpenURI's, a page, a link of a program's scheme or a file opened with what opens it (0, or -1 when it cannot be): a
+        // URI of length bytes, or (target null) a descriptor the caller sent, its file or, directory set, the folder it is in
+        long (*open)(void *context, const char *target, long length, int fd, int directory);
 };
 
 /* A match rule, as AddMatch gave it. */
@@ -2080,6 +2083,12 @@ static const char dbus_introspect_portal[] =
     "<method name=\"CreateMonitor\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
     "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
     "</interface>\n"
+    "<interface name=\"org.freedesktop.portal.OpenURI\">\n"
+    "<method name=\"OpenURI\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<method name=\"OpenFile\"><arg type=\"s\" direction=\"in\"/><arg type=\"h\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<method name=\"OpenDirectory\"><arg type=\"s\" direction=\"in\"/><arg type=\"h\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
+    "<property name=\"version\" type=\"u\" access=\"read\"/>\n"
+    "</interface>\n"
     "<interface name=\"org.freedesktop.portal.FileChooser\">\n"
     "<method name=\"OpenFile\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
     "<method name=\"SaveFile\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"in\"/><arg type=\"o\" direction=\"out\"/></method>\n"
@@ -2221,11 +2230,12 @@ static void dbus_portal_read_all(struct dbus_client *from, const struct dbus_mes
         then Chromium's and Electron's file dialogs are Files. (test/wayland_chromium.py holds Chromium's side with no
         chooser: the theme follows, and a click on a file input calls no OpenFile.)
 */
+#define DBUS_INTERFACES 16 // the portal interfaces the service can claim, its own and the host's (-i, a chooser, OpenURI, ScreenCast)
 static struct
 {
         char name[56];
         unsigned char version;
-} dbus_interfaces[8] = {{"org.freedesktop.portal.Settings", 2},
+} dbus_interfaces[DBUS_INTERFACES] = {{"org.freedesktop.portal.Settings", 2},
                         {"org.freedesktop.portal.FileChooser", 1},
                         {"org.freedesktop.host.portal.Registry", 1},
                         {"org.freedesktop.portal.Inhibit", 1},
@@ -2233,7 +2243,7 @@ static struct
 
 static long dbus_interface_version(const char *name)
 {
-        for (long at = 0; at < 8; at++)
+        for (long at = 0; at < DBUS_INTERFACES; at++)
                 if (dbus_interfaces[at].version && dbus_equal(dbus_interfaces[at].name, name))
                         return dbus_interfaces[at].version;
         return 0;
@@ -2243,7 +2253,7 @@ static long dbus_interface_version(const char *name)
 DBUS_API int dbus_interface_claim(const char *name, unsigned version)
 {
         // one the table has already answers the version claimed now (a host with a chooser claims FileChooser's)
-        for (long at = 0; at < 8; at++)
+        for (long at = 0; at < DBUS_INTERFACES; at++)
                 if (dbus_interfaces[at].version && dbus_equal(dbus_interfaces[at].name, name))
                 {
                         if (!version || version > 255)
@@ -2251,7 +2261,7 @@ DBUS_API int dbus_interface_claim(const char *name, unsigned version)
                         dbus_interfaces[at].version = (unsigned char)version;
                         return 0;
                 }
-        for (long at = 0; at < 8; at++)
+        for (long at = 0; at < DBUS_INTERFACES; at++)
                 if (!dbus_interfaces[at].version)
                 {
                         if (dbus_length(name) >= (long)sizeof dbus_interfaces[at].name || !version || version > 255)
@@ -2957,6 +2967,52 @@ static long dbus_choice_response(const struct dbus_client *c, const char *path, 
         return w.bad || dbus_parse(w.at, w.length, &parsed) < 0 ? -1 : w.length;
 }
 
+/*
+        OpenURI's methods, where the host opens (the sessionbus: the open tool, what opens what): OpenURI a page, a link of a program's
+        own scheme (a sign-in's way back) or a file: URI; OpenFile the file of a descriptor the caller sent, OpenDirectory the folder it
+        is in. The request ends at once, answered 0 when the host took it and 2 when it could not. A URI is one line of text: no byte
+        under a blank, at most DBUS_OPEN_URI bytes. 1 when the call was one of these and is answered.
+*/
+#define DBUS_OPEN_URI 8192
+// The descriptors the call the service answers now came with (dbus_route), none between calls.
+static const int *dbus_call_fds;
+static long dbus_call_nfds;
+static int dbus_portal_open(struct dbus_client *from, const struct dbus_message *m)
+{
+        static char uri[DBUS_OPEN_URI + 1];
+        const unsigned char *text;
+        long length, code = 2;
+        int file = dbus_equal(m->member, "OpenFile"), folder = dbus_equal(m->member, "OpenDirectory");
+
+        if (!dbus.host->open || !dbus_equal(m->interface, "org.freedesktop.portal.OpenURI") ||
+            !(dbus_equal(m->member, "OpenURI") ? dbus_equal(m->signature, "ssa{sv}") : (file || folder) && dbus_equal(m->signature, "sha{sv}")))
+                return 0;
+        if (!file && !folder)
+        {
+                long k = 0;
+
+                length = dbus_arg_text(m, 1, &text);
+                while (k < length && text[k] >= 0x20 && text[k] != 0x7f)
+                        k++;
+                if (length > 0 && length <= DBUS_OPEN_URI && k == length)
+                {
+                        dbus_copy(uri, text, length), uri[length] = 0;
+                        code = dbus.host->open(dbus.host->context, uri, length, -1, 0) < 0 ? 2 : 0;
+                }
+        }
+        else
+        {
+                long s, at = dbus_arg_at(m, 1, &s);
+                unsigned long index;
+
+                if (at >= 0 && m->signature[s] == 'h' && (index = dbus_get32(m->bytes + m->body_at + DBUS_ALIGN(at, 4))) < (unsigned long)dbus_call_nfds &&
+                    dbus_call_fds && dbus_call_fds[index] >= 0)
+                        code = dbus.host->open(dbus.host->context, 0, 0, dbus_call_fds[index], folder) < 0 ? 2 : 0;
+        }
+        dbus_portal_request(from, m, 2, (unsigned long)code);
+        return 1;
+}
+
 // FileChooser's methods, when the host shows a chooser: 1 when the call was one and is answered, 0 to leave it to the request that ends.
 static int dbus_portal_choose(struct dbus_client *from, const struct dbus_message *m)
 {
@@ -3156,6 +3212,8 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
         }
         if (dbus_portal_choose(from, m))
                 return;
+        if (dbus_portal_open(from, m))
+                return;
         /*
                 A monitor of the session would be told when it ends and asked whether it may (StateChanged, QueryEndResponse),
                 and the desktop asks no program that: so the request ends at once, 2 (another way), and the program goes on with
@@ -3262,8 +3320,11 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m, c
                 to = dbus_equal(dest, DBUS_NAME_PORTAL) ? DBUS_SERVICE : dbus_resolve(dest);
                 if (to == DBUS_SERVICE)
                 {
-                        dbus_close_fds(fds, nfds);
+                        // what the call sent with it is the service's while it answers (OpenURI's OpenFile), and closed after
+                        dbus_call_fds = fds, dbus_call_nfds = nfds;
                         dbus_service_call(from, m);
+                        dbus_call_fds = 0, dbus_call_nfds = 0;
+                        dbus_close_fds(fds, nfds);
                         return;
                 }
                 if (to < 0)

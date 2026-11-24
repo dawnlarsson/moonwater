@@ -984,12 +984,293 @@ static b32 apps_open_tool(string_address address_to words, positive count)
         return host_run(argv);
 }
 
+/*
+        moonwater open is asked of the desktop through the OpenURI portal, as any program asks it: on the machine and from inside a bowl
+        alike (a bowl's xdg-open is this: bowl.c's BOWL_XDG_OPEN), so what opens a page, a program's link or a file is the desktop's
+        choice and is started as the desktop starts it. The session bus is reached as its clients reach it (DBUS_SESSION_BUS_ADDRESS,
+        else Moonwater's), with EXTERNAL authentication, Hello, then OpenURI.OpenURI("", URI, {}). Where no bus answers (no desktop),
+        root opens it with the open tool itself.
+*/
+#define APPS_BUS_ROOM (DBUS_OPEN_URI_MOST + 1024)
+#define DBUS_OPEN_URI_MOST 8192
+
+struct apps_bus_message
+{
+        p8 bytes[APPS_BUS_ROOM];
+        positive used;
+};
+
+static fn apps_bus_pad(struct apps_bus_message address_to m, positive align)
+{
+        while (m->used % align && m->used < sizeof(m->bytes))
+                m->bytes[m->used++] = 0;
+}
+
+static fn apps_bus_u32(struct apps_bus_message address_to m, p32 value)
+{
+        apps_bus_pad(m, 4);
+        if (m->used + 4 <= sizeof(m->bytes))
+                memory_copy(m->bytes + m->used, &value, 4), m->used += 4;
+}
+
+static fn apps_bus_string(struct apps_bus_message address_to m, string_address text)
+{
+        positive length = string_length(text);
+
+        apps_bus_u32(m, (p32)length);
+        if (m->used + length + 1 <= sizeof(m->bytes))
+                memory_copy(m->bytes + m->used, text, length + 1), m->used += length + 1;
+}
+
+static fn apps_bus_signature(struct apps_bus_message address_to m, string_address text)
+{
+        positive length = string_length(text);
+
+        if (m->used + length + 2 <= sizeof(m->bytes))
+                m->bytes[m->used++] = (p8)length, memory_copy(m->bytes + m->used, text, length + 1), m->used += length + 1;
+}
+
+static fn apps_bus_field(struct apps_bus_message address_to m, p8 code, string_address type, string_address value)
+{
+        apps_bus_pad(m, 8);
+        if (m->used + 1 <= sizeof(m->bytes))
+                m->bytes[m->used++] = code;
+        apps_bus_signature(m, type);
+        type[0] == 'g' ? apps_bus_signature(m, value) : apps_bus_string(m, value);
+}
+
+// A method call: its header and its fields, the body after it (OpenURI's "ssa{sv}" where uri is given, Hello's none).
+static b32 apps_bus_call(struct apps_bus_message address_to m, p32 serial, string_address destination, string_address path,
+                         string_address interface, string_address member, string_address uri)
+{
+        positive fields_at, body_at;
+        p32 length;
+
+        m->used = 0;
+        m->bytes[m->used++] = 'l', m->bytes[m->used++] = 1, m->bytes[m->used++] = 0, m->bytes[m->used++] = 1;
+        apps_bus_u32(m, 0), apps_bus_u32(m, serial), apps_bus_u32(m, 0);
+        fields_at = m->used;
+        apps_bus_field(m, 1, "o", path);
+        apps_bus_field(m, 2, "s", interface);
+        apps_bus_field(m, 3, "s", member);
+        apps_bus_field(m, 6, "s", destination);
+        if (uri)
+                apps_bus_field(m, 8, "g", "ssa{sv}");
+        length = (p32)(m->used - fields_at);
+        memory_copy(m->bytes + 12, &length, 4);
+        apps_bus_pad(m, 8);
+        body_at = m->used;
+        if (uri)
+        {
+                apps_bus_string(m, "");
+                apps_bus_string(m, uri);
+                apps_bus_u32(m, 0); // the options: none
+                apps_bus_pad(m, 8);  // where the empty array's dictionary entries would begin
+        }
+        length = (p32)(m->used - body_at);
+        memory_copy(m->bytes + 4, &length, 4);
+        return m->used < sizeof(m->bytes);
+}
+
+// A reply's serial it answers, from a message's fields (REPLY_SERIAL, code 5): 0 where it has none.
+static p32 apps_bus_reply_to(const p8 address_to b, positive fields)
+{
+        positive at = 16, stop = 16 + fields;
+
+        while (at < stop)
+        {
+                p8 code, length;
+                char type;
+
+                at = (at + 7) & ~(positive)7;
+                if (at + 2 > stop)
+                        break;
+                code = b[at], length = b[at + 1], type = (char)b[at + 2];
+                at += 2 + length + 1;
+                if (type == 'u' || type == 's' || type == 'o')
+                {
+                        p32 value;
+
+                        at = (at + 3) & ~(positive)3;
+                        memory_copy(&value, b + at, 4);
+                        if (code == 5 && type == 'u')
+                                return value;
+                        at += 4 + (type == 'u' ? 0 : value + 1);
+                }
+                else if (type == 'g')
+                        at += 1 + (positive)b[at] + 1;
+                else
+                        break;
+        }
+        return 0;
+}
+
+static b32 apps_bus_send(bipolar handle, const p8 address_to bytes, positive length)
+{
+        return system_write_all((positive)handle, bytes, length) == length;
+}
+
+// OpenURI asked for uri: 0 the desktop took it, 1 it refused it, -1 no bus answered.
+static int apps_portal_open(string_address uri)
+{
+        static struct apps_bus_message m;
+        static p8 in[65536];
+        string_address address = getenv("DBUS_SESSION_BUS_ADDRESS");
+        struct { unsigned short family; char path[108]; } place;
+        char line[160];
+        positive held = 0, length;
+        bipolar handle;
+        positive uid = (positive)system_call(syscall(getuid));
+
+        memory_zero(&place, sizeof(place));
+        place.family = AF_UNIX;
+        if (address && string_has_prefix(address, "unix:path="))
+        {
+                string_address from = address + 10;
+                positive n = 0;
+
+                while (from[n] && from[n] != ',' && n + 1 < sizeof(place.path))
+                        place.path[n] = from[n], n++;
+        }
+        else
+                string_copy_bounded((string_address)place.path, BOWL_SESSION_BUS_SOCKET, sizeof(place.path));
+        if ((handle = system_call_3(syscall(socket), AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0)
+                return -1;
+        if (system_call_3(syscall(connect), (positive)handle, (positive)&place, sizeof(place)) < 0)
+                return system_close(handle), -1;
+        // EXTERNAL: the user's number in decimal, each digit as two hex digits.
+        {
+                char digits[24], hex[48];
+                positive n = 0, h = 0;
+
+                do
+                        digits[n++] = (char)('0' + uid % 10), uid /= 10;
+                while (uid && n < sizeof(digits));
+                while (n)
+                {
+                        char d = digits[--n];
+
+                        hex[h++] = "0123456789abcdef"[(p8)d >> 4], hex[h++] = "0123456789abcdef"[(p8)d & 15];
+                }
+                hex[h] = 0;
+                string_copy_bounded((string_address)line + 1, "AUTH EXTERNAL ", sizeof(line) - 1);
+                line[0] = 0;
+                string_append_bounded((string_address)line + 1, (string_address)hex, sizeof(line) - 1);
+                string_append_bounded((string_address)line + 1, "\r\n", sizeof(line) - 1);
+                if (!apps_bus_send(handle, (const p8 address_to)line, 1 + string_length((string_address)line + 1)))
+                        return system_close(handle), -1;
+        }
+        while (held < 2 || in[held - 2] != '\r' || in[held - 1] != '\n')
+        {
+                bipolar got = system_read_once((positive)handle, in + held, 255 - held);
+
+                if (got <= 0 || held + (positive)got >= 255)
+                        return system_close(handle), -1;
+                held += (positive)got;
+        }
+        if (held < 3 || memory_compare(in, "OK ", 3) || !apps_bus_send(handle, (const p8 address_to) "BEGIN\r\n", 7))
+                return system_close(handle), -1;
+        if (!apps_bus_call(&m, 1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", null) ||
+            !apps_bus_send(handle, m.bytes, m.used) ||
+            !apps_bus_call(&m, 2, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI", "OpenURI",
+                           uri) ||
+            !apps_bus_send(handle, m.bytes, m.used))
+                return system_close(handle), -1;
+        // The answers, until the one to OpenURI: a return is taken, an error refused.
+        for (held = 0;;)
+        {
+                bipolar got = held < sizeof(in) ? system_read_once((positive)handle, in + held, sizeof(in) - held) : -1;
+                positive fields, body, total;
+                p32 answers;
+
+                if (got <= 0)
+                        return system_close(handle), -1;
+                held += (positive)got;
+                while (held >= 16)
+                {
+                        memory_copy(&length, in + 4, 4), body = length & 0xffffffffu;
+                        memory_copy(&length, in + 12, 4), fields = length & 0xffffffffu;
+                        total = 16 + ((fields + 7) & ~(positive)7) + body;
+                        if (in[0] != 'l' || total > sizeof(in))
+                                return system_close(handle), -1;
+                        if (held < total)
+                                break;
+                        answers = apps_bus_reply_to(in, fields);
+                        if (answers == 2 && (in[1] == 2 || in[1] == 3))
+                                return system_close(handle), in[1] == 2 ? 0 : 1;
+                        memory_copy(in, in + total, held - total), held -= total;
+                }
+        }
+}
+
+// A target as a URI: one with a scheme as it is, a path as a file: URI of the absolute path (from the working folder), escaped.
+static b32 apps_open_uri(string_address target, char address_to into, positive room)
+{
+        positive scheme = 0, made = 0;
+        char path[4096];
+
+        while ((target[scheme] >= 'a' && target[scheme] <= 'z') || (target[scheme] >= 'A' && target[scheme] <= 'Z') ||
+               (scheme && ((target[scheme] >= '0' && target[scheme] <= '9') || target[scheme] == '+' || target[scheme] == '-' || target[scheme] == '.')))
+                scheme++;
+        if (scheme >= 2 && target[scheme] == ':')
+                return string_copy_bounded((string_address)into, target, room) < room;
+        path[0] = 0;
+        if (target[0] != '/' && (!getcwd((string_address)path, sizeof(path)) ||
+                                 string_append_bounded((string_address)path, "/", sizeof(path)) >= sizeof(path)))
+                return false;
+        if (string_append_bounded((string_address)path, target, sizeof(path)) >= sizeof(path) || room < 8)
+                return false;
+        memory_copy(into, "file://", 7), made = 7;
+        for (positive at = 0; path[at]; at++)
+        {
+                p8 b = (p8)path[at];
+
+                if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || string_first_of("-._~/", (p8)b))
+                {
+                        if (made + 1 >= room)
+                                return false;
+                        into[made++] = (char)b;
+                }
+                else
+                {
+                        if (made + 3 >= room)
+                                return false;
+                        into[made++] = '%', into[made++] = "0123456789ABCDEF"[b >> 4], into[made++] = "0123456789ABCDEF"[b & 15];
+                }
+        }
+        into[made] = 0;
+        return true;
+}
+
 // moonwater open TARGET...: each opened with what opens its type (a page, a link of a program's scheme, a file, a folder).
 static b32 host_open(string_address address_to arguments, positive count)
 {
-        if (count < 3)
+        b32 failed = 0;
+        positive first = 2;
+
+        if (count > first && string_equals(arguments[first], "--"))
+                first++;
+        if (count <= first)
                 return host_usage();
-        return apps_open_tool(arguments + 2, count - 2);
+        for (positive at = first; at < count; at++)
+        {
+                char uri[DBUS_OPEN_URI_MOST + 1];
+                int said;
+
+                if (!apps_open_uri(arguments[at], uri, sizeof(uri)))
+                {
+                        failed |= host_refuse("%s is too long to open\n", arguments[at]);
+                        continue;
+                }
+                said = apps_portal_open((string_address)uri);
+                if (said == 1)
+                        failed |= host_refuse("the desktop did not open %s (open -type says what would)\n", arguments[at]);
+                else if (said < 0 && bowl_is_root())
+                        failed |= apps_open_tool(arguments + at, 1);
+                else if (said < 0)
+                        failed |= host_refuse("no desktop answers to open %s\n", arguments[at]);
+        }
+        return failed;
 }
 
 /*

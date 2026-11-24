@@ -7,6 +7,7 @@
             open -handlers TYPE|KIND         every handler that opens it: its name for -set, what it is called, * for the one it opens with
             open -defaults                   each kind, what opens it, and whether the person chose it
             open -set TYPE|KIND HANDLER|auto the person's choice, kept in UI_OPEN_DEFAULTS (auto: none, the first that opens it)
+            open -asked [--] TARGET...       as a program asked it (the OpenURI portal, src/dbus/service.c): a program file is not opened
 
         The kinds are browser, mail, folders, text, images, video, music and documents; a type is a MIME type or x-scheme-handler/SCHEME.
         moonwater open and moonwater defaults are this.
@@ -133,6 +134,24 @@ static int open_set(const char address_to key, const char address_to handle)
         return 0;
 }
 
+/*
+        The types that are a program, which what a program asks (-asked: OpenURI, a bowl's xdg-open) never opens: a page or a message
+        that ends in one would run it with a click. The person opens them from Files, the launcher or a terminal.
+*/
+static b32 open_runs(const char address_to type)
+{
+        static const char address_to const runs[] = {
+            "application/x-executable", "application/x-pie-executable", "application/x-sharedlib", "application/vnd.appimage",
+            "application/x-appimage", "application/x-desktop", "application/x-ms-dos-executable", "application/x-msdownload",
+            "application/x-msi", "application/vnd.microsoft.portable-executable", "application/x-ms-shortcut", "application/x-java-archive",
+            "application/vnd.flatpak.ref", "application/vnd.flatpak", "application/x-deb", "application/x-rpm"};
+
+        for (positive at = 0; at < sizeof(runs) / sizeof(runs[0]); at++)
+                if (string_equals((string_address)type, (string_address)runs[at]))
+                        return true;
+        return false;
+}
+
 static b32 open_main()
 {
         positive count = (positive)program_argument_count();
@@ -163,16 +182,33 @@ static b32 open_main()
                     log_flush();
                 return 0;
         }
-        for (positive at = first[0] == '-' && first[1] == '-' && !first[2] ? 2 : 1; at < count; at++)
         {
-                int said = ui_open((const char address_to)program_argument(at));
+                positive at = 1;
+                b32 asked = false;
 
-                if (said == UI_OPEN_NOT_THERE)
-                        failed = open_fail("is not there, and no address", program_argument(at));
-                else if (said == UI_OPEN_NO_HANDLER)
-                        failed = open_fail("nothing here opens it (open -type says its type)", program_argument(at));
-                else if (said == UI_OPEN_NOT_STARTED)
-                        failed = open_fail("what opens it could not be started", program_argument(at));
+                if (string_equals(program_argument(at), (string_address) "-asked"))
+                        asked = true, at++;
+                if (at < count && string_equals(program_argument(at), (string_address) "--"))
+                        at++;
+                for (; at < count; at++)
+                {
+                        char type[UI_OPEN_TYPE], path[4096];
+                        int said;
+
+                        if (asked && ui_open_type((const char address_to)program_argument(at), type, sizeof(type), path, sizeof(path)) && open_runs(type))
+                        {
+                                failed = open_fail("is a program, which a program's link does not start", program_argument(at));
+                                continue;
+                        }
+                        said = ui_open((const char address_to)program_argument(at));
+
+                        if (said == UI_OPEN_NOT_THERE)
+                                failed = open_fail("is not there, and no address", program_argument(at));
+                        else if (said == UI_OPEN_NO_HANDLER)
+                                failed = open_fail("nothing here opens it (open -type says its type)", program_argument(at));
+                        else if (said == UI_OPEN_NOT_STARTED)
+                                failed = open_fail("what opens it could not be started", program_argument(at));
+                }
         }
         return failed;
 }
