@@ -2083,14 +2083,32 @@ static inline int window_input_game(const unsigned char *keys, unsigned int prop
         the default tier (the node's owner), so every bowl read the keyboard
         through it: `bowl /bowls/alpine sh -c 'exec 3</dev/hidraw0'` opened
         the Keychron's on box. uhid makes a HID device of whatever a program
-        writes, as uinput does an input device. Each is /dev/null in the
-        bowl's view, as /dev/uinput is: it opens and refuses every control.
+        writes, as uinput does an input device. Each is a closed node in the
+        bowl's view (bowl_closed_make): it is there, and opening it fails, as a
+        device the user may not open does on any desktop. It was /dev/null,
+        which opens, is always ready and reads nothing: Wine's HID bus polls
+        every hidraw node it opens and read each one's end of file without
+        end, a whole core for as long as any Proton game ran.
         A node made after the launch (a device plugged in while the bowl's
         programs run) is the machine's own as it stands, which on the hardened
         tier is root's 0600 and closed to the bowl's user; a bowl the grants
         name has the keeper below, which masks those too.
 */
-static bipolar bowl_hidraw_mask(void)
+#define BOWL_CLOSED_NAME ".closed"
+
+/*
+        A closed node: a character node of number 0:0 at name in dir, mode 0.
+        No driver has that number, so an open fails (ENXIO) whoever asks; on a
+        nodev mount it fails sooner (EACCES). Made again each time, so a node
+        left by an earlier view is never trusted.
+*/
+static bipolar bowl_closed_make(bipolar dir, string_address name)
+{
+        system_remove_at(dir, name, 0);
+        return system_call_4(syscall(mknodat), (positive)dir, (positive)name, S_IFCHR, 0);
+}
+
+static bipolar bowl_hidraw_mask(string_address closed)
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
@@ -2098,13 +2116,13 @@ static bipolar bowl_hidraw_mask(void)
         bipolar failed = 0;
 
         if (system_access_at(AT_FDCWD, "/dev/uhid", 0) >= 0)
-                failed = system_mount("/dev/null", "/dev/uhid", 0, MS_BIND, 0);
+                failed = system_mount(closed, "/dev/uhid", 0, MS_BIND, 0);
         if (failed || !file_walk_open(address_of walk, AT_FDCWD, "/dev"))
                 return failed;
         while (!failed && (entry = file_walk_next(address_of walk)))
                 if (string_has_prefix(entry->d_name, "hidraw") &&
                     path_join(path, sizeof(path), "/dev", entry->d_name))
-                        failed = system_mount("/dev/null", (string_address)path, 0, MS_BIND, 0);
+                        failed = system_mount(closed, (string_address)path, 0, MS_BIND, 0);
         file_walk_close(address_of walk);
         return failed;
 }
@@ -2117,10 +2135,13 @@ static bipolar bowl_hidraw_mask(void)
         own mount namespace /dev/input is an empty tmpfs and /dev/uinput is
         /dev/null, which opens but refuses every control (a pad cannot be
         made, and no event can be read from the machine); the raw HID nodes
-        go the same way (bowl_hidraw_mask).
+        are the closed node, made in that tmpfs (bowl_hidraw_mask). A machine
+        with no /dev/input has no tmpfs to make it in, and its HID nodes are
+        /dev/null as before.
 */
 static bipolar bowl_input_mask(void)
 {
+        string_address closed = "/dev/null";
         bipolar failed;
 
         if (system_access_at(AT_FDCWD, "/dev/input", 0) >= 0)
@@ -2129,6 +2150,8 @@ static bipolar bowl_input_mask(void)
                                       MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755");
                 if (failed)
                         return failed;
+                if (!bowl_closed_make(AT_FDCWD, "/dev/input/" BOWL_CLOSED_NAME))
+                        closed = "/dev/input/" BOWL_CLOSED_NAME;
         }
         if (system_access_at(AT_FDCWD, "/dev/uinput", 0) >= 0)
         {
@@ -2136,7 +2159,7 @@ static bipolar bowl_input_mask(void)
                 if (failed)
                         return failed;
         }
-        return bowl_hidraw_mask();
+        return bowl_hidraw_mask(closed);
 }
 
 /*
@@ -2158,9 +2181,10 @@ static bipolar bowl_input_mask(void)
         the device's own number, for each pad, joystick and accelerometer
         (window_input_game, the compositor's own rule) and each js node, owned
         by the bowl's user; each controller's /dev/hidrawN a node of the bowl's
-        user bound over it, and every other hidraw node /dev/null; /dev/uinput
-        a node of the bowl's user; /dev/uhid /dev/null. The nodes bound over
-        others are kept in BOWL_PAD_STAGE, root's 0700. On the hardened tier
+        user bound over it, and every other hidraw node the closed node (one
+        that fails to open, bowl_closed_make); /dev/uinput a node of the bowl's
+        user; /dev/uhid the closed node. The nodes bound over others are kept
+        in BOWL_PAD_STAGE, root's 0700. On the hardened tier
         that is the wall: the bowl's user is not root and in no input group, so
         a mount it takes away leaves the machine's nodes, root's, closed to it.
         On the default tier the bowl is root, as everywhere else on that tier.
@@ -2435,7 +2459,8 @@ static fn bowl_pad_event_add(string_address name, p32 owner)
 /*
         A hidraw node that came, or that was there: a controller's is the
         node of the bowl's user, made in the stage and bound over the
-        machine's; any other is /dev/null.
+        machine's; any other is the stage's closed node (bowl_pad_view made
+        it), or /dev/null if that could not be made.
 */
 static fn bowl_pad_hidraw_add(string_address name, p32 owner)
 {
@@ -2451,7 +2476,8 @@ static fn bowl_pad_hidraw_add(string_address name, p32 owner)
             bowl_pad_make(bowl_pad_stage_dir, name, bowl_pad_number("hidraw", name), owner) &&
             !system_mount((string_address)staged, (string_address)path, 0, MS_BIND, 0))
                 return;
-        system_mount("/dev/null", (string_address)path, 0, MS_BIND, 0);
+        if (system_mount(BOWL_PAD_STAGE "/" BOWL_CLOSED_NAME, (string_address)path, 0, MS_BIND, 0))
+                system_mount("/dev/null", (string_address)path, 0, MS_BIND, 0);
 }
 
 // What a class has now, each name handed to each: the view's first making, and again when uevents were lost.
@@ -2489,6 +2515,7 @@ static bipolar bowl_pad_view(p32 owner)
                                             FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (bowl_pad_stage_dir < 0)
                 return bowl_pad_stage_dir;
+        bowl_closed_make(bowl_pad_stage_dir, BOWL_CLOSED_NAME);
         if (system_access_at(AT_FDCWD, "/dev/uinput", 0) >= 0)
         {
                 failed = bowl_pad_make(bowl_pad_stage_dir, "uinput",
@@ -2498,7 +2525,8 @@ static bipolar bowl_pad_view(p32 owner)
                 if (failed)
                         return failed;
         }
-        if (system_access_at(AT_FDCWD, "/dev/uhid", 0) >= 0)
+        if (system_access_at(AT_FDCWD, "/dev/uhid", 0) >= 0 &&
+            system_mount(BOWL_PAD_STAGE "/" BOWL_CLOSED_NAME, "/dev/uhid", 0, MS_BIND, 0))
                 failed = system_mount("/dev/null", "/dev/uhid", 0, MS_BIND, 0);
         bowl_pad_scan("input", bowl_pad_event_add, owner);
         bowl_pad_scan("hidraw", bowl_pad_hidraw_add, owner);
