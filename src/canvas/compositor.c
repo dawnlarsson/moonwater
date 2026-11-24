@@ -978,6 +978,18 @@ static void *compositor_map_zeroed(unsigned long bytes)
         return got < 0 && got > -4096 ? 0 : (void *)got;
 }
 
+// compositor_map_zeroed for pixels a frame may be a picture of (the taskbar's bands, the glass): the compositor's own private pages, said to the card
+// (gpu_own), which maps them written where the chip has no maps to read (Gen7, Gen7.5, Gen11, Gen12: unsaid, every present whose damage met the band was the
+// processor's there, 416 of 616 with a window fullscreen on a Haswell). compositor_unmap_pixels says them gone.
+static void *compositor_map_pixels(unsigned long bytes)
+{
+        void *got = compositor_map_zeroed(bytes);
+
+        if (got)
+                gpu_own(got, (positive)bytes, 1);
+        return got;
+}
+
 static int compositor_tray_nth(int index)
 {
         int n = 0;
@@ -1484,8 +1496,8 @@ static void compositor_font(string_address path)
 
         taskbar_bytes(compositor_most_width(), compositor_most_height(), compositor.scale, &band_bytes, &glass_bytes);
         engine = compositor_map_zeroed(sizeof(font_engine));
-        band = compositor_map_zeroed(band_bytes);
-        compositor.glass_bytes = glass_bytes, glass = compositor_map_zeroed(glass_bytes);
+        band = compositor_map_pixels(band_bytes);
+        compositor.glass_bytes = glass_bytes, glass = compositor_map_pixels(glass_bytes);
         if (!engine || !band || !glass || font_load(&compositor.face, (const p8 address_to)bytes, size, 0) != 0)
                 { compositor_say("no font for the tabs, error", -COMPOSITOR_EINVAL); return; }
 
@@ -1527,13 +1539,15 @@ static void compositor_screens_say(void)
 
 static void compositor_unmap_pixels(unsigned int **pixels, unsigned long *bytes)
 {
-        if (*pixels) gpu_forget((const void *)(*pixels), (positive)(*bytes)), compositor_call(syscall(munmap), (positive)*pixels, *bytes, 0, 0, 0, 0);
+        if (*pixels)
+                gpu_forget((const void *)(*pixels), (positive)(*bytes)), gpu_own((const void *)(*pixels), (positive)(*bytes), 0),
+                    compositor_call(syscall(munmap), (positive)*pixels, *bytes, 0, 0, 0, 0);
         *pixels = 0, *bytes = 0;
 }
 
 static unsigned int *compositor_remap(unsigned int *was, unsigned long had, unsigned long bytes)
 {
-        unsigned int *mapped = (unsigned int *)compositor_map_zeroed(bytes);
+        unsigned int *mapped = (unsigned int *)compositor_map_pixels(bytes);
         if (was) compositor_unmap_pixels(&was, &had);
         return mapped;
 }
