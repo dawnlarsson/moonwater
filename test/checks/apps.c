@@ -10992,6 +10992,7 @@ b32 main()
         GROUP("check_clock_places", check_clock_places());
         GROUP("check_moon_motion", check_moon_motion());
         GROUP("check_wallpaper_ground", check_wallpaper_ground());
+        GROUP("check_wallpaper_editor", check_wallpaper_editor());
         GROUP("check_bar_options", check_bar_options());
         GROUP("check_taskbar_tree", check_taskbar_tree());
         GROUP("check_taskbar_fullscreen", check_taskbar_fullscreen());

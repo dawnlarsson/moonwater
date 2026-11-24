@@ -1355,6 +1355,15 @@ static void present_direct_cleared(void)
 static int compositor_scenes_shown(void);
 static int compositor_scenes_hides(int row);
 static unsigned int compositor_scenes_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room);
+// The wallpaper's editor (wallpaper.c): whether it is drawn, and its frames, the veil over its screen's windows and its cards.
+static int compositor_wall_editor_shown(void);
+static unsigned int compositor_wall_editor_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room);
+
+// Whether the overview or the wallpaper's editor is drawn: the screen is composed, no window shown straight from its buffer or on a plane.
+static int compositor_overview_drawn(void)
+{
+        return compositor_scenes_shown() || compositor_wall_editor_shown();
+}
 
 // The stack's frames, a window's picture and its layers each (a fullscreen window fitted to its screen with the black round it first).
 // While the Scenes overview is drawn, the rows on its screen are not drawn where they are: the overview's frames are put where the
@@ -1394,6 +1403,8 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
                 }
         if (scenes == 1)
                 count += compositor_scenes_frames(frames, rows, count, room);
+        // The editor over every window, under the band: its veil and its cards.
+        count += compositor_wall_editor_frames(frames, rows, count, room);
         return count;
 }
 
@@ -1608,7 +1619,7 @@ static void present_count_composed(int direct, int turning, const unsigned int *
 
         if (!compositor.table || fs < 0 || !compositor_visible(fs))
                 return;
-        if (turning || compositor_scenes_shown())
+        if (turning || compositor_overview_drawn())
                 why = COMPOSITOR_DIRECT_SCENE;
         else if (!windows || rows[windows - 1] != (unsigned int)fs)
                 why = COMPOSITOR_DIRECT_NOT_TOP;
@@ -1633,7 +1644,7 @@ static void compositor_present_frames(void)
         if (compositor.direct_row >= 0 && compositor_visible(compositor.direct_row) && !compositor_turning() &&
             (compositor_space_is_fs_row(compositor.direct_row) ||
              (compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row)) &&
-            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_scenes_shown() && taskbar_shift() >= UI_ONE &&
+            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_overview_drawn() && taskbar_shift() >= UI_ONE &&
             !compositor_record_until)
         {
                 int row = compositor.direct_row, menu[4];
@@ -1660,10 +1671,10 @@ static void compositor_present_frames(void)
         compositor_record_scene(frames, windows);
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
-        direct = turning || compositor_scenes_shown() ? -1 : compositor_direct_candidate(frames, rows, windows);
+        direct = turning || compositor_overview_drawn() ? -1 : compositor_direct_candidate(frames, rows, windows);
         // None at the top: a fullscreen window under pop-ups is shown straight, they on the overlay's band over it (compositor_direct_under).
         over = windows;
-        if (direct < 0 && !turning && !compositor_scenes_shown() && (direct = compositor_direct_under(frames, rows, windows, &over)) >= 0)
+        if (direct < 0 && !turning && !compositor_overview_drawn() && (direct = compositor_direct_under(frames, rows, windows, &over)) >= 0)
         {
                 // The glass of what is over it is made from it before the band is composed: its rows under the band and the blur's reach
                 // read by the card into the table first, where its picture is straight (tiled) and not read by the processor.
@@ -1739,7 +1750,7 @@ static void compositor_present_frames(void)
         compositor.screen_stale = 0;
 
         // No window is lifted onto a plane while Scenes roll: the plane shows a window where it is, and the roll draws it on its way.
-        plane = !back && !turning && !compositor_scenes_shown() && !compositor_roll.on ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
+        plane = !back && !turning && !compositor_overview_drawn() && !compositor_roll.on ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
         if (plane < 0 && compositor.table)
                 compositor.table->unscanned_by[compositor.table->unscanned < WINDOWS_UNSCANNED ? compositor.table->unscanned : 0]++;
         if (back || turning || !compositor_gpu_tiled_ready())

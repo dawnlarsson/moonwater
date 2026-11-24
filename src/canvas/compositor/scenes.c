@@ -320,12 +320,15 @@ static unsigned int compositor_scenes_sid(int card)
 
 // The overview opens on a screen: the Scene strip and the current Scene's windows are laid out there. Mission Control, the
 // drawer this replaces, is closed when it opens.
+static void compositor_wall_edit(int screen, int how); // wallpaper.c: the wallpaper's editor, which shuts when the overview opens
+
 static void compositor_scenes_open(int screen)
 {
         if (screen < 0 || screen >= compositor_output_count())
                 return;
         compositor_spaces_ensure();
         taskbar_menu_shut();
+        compositor_wall_edit(-1, 0);
         if (compositor.scenes.open && compositor.scenes.screen != screen)
                 compositor_scenes_damage();
         compositor.scenes.open = 1, compositor.scenes.screen = screen;

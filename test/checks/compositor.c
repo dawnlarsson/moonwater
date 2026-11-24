@@ -3526,6 +3526,81 @@ static void check_wallpaper_ground(void)
 }
 
 /*
+        The wallpaper's editor over a Scene (wallpaper.c): opened, its cards are the moon's three words and the folder, the Scene's own ringed in
+        the accent; all the way open the veil over the screen is the wallpaper at 245 of 255, premultiplied, a blended frame before the cards;
+        a press on the dark moon's card gives the Scene its word and the editor stays; a press off the cards shuts it; the overview opened
+        shuts it too; and while it is drawn no window takes the pointer under it.
+*/
+static void check_wallpaper_editor(void)
+{
+    static struct windows *table_scratch;
+    static char scenes_path[64], pictures_path[64];
+    static struct compositor_frame frames[16];
+    static unsigned int rows[16];
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
+    unsigned int made = 0, px, want;
+    positive length;
+    b32 opened, veiled, framed, chose, shut, overview, pointed;
+
+    length = positive_into_string((p8 address_to)scenes_path + 23, (positive)system_call(syscall(getpid)));
+    memory_copy(scenes_path, "/tmp/moonwater-walls-e.", 23), scenes_path[23 + length] = 0;
+    memory_copy(pictures_path, scenes_path, 24 + length), pictures_path[21] = 'p';
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path;
+    compositor_zero();
+    windows_scratch_zero(table_at);
+    table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u, table_at->motion = 1; // reduced: no spring
+    compositor.table = table_at, compositor.width = 320, compositor.height = 200, compositor.scale = 100, compositor.direct_row = -1;
+    compositor_wall_rows.ready = 1;
+    compositor_wall_keep();
+    compositor_wall_finish();
+    compositor_spaces_ensure();
+    compositor_wall_edit(0, 1);
+    opened = compositor_wall_editing() && compositor_wall_editor.cards == 4 && compositor_wall_editor_shown() &&
+             string_equals((string_address)compositor_wall_editor.word[1], "dark") && !compositor_wall_editor.word[3][0];
+    compositor_wall_veil_keep();
+    px = compositor_wall ? compositor_wall[100 * 320 + 160] : 0;
+    want = ((px >> 16 & 255) * 245 + 127) / 255;
+    veiled = compositor_wall_editor.veil && compositor_wall_editor.veil_level == COMPOSITOR_WALL_VEIL_STEPS &&
+             compositor_wall_editor.veil[100 * 320 + 160] >> 24 == 245 &&
+             ((compositor_wall_editor.veil[100 * 320 + 160] >> 16 & 255) + 1 >= want && (compositor_wall_editor.veil[100 * 320 + 160] >> 16 & 255) <= want + 1);
+    made = compositor_wall_editor_frames(frames, rows, 0, 16);
+    framed = made == 1 + 4 + 2 && frames[0].blend && frames[0].pixels == compositor_wall_editor.veil && frames[0].width == 320 &&
+             frames[1].pixels && frames[1].edge == (compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu) && frames[2].edge != frames[1].edge &&
+             frames[4].fill && !frames[4].pixels;
+    // The dark moon's card pressed and let go: the Scene's word, and the editor still open.
+    compositor.pointer_x = compositor_wall_editor.card[1][0] + compositor_wall_editor.card[1][2] / 2;
+    compositor.pointer_y = compositor_wall_editor.card[1][1] + compositor_wall_editor.card[1][3] / 2;
+    pointed = compositor_wall_editor_point(compositor.pointer_x, compositor.pointer_y) && compositor_wall_editor_takes(COMPOSITOR_BTN_LEFT, 1);
+    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+    chose = compositor_wall_editing() && string_equals((string_address)compositor_wall_word(0, 1), "dark");
+    // Off the cards: shut.
+    compositor.pointer_x = 160, compositor.pointer_y = 190;
+    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+    shut = !compositor_wall_editing();
+    compositor_wall_edit(0, 1);
+    compositor_scenes_open(0);
+    overview = !compositor_wall_editing() && compositor.scenes.open;
+    compositor_scenes_shut();
+    compositor_wall_editor.shown = 0, compositor_wall_editor.open = 0;
+    compositor_wall_veil_keep();
+    compositor_walls.lines = compositor_walls.names = 0;
+    compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    compositor_wall_drop();
+    compositor_wall_rows.ready = 0;
+    compositor_zero();
+    check("wallpaper editor: opened, its cards are auto, dark, white and the folder", opened);
+    check("wallpaper editor: all the way open its veil is the wallpaper at 245 of 255, premultiplied", veiled);
+    check("wallpaper editor: its frames are the veil, blended, then the cards, the Scene's own ringed in the accent, and the folder's plate and shape",
+          framed);
+    check("wallpaper editor: a point on its screen is its own, and it takes the press", pointed);
+    check("wallpaper editor: a card pressed is the Scene's word, and the editor stays open", chose);
+    check("wallpaper editor: a press off the cards shuts it", shut);
+    check("wallpaper editor: the overview opened shuts it", overview);
+}
+
+/*
         The moon's motion. It grows about its middle while the pointer is over it, over the kit's ease, its plate with it, and back when the
         pointer leaves; what a press finds stays the disc at rest. With reduced motion it is grown at once. It turns a step at a time on the
         real clock while a hand has been about, the loop woken for the next step and no sooner, and rests two minutes after the last. And the

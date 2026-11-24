@@ -322,12 +322,14 @@ static int compositor_reach_most(void)
                    compositor.scale / 100 + compositor_line_px(scale) + 1;
 }
 
+static int compositor_wall_editor_point(int x, int y); // wallpaper.c: a point of the wallpaper's editor, which no window under its veil takes
+
 static int compositor_under(int x, int y, int *tab)
 {
         const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
         positive reach, count = compositor.stacked;
 
-        if (compositor_scenes_point(x, y))
+        if (compositor_scenes_point(x, y) || compositor_wall_editor_point(x, y))
         {
                 *tab = TASKBAR_HIT_NONE;
                 return COMPOSITOR_NONE;

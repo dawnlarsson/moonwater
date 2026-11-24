@@ -1855,6 +1855,11 @@ static int compositor_key_chord(unsigned int code, int value, unsigned int modif
                 compositor_scenes_close();
                 return 1;
         }
+        if (compositor_wall_editing() && value == 1 && code == CK_KEY_ESC)
+        {
+                compositor_wall_edit(-1, 0);
+                return 1;
+        }
         for (unsigned int k = 0; k < compositor_keys.count; k++)
                 if (code == compositor_keys.code[k] && mods4 == compositor_keys.modifiers[k])
                 {
@@ -2816,6 +2821,11 @@ static void compositor_button(unsigned int code, int down)
                 compositor_scenes_button(code, down);
                 return;
         }
+        if (compositor_wall_editor_takes(code, down))
+        {
+                compositor_wall_editor_button(code, down);
+                return;
+        }
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         if (compositor_band_hand(code, down))
@@ -3124,7 +3134,7 @@ static int compositor_report(positive now, positive stamp)
 
 static int compositor_picture_under(int x, int y)
 {
-        if (compositor_scenes_point(x, y) || compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
+        if (compositor_scenes_point(x, y) || compositor_wall_editor_point(x, y) || compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
         for (unsigned int at = compositor.stacked; at--;)
                 if (compositor_visible(compositor.stack[at]) && compositor_in_row(compositor.stack[at], x, y))
