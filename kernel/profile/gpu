@@ -14,6 +14,8 @@
 #   virtio-gpu  how a virtual machine gets KMS, and what the compositor is
 #               developed against
 #   bochs, qxl  the other two display devices QEMU commonly presents
+#   ast, mgag200  a server board's management chip (ASPEED, Matrox G200),
+#               the only display most servers have
 #   simpledrm   whatever the firmware left on the screen, as a last resort
 #
 # AMD lives in profile/gpu.amd and Nouveau lives in profile/desktop.
@@ -252,7 +254,24 @@ CONFIG_DRM_QXL=y
 
 # vmwgfx additionally depends on HYPERVISOR_GUEST, which is a paravirt option
 # rather than a graphics one, so it is left to whoever actually targets VMware
-# to compose in.
+# to compose in. hyperv_drm likewise, and further: it needs HYPERV, which
+# selects PARAVIRT, and a Hyper-V guest needs its bus's keyboard, disk and
+# network drivers before a display driver is any use to it. Both guests show
+# the firmware's framebuffer through simpledrm.
+
+#
+# Server boards
+#
+# A server's screen is its management chip's: an ASPEED AST on most boards of
+# the last ten years, a Matrox G200 variant on older Dell, HP and Supermicro
+# ones. Neither has acceleration; what the drivers add to the firmware's
+# framebuffer is the modes the monitor (or the remote console) offers, and a
+# screen that can be put out and brought back. Both copy what they are told
+# changed from a buffer in the machine's memory, which the compositor's
+# table of drivers knows them for.
+#
+CONFIG_DRM_AST=y
+CONFIG_DRM_MGAG200=y
 
 #
 # Fallback: the framebuffer the firmware set up (SIMPLEDRM and SYSFB_SIMPLEFB
