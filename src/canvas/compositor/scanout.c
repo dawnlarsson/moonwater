@@ -1539,7 +1539,7 @@ static int compositor_direct_eligible(int row, int blend)
         int ox, oy, ow, oh, geom[6];
 
         if (compositor.card < 0 || (compositor_cursor_in_scene() && compositor.cursor.drawn) ||
-            compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
+            compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw || compositor_roll.on ||
             compositor_spots_any(0) || !compositor_primary_bounds(&ox, &oy, &ow, &oh))
                 return compositor_direct_why = COMPOSITOR_DIRECT_SCENE, 0;
         if (blend && !compositor_row_opaque_fs(row))

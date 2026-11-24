@@ -2668,7 +2668,7 @@ static int compositor_space_activate(int screen, unsigned int sid)
         struct compositor_space *target, *old_sp;
         unsigned int old_id, count;
         const int (*screens)[4];
-        int focus_on_screen, next = COMPOSITOR_NONE, old_pos = 0, new_pos = 0, slide_dx = 0;
+        int focus_on_screen, next = COMPOSITOR_NONE, old_pos = 0, new_pos = 0;
 
         if (screen < 0 || screen >= WINDOWS_OUTPUTS)
                 return 0;
@@ -2689,15 +2689,9 @@ static int compositor_space_activate(int screen, unsigned int sid)
                         p++;
                 }
         screens = compositor_screens(&count);
+        // Both Scenes roll across the screen, the new one in at the side of the way the person went (compositor_roll).
         if (compositor_glides() && count == 1 && (unsigned int)screen < count)
-        {
-                int step = 96 * compositor.scale / 100;
-                int cap = screens[screen][2] / 8;
-
-                if (step > cap)
-                        step = cap;
-                slide_dx = (new_pos >= old_pos ? 1 : -1) * step;
-        }
+                compositor_roll_begin(screen, old_id, sid, new_pos >= old_pos ? 1 : -1, screens[screen][2]);
         compositor_grab_end(COMPOSITOR_GRAB_CANCEL, COMPOSITOR_NONE);
         compositor_popups_close(-1, -1);
         old_sp = compositor_space_find(old_id);
@@ -2731,12 +2725,7 @@ static int compositor_space_activate(int screen, unsigned int sid)
                         if (!(compositor.state[row] & WINDOW_MINIMIZED))
                                 compositor_wl_scan_retry(row);
 #endif
-                        if (slide_dx && !(compositor.state[row] & WINDOW_MINIMIZED))
-                        {
-                                int from[4] = {compositor.x[row] + slide_dx, compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
-                                compositor.glide[row] = 0;
-                                compositor_glide_start(row, from);
-                        }
+                        compositor.glide[row] = 0;
                         rows_add(&compositor.woken, row);
                         compositor_wl_settle(row);
                 }

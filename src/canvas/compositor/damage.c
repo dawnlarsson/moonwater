@@ -701,11 +701,97 @@ static void compositor_glide_frame(int row, struct compositor_frame *frame)
 }
 
 /*
+        The roll from one Scene to the next on a screen: both Scenes' windows move across the screen together, the old out of one
+        side as the new comes in at the other, as a billboard turns to its next poster, so the way the person went is plain. They
+        move by depth: a Scene's top window travels COMPOSITOR_ROLL_DEPTH more of the screen than its bottom one, so the layers
+        pass at their own speeds over the desktop, which stays where it is. The old Scene's windows are drawn for the roll alone
+        (compositor_roll_holds): they take no press and no key. The new Scene's windows are where they are for the hand from the
+        start, only drawn on their way. One screen only: a window rolled off it would be drawn on the next.
+*/
+#define COMPOSITOR_ROLL_NS (UI_WINDOW_NS * 2)
+#define COMPOSITOR_ROLL_DEPTH 250 // thousandths of the screen's width
+
+static struct
+{
+        unsigned int from, to; // the Scene rolled out and the one rolled in
+        int screen, dir, width; // its screen; 1 the new Scene comes in at the right, -1 at the left; the screen's width
+        positive at;           // the roll's first present, 0 before it
+        unsigned char on;
+} compositor_roll;
+
+static void compositor_roll_begin(int screen, unsigned int from, unsigned int to, int dir, int width)
+{
+        compositor_roll.from = from, compositor_roll.to = to, compositor_roll.screen = screen;
+        compositor_roll.dir = dir < 0 ? -1 : 1, compositor_roll.width = width, compositor_roll.at = 0, compositor_roll.on = 1;
+}
+
+// The old Scene's windows on the roll's screen, drawn while it goes.
+static int compositor_roll_holds(int row)
+{
+        return compositor_roll.on && compositor.row_space && row >= 0 && row < COMPOSITOR_ROWS && compositor.showing[row] &&
+               compositor.row_space[row] == compositor_roll.from && !(compositor.state[row] & WINDOW_MINIMIZED);
+}
+
+// How far across a window of either Scene is drawn now: its travel (the screen, and more the higher it is in its Scene's stack)
+// times what is left of the roll for the new Scene, or what has gone of it for the old.
+static int compositor_roll_dx(int row)
+{
+        unsigned int scene, above = 0, all = 0;
+        long long travel;
+        b64 done;
+
+        if (!compositor_roll.on || !compositor.row_space || row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        scene = compositor.row_space[row];
+        if (scene != compositor_roll.from && scene != compositor_roll.to)
+                return 0;
+        for (unsigned int at = 0; at < compositor.stacked; at++)
+        {
+                int other = (int)compositor.stack[at];
+
+                if (compositor.row_space[other] != scene || !compositor.showing[other])
+                        continue;
+                all++;
+                if (other == row)
+                        above = 0;
+                else
+                        above++;
+        }
+        travel = (long long)compositor_roll.width * (1000 + (all > 1 ? (long long)COMPOSITOR_ROLL_DEPTH * (all - 1 - above) / (all - 1) : COMPOSITOR_ROLL_DEPTH)) / 1000;
+        done = canvas_tween_ease(compositor_roll.at, clock_monotonic_nanoseconds(), COMPOSITOR_ROLL_NS);
+        return scene == compositor_roll.to ? (int)(compositor_roll.dir * travel * (long long)(UI_ONE - done) / (long long)UI_ONE)
+                                           : (int)(-compositor_roll.dir * travel * (long long)done / (long long)UI_ONE);
+}
+
+// After a present: the roll's screen drawn again while it rolls, and once more when it ends, without the old Scene.
+static void compositor_roll_keep(void)
+{
+        unsigned int count;
+        const int (*screens)[4];
+        positive now;
+
+        if (!compositor_roll.on)
+                return;
+        now = clock_monotonic_nanoseconds();
+        if (!compositor_roll.at)
+                compositor_roll.at = now;
+        if (now - compositor_roll.at >= (positive)ui_paced(COMPOSITOR_ROLL_NS) || !compositor_glides())
+                compositor_roll.on = 0;
+        screens = compositor_screens(&count);
+        if ((unsigned int)compositor_roll.screen < count)
+                compositor_damage(screens[compositor_roll.screen][0], screens[compositor_roll.screen][1], screens[compositor_roll.screen][2],
+                                  screens[compositor_roll.screen][3]);
+        else
+                compositor_damage(0, 0, compositor.width, compositor.height);
+}
+
+/*
         After a present: a window still gliding is damaged again, so the next present draws it, and the one that ends it is
         drawn where it is. Nothing is damaged after that, and the loop goes idle.
 */
 static void compositor_glide_keep(void)
 {
+        compositor_roll_keep();
         positive now = 0;
 
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
@@ -1525,6 +1611,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
                 compositor_glide_frame(row, frame);
+        frame->x += compositor_roll_dx(row);
         if (!compositor.landing[row] && !compositor.glide[row])
         {
                 int dx, dy, dw, dh;

@@ -1371,7 +1371,7 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
         int scenes = compositor_scenes_shown(); // 1: the overview's frames are still to come; 2: they are in
 
         for (unsigned int at = 0; at < compositor.stacked; at++)
-                if (compositor_visible(compositor.stack[at]))
+                if (compositor_visible(compositor.stack[at]) || compositor_roll_holds((int)compositor.stack[at]))
                 {
                         int row = (int)compositor.stack[at], dx, dy, dw, dh;
 
@@ -1388,7 +1388,7 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
                                 struct compositor_frame *back = &frames[count];
 
                                 memory_zero(back, sizeof(*back));
-                                back->x = compositor.x[row], back->y = compositor.y[row];
+                                back->x = compositor.x[row] + compositor_roll_dx(row), back->y = compositor.y[row];
                                 back->width = (int)compositor.w[row], back->height = (int)compositor.h[row];
                                 back->scale = compositor_row_scale(row), back->fill = 0xff000000u;
                                 rows[count++] = (unsigned int)row;
