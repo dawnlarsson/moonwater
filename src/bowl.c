@@ -9732,7 +9732,8 @@ struct bowl_profile
 #define BOWL_GRAPHICS_ALPINE_PACKAGES                                       \
     "mesa-egl", "mesa-gl", "mesa-gles", "mesa-gbm", "mesa-dri-gallium",     \
     "mesa-va-gallium", "mesa-vulkan-ati",                                   \
-    "mesa-vulkan-intel", "mesa-vulkan-swrast", "mesa-vulkan-layers",        \
+    "mesa-vulkan-intel", "mesa-vulkan-nouveau", "mesa-vulkan-swrast",       \
+    "mesa-vulkan-layers",                                                   \
     "vulkan-loader", "intel-media-driver", "libva-intel-driver",            \
     "alsa-lib", "libpulse", "fontconfig", "font-dejavu"
 
@@ -9747,7 +9748,7 @@ static string_address bowl_graphics_debian[] = {
     "fonts-dejavu-core", null};
 static string_address bowl_graphics_arch[] = {
     "mesa", "libglvnd", "vulkan-icd-loader", "vulkan-radeon", "vulkan-intel",
-    "vulkan-virtio", "vulkan-swrast", "vulkan-mesa-layers",
+    "vulkan-nouveau", "vulkan-virtio", "vulkan-swrast", "vulkan-mesa-layers",
     "intel-media-driver",
     "libva-intel-driver", "alsa-lib", "libpulse", "fontconfig",
     "ttf-dejavu", null};
@@ -9772,15 +9773,18 @@ static const struct bowl_component bowl_graphics_components[] = {
         X server, no Xwayland, no display manager, no seat or login daemon, no
         desktop environment and no portal: Alpine's chromium, and the packages
         the graphics profile holds (Mesa's EGL, GL, GLES and GBM, the Vulkan
-        loader with the Radeon, Intel and software drivers, the fonts and the
-        sound libraries), which is where the GPU comes from. Alpine ships
+        loader with the Radeon, Intel, NVIDIA and software drivers, the fonts
+        and the sound libraries), which is where the GPU comes from. Alpine ships
         Chromium, the engine Chrome is built on, and not Google Chrome: no
         Widevine, no Google sign-in.
 
         What that comes to, measured on x86-64 (Alpine 3.24, chromium
         156.0.8078.79) in a bowl just landed: 188 packages and 849 MiB, of
         which chromium itself is 315 MiB, and LLVM (which libgallium links),
-        Mesa and its three Vulkan drivers 298. The binary's own DT_NEEDED
+        Mesa and its three Vulkan drivers 298 (measured with the Radeon, Intel
+        and software drivers: the NVIDIA one, mesa-vulkan-nouveau, is one
+        package more and 16.3 MiB by Alpine's own index, and needs nothing
+        the three had not brought). The binary's own DT_NEEDED
         list pulls in 115 of those packages (446 MiB); the other 73 are what
         the package metadata and Mesa's loaders name (GTK 3, the ICU data,
         Mesa, LLVM, the Vulkan drivers, xdg-utils). A literal zero of X11 libraries is not possible:
@@ -9839,7 +9843,8 @@ static const struct bowl_component bowl_graphics_components[] = {
         card can be changed, so install does not look at the card), and the Vulkan loader opens every driver it finds at each
         vkCreateInstance: the software one (lavapipe, which loads LLVM) is then a second device that a game or Steam's GPU
         list sees, and the Intel ones are opened on an AMD machine to say no. The line reads the PCI vendor of each render
-        node (0x1002 AMD: RADV; 0x8086 Intel: ANV and, for Ivy Bridge to Broadwell, HasVK; 0x1af4 VirtIO: Venus) and names the
+        node (0x1002 AMD: RADV; 0x8086 Intel: ANV and, for Ivy Bridge to Broadwell, HasVK; 0x10de NVIDIA: NVK, the driver of
+        the kernel's nouveau, and NVIDIA's own where a person put it there; 0x1af4 VirtIO: Venus) and names the
         manifests the bowl has of those in VK_DRIVER_FILES, for both of a manifest's architectures where the bowl keeps two
         files (Mesa 26 keeps one, naming the library without a path, which the 32-bit loader finds in lib32). A render node
         of no listed vendor (vgem, vkms, a card with no Mesa Vulkan driver) adds nothing, and with nothing found the loader
@@ -9971,11 +9976,12 @@ static string_address bowl_steam_arch[] = {
     // Steam itself; its dependencies are pacman's.
     "steam",
     // The GPU: Mesa's GL and VA-API (mesa and lib32-mesa are the VA-API drivers too; Mesa has no
-    // VDPAU since 25.2) and the Vulkan loader, with the Radeon, Intel, VirtIO and software Vulkan
-    // drivers and Mesa layers, in 64 and 32 bits.
+    // VDPAU since 25.2) and the Vulkan loader, with the Radeon, Intel, NVIDIA (NVK), VirtIO and
+    // software Vulkan drivers and Mesa layers, in 64 and 32 bits.
     "mesa", "lib32-mesa", "libglvnd", "lib32-libglvnd",
     "vulkan-icd-loader", "lib32-vulkan-icd-loader", "vulkan-radeon",
     "lib32-vulkan-radeon", "vulkan-intel", "lib32-vulkan-intel",
+    "vulkan-nouveau", "lib32-vulkan-nouveau",
     "vulkan-virtio", "lib32-vulkan-virtio", "vulkan-swrast",
     "lib32-vulkan-swrast", "vulkan-mesa-layers", "lib32-vulkan-mesa-layers",
     "intel-media-driver", "libva-intel-driver",
@@ -22942,7 +22948,8 @@ bowl_steam_overlay_gl_install(const struct bowl_profile address_to profile)
 #define BOWL_SHADERS_FILES 16
 
 static string_address const bowl_graphics_packages[] = {"mesa-", "lib32-mesa-", "vulkan-radeon-", "lib32-vulkan-radeon-", "vulkan-intel-",
-                                                        "lib32-vulkan-intel-", "llvm-libs-", "lib32-llvm-libs-", null};
+                                                        "lib32-vulkan-intel-", "vulkan-nouveau-", "lib32-vulkan-nouveau-", "llvm-libs-",
+                                                        "lib32-llvm-libs-", null};
 
 // An installed package's directory name (NAME-VERSION-RELEASE) is a graphics package's: one of their names, then its version (a digit first).
 static b32 bowl_graphics_package(string_address name)

@@ -1469,6 +1469,10 @@ static fn steam_profile(void)
         check("The steam profile has VirtIO Vulkan drivers alongside Radeon, Intel and software drivers",
               chrome_has(part ? part->packages : null, "vulkan-virtio") &&
                   chrome_has(bowl_graphics_arch, "vulkan-virtio"));
+        check("The steam profile has the NVIDIA Vulkan driver the session names for a card (NVK, in 64 and 32 bits), and the graphics profile has it for Arch and for Alpine",
+              chrome_has(part ? part->packages : null, "vulkan-nouveau") &&
+                  chrome_has(part ? part->packages : null, "lib32-vulkan-nouveau") &&
+                  chrome_has(bowl_graphics_arch, "vulkan-nouveau") && chrome_has(bowl_graphics_alpine, "mesa-vulkan-nouveau"));
         check("The steam profile has Xwayland, which the session starts beside Steam, bubblewrap for the Steam Runtime, and which for steam.sh",
               chrome_has(part ? part->packages : null, "xorg-xwayland") &&
                   chrome_has(part ? part->packages : null, "bubblewrap") &&
@@ -1821,6 +1825,7 @@ static fn steam_profile(void)
                         picks[at] = pick && run && pick < run && strstr(picked, "export VK_DRIVER_FILES=$files") &&
                                     strstr(picked, roots[at]) && strstr(picked, "0x1002) want=radeon") &&
                                     strstr(picked, "0x8086) want='intel intel_hasvk'") && strstr(picked, "0x1af4) want=virtio") &&
+                                    strstr(picked, "0x10de) want='nvidia nouveau'") &&
                                     strstr(picked, "*) continue");
                         kept[at] = string_has_prefix(picked, "[ -n \"$VK_DRIVER_FILES$VK_ICD_FILENAMES\" ] ||") &&
                                    strstr(picked, "[ -z \"$files\" ] ||") && strstr(picked, "json=${json#" BOWL_ROOT_PREFIX);
@@ -4567,6 +4572,9 @@ static fn shader_warm_rows(void)
         length = bowl_graphics_stamp((string_address)root, stamp, sizeof stamp);
         check("shaders: the driver's identity is its graphics packages' installed versions, sorted, a line each, and no other package's",
               length == sizeof expected - 1 && !memory_compare(stamp, expected, length));
+        check("shaders: the NVIDIA driver's packages are of the identity too, in 64 and 32 bits, by their names and a version after them",
+              bowl_graphics_package("vulkan-nouveau-1:26.3.1-3") && bowl_graphics_package("lib32-vulkan-nouveau-1:26.3.1-3") &&
+                  !bowl_graphics_package("vulkan-nouveau") && !bowl_graphics_package("vulkan-nouveau-git-1"));
         // The bowl's update: Mesa at its next version.
         bowl_root_path(path, sizeof path, (string_address)root, "/var/lib/pacman/local/mesa-1:26.3.1-2");
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0x200); // AT_REMOVEDIR
