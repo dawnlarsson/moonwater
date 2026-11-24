@@ -95,8 +95,8 @@ static int settings_row_named(const char address_to label);
 
 static void check_compositor_cursor_style(void)
 {
-    static unsigned int plane[CP_PLANE * CP_PLANE];
-    static unsigned int wide[CP_PLANE * 2 * CP_PLANE];
+    static unsigned int plane[CP_PLANE_MOST * CP_PLANE_MOST];
+    static unsigned int wide[CP_PLANE_MOST * 2 * CP_PLANE_MOST];
     struct compositor_target t = {plane, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
     struct compositor_target margin = {wide, CP_PLANE * 2, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
     struct compositor_pointer p = {.shape = CP_ARROW, .scale = 256}, circle, other;
@@ -4065,7 +4065,7 @@ static void check_compositor_picture(void)
         {0xff00ff00u, 0x80808080u, 0, 0xff0000ffu, 0, 0},
         {0x80800000u, 0x80800000u, 0x80800000u, 0x80800000u, 0x80800000u, 0x80800000u},
         {0x40ff0000u, 0x40ff0000u, 0x40ff0000u, 0x40ff0000u, 0x40ff0000u, 0x40ff0000u}};
-    static unsigned int doubled[8][12], large[128][128], wide[100][200], plane[CP_PLANE * CP_PLANE];
+    static unsigned int doubled[8][12], large[128][128], wide[100][200], plane[CP_PLANE_MOST * CP_PLANE_MOST];
     struct windows address_to table = predict_setup();
     const unsigned int ground = 0x404040u;
     struct compositor_pointer now;
@@ -4106,7 +4106,7 @@ static void check_compositor_picture(void)
     {
         static struct compositor_gscene kept;
         static unsigned int ops[8 * 16];
-        static unsigned char tables[CP_PLANE * CP_PLANE * 4];
+        static unsigned char tables[CP_PLANE_MOST * CP_PLANE_MOST * 4];
         int hx, hy, sp = compositor_pointer_span(&now, &hx, &hy), px = 100 - hx + compositor_picture.left, py = 60 - hy + compositor_picture.top;
         int pw = compositor_picture.width, ph = compositor_picture.height, rows_same = pw > 0;
         b32 drawn;
