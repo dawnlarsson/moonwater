@@ -23042,7 +23042,9 @@ static b32 ui_jpeg_markers(struct ui_jpeg address_to j, unsigned int most, b32 m
                 }
                 else if (marker == 0xe0 && length >= 5 && !memory_compare(at, "JFIF\0", 5))
                         j->jfif = true;
-                else if (marker == 0xe1 && length >= 6 && !memory_compare(at, "Exif\0\0", 6) && j->orientation == 0)
+                else if (marker == 0xe1 && length >= 6 && !memory_compare(at, "Exif\0\0", 6) && j->orientation == 0 && !j->frame)
+                        // EXIF's APP1 stands after SOI; one after the frame's header is not the picture's (and a measure, which stops
+                        // at the frame, never sees it, so the two would turn it differently).
                         j->orientation = ui_jpeg_orientation(at + 6, length - 6);
                 else if (marker == 0xee && length >= 12 && !memory_compare(at, "Adobe", 5))
                         j->adobe = true, j->transform = at[11];

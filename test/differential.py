@@ -47441,7 +47441,9 @@ def jpeg_fuzz_source():
     checks = (HARNESS_ROOT / "test/checks/jpeg.c").read_text()
     references = checks[checks.index("/* ---- the references ---- */"):checks.index("/* ---- end of the references ---- */")]
     names = sorted(set(re.findall(r"^static fn jpeg_reference_(\w+)\(", references, re.M)))
-    rename = "".join("#define jpeg_%s jpeg_reference_%s\n" % (name, name) for name in names)
+    # jpeg_reference_idct_8x8 is lib.c's jpeg_idct_8x8; jpeg_reference_pixels_from_ycbcr its pixels_from_ycbcr.
+    rename = "".join("#define %s jpeg_reference_%s\n" % (name if name.startswith(("pixels_", "samples_")) else "jpeg_" + name, name)
+                     for name in names)
     return JPEG_FUZZ_PRELUDE + references + rename + lift + JPEG_FUZZ_ENTRY
 
 
