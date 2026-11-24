@@ -22192,7 +22192,8 @@ static const p8 ui_jpeg_natural[64 + 16] = {
         35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
         63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63};
 
-/* ---- the kernels: lib.c's jpeg_idct_8x8 does the whole block; these are the rest, in C until their lib.c routines land ---- */
+/* ---- the kernels: lib.c's jpeg_idct_8x8, pixels_* and samples_* do the blocks, the colour and the upsampling; the reduced IDCTs
+   are C until their lib.c routines land ---- */
 
 // libjpeg's constants for the reduced inverse DCTs (jidctred.c), at CONST_BITS 13: FIX(x) is x * 8192 rounded.
 #define UI_JPEG_F0765 6270
@@ -22313,85 +22314,6 @@ static inline INLINE CONST p8 ui_jpeg_flat(b16 coefficient, p16 quantizer, unsig
         if (scale == 1)
                 return ui_jpeg_sample((dc + 4) >> 3);
         return ui_jpeg_sample((ui_jpeg_held16(dc * 4) + 16) >> 5);
-}
-
-static inline INLINE CONST p8 ui_jpeg_byte(b32 value)
-{
-        return (p8)(value < 0 ? 0 : value > 255 ? 255 : value);
-}
-
-/*
-        pixels_from_ycbcr(into, y, cb, cr, count): count opaque 0xffrrggbb words from JFIF's YCbCr (libjpeg's jdcolor.c, 16-bit
-        fixed point: R = Y + 1.402 Cr', G = Y - 0.34414 Cb' - 0.71414 Cr', B = Y + 1.772 Cb', with Cb' and Cr' the samples less 128,
-        each rounded as its tables round, then held to 0..255).
-*/
-static fn ui_jpeg_from_ycbcr(unsigned int address_to into, const p8 address_to y, const p8 address_to cb, const p8 address_to cr, positive count)
-{
-        for (positive x = 0; x < count; x++)
-        {
-                b32 l = y[x], u = (b32)cb[x] - 128, v = (b32)cr[x] - 128;
-
-                into[x] = 0xff000000u | (unsigned int)ui_jpeg_byte(l + ((91881 * v + 32768) >> 16)) << 16 |
-                          (unsigned int)ui_jpeg_byte(l + ((-22554 * u - 46802 * v + 32768) >> 16)) << 8 | ui_jpeg_byte(l + ((116130 * u + 32768) >> 16));
-        }
-}
-
-// pixels_from_grey(into, y, count): a sample each, grey and opaque.
-static fn ui_jpeg_from_grey(unsigned int address_to into, const p8 address_to y, positive count)
-{
-        for (positive x = 0; x < count; x++)
-                into[x] = 0xff000000u | (unsigned int)y[x] * 0x010101u;
-}
-
-// pixels_from_planes(into, r, g, b, count): three planes of one sample each made opaque words.
-static fn ui_jpeg_from_planes(unsigned int address_to into, const p8 address_to r, const p8 address_to g, const p8 address_to b, positive count)
-{
-        for (positive x = 0; x < count; x++)
-                into[x] = 0xff000000u | (unsigned int)r[x] << 16 | (unsigned int)g[x] << 8 | b[x];
-}
-
-/*
-        samples_double(into, from, count): count samples made 2 * count by libjpeg's h2v1 triangle filter (each new sample 3/4 its
-        nearer one and 1/4 the other neighbour, rounding alternately up and down; the ends copied). count is at least 2.
-*/
-static fn ui_jpeg_double(p8 address_to into, const p8 address_to from, positive count)
-{
-        into[0] = from[0];
-        into[1] = (p8)((from[0] * 3 + from[1] + 2) >> 2);
-        for (positive x = 1; x + 1 < count; x++)
-        {
-                unsigned int near = from[x] * 3u;
-
-                into[2 * x] = (p8)((near + from[x - 1] + 1) >> 2);
-                into[2 * x + 1] = (p8)((near + from[x + 1] + 2) >> 2);
-        }
-        into[2 * count - 2] = (p8)((from[count - 1] * 3 + from[count - 2] + 1) >> 2);
-        into[2 * count - 1] = from[count - 1];
-}
-
-/*
-        samples_double_rows(into, near, far, count): one row of libjpeg's h2v2 triangle filter: the column sums 3 near + far, then across
-        as samples_double does with 16 for 4 (bias 8 and 7). count is at least 2.
-*/
-static fn ui_jpeg_double_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count)
-{
-        unsigned int last = near[0] * 3u + far[0], this = last, next;
-
-        for (positive x = 0; x < count; x++)
-        {
-                next = x + 1 < count ? near[x + 1] * 3u + far[x + 1] : this;
-                into[2 * x] = (p8)(x ? (this * 3 + last + 8) >> 4 : (this * 4 + 8) >> 4);
-                into[2 * x + 1] = (p8)(x + 1 < count ? (this * 3 + next + 7) >> 4 : (this * 4 + 7) >> 4);
-                last = this, this = next;
-        }
-}
-
-// samples_blend_rows(into, near, far, count, bias): libjpeg's h1v2 triangle filter's row: (3 near + far + bias) / 4, bias 1 for the
-// upper of the two rows a row makes and 2 for the lower.
-static fn ui_jpeg_blend_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count, unsigned int bias)
-{
-        for (positive x = 0; x < count; x++)
-                into[x] = (p8)((near[x] * 3u + far[x] + bias) >> 2);
 }
 
 /* ---- the entropy-coded data ---- */
@@ -23162,15 +23084,15 @@ static const p8 address_to ui_jpeg_row(struct ui_jpeg address_to j, struct ui_jp
 
                 near = c->plane + row * c->pitch;
                 if (across == across_out)
-                        ui_jpeg_blend_rows(into, near, c->plane + other * c->pitch, c->width, y & 1 ? 2 : 1);
+                        samples_blend_rows(into, near, c->plane + other * c->pitch, c->width, y & 1 ? 2 : 1);
                 else
-                        ui_jpeg_double_rows(into, near, c->plane + other * c->pitch, c->width);
+                        samples_double_rows(into, near, c->plane + other * c->pitch, c->width);
                 return into;
         }
         near = c->plane + (y * down / down_out) * c->pitch;
         if (fancy && wide && down == down_out && across * 2 == across_out)
         {
-                ui_jpeg_double(into, near, c->width);
+                samples_double(into, near, c->width);
                 return into;
         }
         if (across == across_out)
@@ -23302,16 +23224,16 @@ static unsigned int address_to ui_jpeg_decode_at(const p8 address_to file, posit
 
                         if (j->components == 1)
                         {
-                                ui_jpeg_from_grey(into, first, w);
+                                pixels_from_grey(into, first, w);
                                 continue;
                         }
                         const p8 address_to second = ui_jpeg_row(j, &j->component[1], y, rows + row_room);
                         const p8 address_to third = ui_jpeg_row(j, &j->component[2], y, rows + 2 * row_room);
                         if (!j->jfif && ((j->adobe && j->transform == 0) ||
                                          (!j->adobe && j->component[0].id == 'R' && j->component[1].id == 'G' && j->component[2].id == 'B')))
-                                ui_jpeg_from_planes(into, first, second, third, w);
+                                pixels_from_planes(into, first, second, third, w);
                         else
-                                ui_jpeg_from_ycbcr(into, first, second, third, w);
+                                pixels_from_ycbcr(into, first, second, third, w);
                 }
         else if (pixels)
                 memory_free(pixels, (positive)w * h * 4), pixels = null;

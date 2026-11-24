@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        526 routines (499 public, 27 local), 514 of them on all three and 12 local to one.
+        533 routines (506 public, 27 local), 521 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -417,6 +417,10 @@
           picture_lut3d_u32              public  yes     yes     yes
           picture_quads_add_f32          public  yes     yes     yes
           picture_quads_f32              public  yes     yes     yes
+          pixels_from_grey               public  yes     yes     yes
+          pixels_from_planes             public  yes     yes     yes
+          pixels_from_ycbcr              public  yes     yes     yes
+          pixels_to_ycbcr                public  yes     yes     yes
           pointer_gain                   public  yes     yes     yes
           pointer_scale                  public  yes     yes     yes
           positive_digits                public  yes     yes     yes
@@ -452,6 +456,9 @@
           ring_post                      public  yes     yes     yes
           rmsnorm_backward_f32           public  yes     yes     yes
           rmsnorm_forward_f32            public  yes     yes     yes
+          samples_blend_rows             public  yes     yes     yes
+          samples_double                 public  yes     yes     yes
+          samples_double_rows            public  yes     yes     yes
           sha1_blocks                    public  yes     yes     yes
           sha256_blocks                  public  yes     yes     yes
           sha256_compress                public  yes     yes     yes
@@ -59806,6 +59813,468 @@ __asm__(
 #undef JPEG_IDCT_RV_HOLD16
 #endif
 #endif // KERNEL_MODE, jpeg_idct_8x8
+
+/*
+        The planes of a JPEG and its pixels, either way, and the triangle upsampling between a chroma plane and the picture's
+        resolution, each exactly as libjpeg does it, so a decode is djpeg's to the byte.
+
+        pixels_from_ycbcr(into, y, cb, cr, count): count opaque 0xffrrggbb words from JFIF's YCbCr: with Cb' and Cr' the samples less
+        128, R = Y + (91881 Cr' + 32768) >> 16, G = Y + (-22554 Cb' - 46802 Cr' + 32768) >> 16, B = Y + (116130 Cb' + 32768) >> 16,
+        each held to 0 to 255 (libjpeg's jdcolor.c tables, 16-bit fixed point, rounded as they round). pixels_from_grey(into, y, count)
+        makes each sample a grey, pixels_from_planes(into, r, g, b, count) three planes a pixel. pixels_to_ycbcr(y, cb, cr, from, count)
+        is the other way, jccolor.c's: Y = (19595 R + 38470 G + 7471 B + 32768) >> 16, Cb = (-11059 R - 21709 G + 32768 B + (128 << 16)
+        + 32767) >> 16, Cr = (32768 R - 27439 G - 5329 B + (128 << 16) + 32767) >> 16, the alpha byte not read, every result in 0 to 255
+        by construction.
+
+        samples_double(into, from, count) makes count samples 2 * count by libjpeg's h2v1 triangle filter: into[2x] = (3 from[x] +
+        from[x - 1] + 1) >> 2 and into[2x + 1] = (3 from[x] + from[x + 1] + 2) >> 2, a sample beyond either end the end one.
+        samples_double_rows(into, near, far, count) is one row of the h2v2 filter: with c[x] = 3 near[x] + far[x], into[2x] = (3 c[x] +
+        c[x - 1] + 8) >> 4 and into[2x + 1] = (3 c[x] + c[x + 1] + 7) >> 4, the ends again the end ones. samples_blend_rows(into, near,
+        far, count, bias) is the h1v2 filter's: (3 near[x] + far[x] + bias) >> 2, bias 0 to 3 (libjpeg's 1 for the upper row a row makes
+        and 2 for the lower). With the ends replicated these are libjpeg's edge cases exactly (its first sample is (4 c + 8) >> 4, and
+        so on), so a count of 1 needs nothing of its own.
+
+        Nothing is read or written outside the counts given; the arrays are apart. x86_64: SSE2, sixteen pixels (or eight samples) a
+        turn and the last group again from where it ends, pmulhw by twice the sample for libjpeg's rounding (((2x * k) >> 16 + 1) >> 1
+        is (x * k + 32768) >> 16 exactly), pmaddwd for the pairs; under a group one at a time. arm64: NEON, the same groups, rshrn for
+        the rounding, st4 and st2 to interleave. riscv64: one at a time in general registers.
+*/
+#ifndef KERNEL_MODE
+fn pixels_from_ycbcr(p32 address_to into, const p8 address_to y, const p8 address_to cb, const p8 address_to cr, positive count);
+fn pixels_from_grey(p32 address_to into, const p8 address_to y, positive count);
+fn pixels_from_planes(p32 address_to into, const p8 address_to r, const p8 address_to g, const p8 address_to b, positive count);
+fn pixels_to_ycbcr(p8 address_to y, p8 address_to cb, p8 address_to cr, const p32 address_to from, positive count);
+fn samples_double(p8 address_to into, const p8 address_to from, positive count);
+fn samples_double_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count);
+fn samples_blend_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count, p32 bias);
+#if X64
+//      eax held to 0..255 (r12d spent).
+#define PIXELS_X64_BYTE "xor %r12d, %r12d\n   test %eax, %eax\n   cmovs %r12d, %eax\n   mov $255, %r12d\n   cmp %r12d, %eax\n   cmova %r12d, %eax\n"
+//      Bytes B (xmm11), G (xmm5) and R (xmm8) of sixteen pixels stored as their words at (%rdi,%rax,4); xmm1 to xmm4 spent.
+#define PIXELS_X64_STORE16                                                                                                              \
+    "movdqa %xmm11, %xmm1\n   punpcklbw %xmm5, %xmm11\n   punpckhbw %xmm5, %xmm1\n   movdqa %xmm8, %xmm2\n"                        \
+    "punpcklbw " ASM_LABEL(pix_k) "+96(%rip), %xmm8\n   punpckhbw " ASM_LABEL(pix_k) "+96(%rip), %xmm2\n"                             \
+    "movdqa %xmm11, %xmm3\n   punpcklwd %xmm8, %xmm11\n   punpckhwd %xmm8, %xmm3\n   movdqa %xmm1, %xmm4\n   punpcklwd %xmm2, %xmm1\n"  \
+    "punpckhwd %xmm2, %xmm4\n   movdqu %xmm11, (%rdi,%rax,4)\n   movdqu %xmm3, 16(%rdi,%rax,4)\n   movdqu %xmm1, 32(%rdi,%rax,4)\n"   \
+    "movdqu %xmm4, 48(%rdi,%rax,4)\n"
+//      The walk of a routine over groups of GROUP: rax the group, from 0 while a whole one is left, then the last one again from where
+//      it ends; LABEL the body, DONE where it goes when all are made. r9 spent.
+#define PIXELS_X64_NEXT(GROUP, LABEL, DONE)                                                                                             \
+    "add $" GROUP ", %rax\n   cmp %r9, %rax\n   jbe " LABEL "\n   lea " GROUP "(%r9), %r10\n   cmp %r10, %rax\n   jae " DONE "\n"  \
+    "mov %r9, %rax\n   jmp " LABEL "\n"
+__asm__(
+    ASM_SECTION
+    //      pixels_from_ycbcr: rdi into, rsi y, rdx cb, rcx cr, r8 count; r9 the last group's start.
+    ASM_FUNC(pixels_from_ycbcr)
+    "cmp $16, %r8\n   jb " ASM_LABEL(ycc_one) "\n   xor %eax, %eax\n   lea -16(%r8), %r9\n   pxor %xmm15, %xmm15\n"
+    "movdqa " ASM_LABEL(pix_k) "(%rip), %xmm14\n"
+    "" ASM_LABEL(ycc_v) ":\n"
+    "movdqu (%rdx,%rax), %xmm1\n   movdqu (%rcx,%rax), %xmm2\n   movdqa %xmm1, %xmm3\n   punpcklbw %xmm15, %xmm1\n   punpckhbw %xmm15, %xmm3\n"
+    "movdqa %xmm2, %xmm4\n   punpcklbw %xmm15, %xmm2\n   punpckhbw %xmm15, %xmm4\n   psubw %xmm14, %xmm1\n   psubw %xmm14, %xmm3\n"
+    "psubw %xmm14, %xmm2\n   psubw %xmm14, %xmm4\n"
+    //      G - Y: (-22554 Cb' + 18734 Cr' + 32768) >> 16 less Cr' (-46802 is 18734 less 65536).
+    "movdqa %xmm1, %xmm5\n   punpcklwd %xmm2, %xmm5\n   movdqa %xmm1, %xmm6\n   punpckhwd %xmm2, %xmm6\n"
+    "pmaddwd " ASM_LABEL(pix_k) "+64(%rip), %xmm5\n   pmaddwd " ASM_LABEL(pix_k) "+64(%rip), %xmm6\n   paddd " ASM_LABEL(pix_k) "+80(%rip), %xmm5\n"
+    "paddd " ASM_LABEL(pix_k) "+80(%rip), %xmm6\n   psrad $16, %xmm5\n   psrad $16, %xmm6\n   packssdw %xmm6, %xmm5\n   psubw %xmm2, %xmm5\n"
+    "movdqa %xmm3, %xmm7\n   punpcklwd %xmm4, %xmm7\n   movdqa %xmm3, %xmm6\n   punpckhwd %xmm4, %xmm6\n"
+    "pmaddwd " ASM_LABEL(pix_k) "+64(%rip), %xmm7\n   pmaddwd " ASM_LABEL(pix_k) "+64(%rip), %xmm6\n   paddd " ASM_LABEL(pix_k) "+80(%rip), %xmm7\n"
+    "paddd " ASM_LABEL(pix_k) "+80(%rip), %xmm6\n   psrad $16, %xmm7\n   psrad $16, %xmm6\n   packssdw %xmm6, %xmm7\n   psubw %xmm4, %xmm7\n"
+    //      R - Y: Cr' + (26345 Cr' + 32768) >> 16 (91881 is 65536 + 26345); B - Y: 2 Cb' + (-14942 Cb' + 32768) >> 16.
+    "movdqa %xmm2, %xmm8\n   paddw %xmm8, %xmm8\n   pmulhw " ASM_LABEL(pix_k) "+16(%rip), %xmm8\n   paddw " ASM_LABEL(pix_k) "+48(%rip), %xmm8\n"
+    "psraw $1, %xmm8\n   paddw %xmm2, %xmm8\n"
+    "movdqa %xmm4, %xmm9\n   paddw %xmm9, %xmm9\n   pmulhw " ASM_LABEL(pix_k) "+16(%rip), %xmm9\n   paddw " ASM_LABEL(pix_k) "+48(%rip), %xmm9\n"
+    "psraw $1, %xmm9\n   paddw %xmm4, %xmm9\n"
+    "movdqa %xmm1, %xmm10\n   paddw %xmm10, %xmm10\n   movdqa %xmm10, %xmm11\n   pmulhw " ASM_LABEL(pix_k) "+32(%rip), %xmm11\n"
+    "paddw " ASM_LABEL(pix_k) "+48(%rip), %xmm11\n   psraw $1, %xmm11\n   paddw %xmm10, %xmm11\n"
+    "movdqa %xmm3, %xmm10\n   paddw %xmm10, %xmm10\n   movdqa %xmm10, %xmm12\n   pmulhw " ASM_LABEL(pix_k) "+32(%rip), %xmm12\n"
+    "paddw " ASM_LABEL(pix_k) "+48(%rip), %xmm12\n   psraw $1, %xmm12\n   paddw %xmm10, %xmm12\n"
+    //      Y added to each, held to bytes by packuswb.
+    "movdqu (%rsi,%rax), %xmm0\n   movdqa %xmm0, %xmm13\n   punpcklbw %xmm15, %xmm0\n   punpckhbw %xmm15, %xmm13\n"
+    "paddw %xmm0, %xmm8\n   paddw %xmm13, %xmm9\n   packuswb %xmm9, %xmm8\n   paddw %xmm0, %xmm5\n   paddw %xmm13, %xmm7\n   packuswb %xmm7, %xmm5\n"
+    "paddw %xmm0, %xmm11\n   paddw %xmm13, %xmm12\n   packuswb %xmm12, %xmm11\n"
+    PIXELS_X64_STORE16
+    PIXELS_X64_NEXT("16", ASM_LABEL(ycc_v), ASM_LABEL(ycc_done))
+    //      Under sixteen, a pixel at a time.
+    "" ASM_LABEL(ycc_one) ":\n   test %r8, %r8\n   jz " ASM_LABEL(ycc_done) "\n   push %rbx\n   push %r12\n"
+    "" ASM_LABEL(ycc_s) ":\n   movzbl (%rdx), %r10d\n   sub $128, %r10d\n   movzbl (%rcx), %r11d\n   sub $128, %r11d\n   movzbl (%rsi), %r9d\n"
+    "imul $91881, %r11d, %eax\n   add $32768, %eax\n   sar $16, %eax\n   add %r9d, %eax\n" PIXELS_X64_BYTE "mov %eax, %ebx\n   shl $16, %ebx\n"
+    "imul $-22554, %r10d, %eax\n   imul $-46802, %r11d, %r12d\n   add %r12d, %eax\n   add $32768, %eax\n   sar $16, %eax\n   add %r9d, %eax\n"
+    PIXELS_X64_BYTE "shl $8, %eax\n   or %eax, %ebx\n"
+    "imul $116130, %r10d, %eax\n   add $32768, %eax\n   sar $16, %eax\n   add %r9d, %eax\n" PIXELS_X64_BYTE "or %eax, %ebx\n"
+    "or $0xff000000, %ebx\n   mov %ebx, (%rdi)\n   inc %rsi\n   inc %rdx\n   inc %rcx\n   add $4, %rdi\n   dec %r8\n   jnz " ASM_LABEL(ycc_s) "\n"
+    "pop %r12\n   pop %rbx\n"
+    "" ASM_LABEL(ycc_done) ":\n" ASM_RET
+    //      The constants: 128, 26345 (Cr' to R, its fraction), -14942 (Cb' to B, its), 1 (eight words each); (-22554, 18734) four
+    //      times; 32768 four times; sixteen alpha bytes.
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(pix_k) ":\n   .rept 8\n   .short 128\n   .endr\n   .rept 8\n   .short 26345\n   .endr\n   .rept 8\n   .short -14942\n   .endr\n"
+    "   .rept 8\n   .short 1\n   .endr\n   .rept 4\n   .short -22554, 18734\n   .endr\n   .rept 4\n   .long 32768\n   .endr\n"
+    "   .rept 16\n   .byte 0xff\n   .endr\n"
+    "   .rept 4\n   .short 19595, 22086\n   .endr\n   .rept 4\n   .short 7471, 16384\n   .endr\n   .rept 4\n   .short -11059, -21709\n   .endr\n"
+    "   .rept 4\n   .short -5329, -27439\n   .endr\n   .rept 4\n   .long 8421375\n   .endr\n   .rept 4\n   .long 255\n   .endr\n"
+    "   .rept 8\n   .short 2\n   .endr\n   .rept 8\n   .short 8\n   .endr\n   .rept 8\n   .short 7\n   .endr\n"
+    ".popsection\n"
+    ASM_END(pixels_from_ycbcr)
+
+    //      pixels_from_grey: rdi into, rsi y, rdx count. Each byte twice, then with the alpha, then the two word pairs together.
+    ASM_FUNC(pixels_from_grey)
+    "mov %rdx, %r8\n   cmp $16, %r8\n   jb " ASM_LABEL(grey_one) "\n   xor %eax, %eax\n   lea -16(%r8), %r9\n"
+    "movdqa " ASM_LABEL(pix_k) "+96(%rip), %xmm6\n"
+    "" ASM_LABEL(grey_v) ":\n   movdqu (%rsi,%rax), %xmm0\n   movdqa %xmm0, %xmm1\n   punpcklbw %xmm0, %xmm1\n   movdqa %xmm0, %xmm2\n"
+    "punpckhbw %xmm0, %xmm2\n   movdqa %xmm0, %xmm3\n   punpcklbw %xmm6, %xmm3\n   punpckhbw %xmm6, %xmm0\n   movdqa %xmm1, %xmm4\n"
+    "punpcklwd %xmm3, %xmm1\n   punpckhwd %xmm3, %xmm4\n   movdqa %xmm2, %xmm5\n   punpcklwd %xmm0, %xmm2\n   punpckhwd %xmm0, %xmm5\n"
+    "movdqu %xmm1, (%rdi,%rax,4)\n   movdqu %xmm4, 16(%rdi,%rax,4)\n   movdqu %xmm2, 32(%rdi,%rax,4)\n   movdqu %xmm5, 48(%rdi,%rax,4)\n"
+    PIXELS_X64_NEXT("16", ASM_LABEL(grey_v), ASM_LABEL(grey_done))
+    "" ASM_LABEL(grey_one) ":\n   test %r8, %r8\n   jz " ASM_LABEL(grey_done) "\n"
+    "" ASM_LABEL(grey_s) ":\n   movzbl (%rsi), %eax\n   imul $0x010101, %eax, %eax\n   or $0xff000000, %eax\n   mov %eax, (%rdi)\n"
+    "inc %rsi\n   add $4, %rdi\n   dec %r8\n   jnz " ASM_LABEL(grey_s) "\n"
+    "" ASM_LABEL(grey_done) ":\n" ASM_RET
+    ASM_END(pixels_from_grey)
+
+    //      pixels_from_planes: rdi into, rsi r, rdx g, rcx b, r8 count.
+    ASM_FUNC(pixels_from_planes)
+    "cmp $16, %r8\n   jb " ASM_LABEL(planes_one) "\n   xor %eax, %eax\n   lea -16(%r8), %r9\n"
+    "" ASM_LABEL(planes_v) ":\n   movdqu (%rsi,%rax), %xmm8\n   movdqu (%rdx,%rax), %xmm5\n   movdqu (%rcx,%rax), %xmm11\n"
+    PIXELS_X64_STORE16
+    PIXELS_X64_NEXT("16", ASM_LABEL(planes_v), ASM_LABEL(planes_done))
+    "" ASM_LABEL(planes_one) ":\n   test %r8, %r8\n   jz " ASM_LABEL(planes_done) "\n"
+    "" ASM_LABEL(planes_s) ":\n   movzbl (%rsi), %eax\n   shl $8, %eax\n   movzbl (%rdx), %r9d\n   or %r9d, %eax\n   shl $8, %eax\n"
+    "movzbl (%rcx), %r9d\n   or %r9d, %eax\n   or $0xff000000, %eax\n   mov %eax, (%rdi)\n   inc %rsi\n   inc %rdx\n   inc %rcx\n"
+    "add $4, %rdi\n   dec %r8\n   jnz " ASM_LABEL(planes_s) "\n"
+    "" ASM_LABEL(planes_done) ":\n" ASM_RET
+    ASM_END(pixels_from_planes)
+
+    //      pixels_to_ycbcr: rdi y, rsi cb, rdx cr, rcx from, r8 count. Eight pixels a turn: each word's (R, G) and (B, G) as the two
+    //      halves of a lane for pmaddwd, 0.587 as 0.337 and 0.25 (38470 is no 16-bit factor), the 0.5 terms as shifts by 15.
+    ASM_FUNC(pixels_to_ycbcr)
+    "cmp $8, %r8\n   jb " ASM_LABEL(rgb_one) "\n   xor %eax, %eax\n   lea -8(%r8), %r9\n   movdqa " ASM_LABEL(pix_k) "+192(%rip), %xmm15\n"
+    "" ASM_LABEL(rgb_v) ":\n"
+#define PIXELS_X64_TO_YCC(FROM, Y, CB, CR)                                                                                              \
+    "movdqu " FROM ", %xmm0\n   movdqa %xmm0, %xmm1\n   psrld $16, %xmm1\n   pand %xmm15, %xmm1\n   movdqa %xmm0, %xmm2\n"              \
+    "psrld $8, %xmm2\n   pand %xmm15, %xmm2\n   pand %xmm15, %xmm0\n   pslld $16, %xmm2\n   movdqa %xmm1, %xmm3\n   por %xmm2, %xmm3\n"   \
+    "movdqa %xmm0, %xmm4\n   por %xmm2, %xmm4\n"                                                                                     \
+    "movdqa %xmm3, %xmm5\n   pmaddwd " ASM_LABEL(pix_k) "+112(%rip), %xmm5\n   movdqa %xmm4, %xmm6\n   pmaddwd " ASM_LABEL(pix_k) "+128(%rip), %xmm6\n" \
+    "paddd %xmm6, %xmm5\n   paddd " ASM_LABEL(pix_k) "+80(%rip), %xmm5\n   psrad $16, %xmm5\n   movdqa %xmm5, " Y "\n"              \
+    "pmaddwd " ASM_LABEL(pix_k) "+144(%rip), %xmm3\n   pslld $15, %xmm0\n   paddd %xmm0, %xmm3\n   paddd " ASM_LABEL(pix_k) "+176(%rip), %xmm3\n" \
+    "psrad $16, %xmm3\n   movdqa %xmm3, " CB "\n"                                                                                \
+    "pmaddwd " ASM_LABEL(pix_k) "+160(%rip), %xmm4\n   pslld $15, %xmm1\n   paddd %xmm1, %xmm4\n   paddd " ASM_LABEL(pix_k) "+176(%rip), %xmm4\n" \
+    "psrad $16, %xmm4\n   movdqa %xmm4, " CR "\n"
+    PIXELS_X64_TO_YCC("(%rcx,%rax,4)", "%xmm8", "%xmm9", "%xmm10")
+    PIXELS_X64_TO_YCC("16(%rcx,%rax,4)", "%xmm11", "%xmm12", "%xmm13")
+    "packssdw %xmm11, %xmm8\n   packuswb %xmm8, %xmm8\n   movq %xmm8, (%rdi,%rax)\n   packssdw %xmm12, %xmm9\n   packuswb %xmm9, %xmm9\n"
+    "movq %xmm9, (%rsi,%rax)\n   packssdw %xmm13, %xmm10\n   packuswb %xmm10, %xmm10\n   movq %xmm10, (%rdx,%rax)\n"
+#undef PIXELS_X64_TO_YCC
+    PIXELS_X64_NEXT("8", ASM_LABEL(rgb_v), ASM_LABEL(rgb_done))
+    "" ASM_LABEL(rgb_one) ":\n   test %r8, %r8\n   jz " ASM_LABEL(rgb_done) "\n   push %rbx\n"
+    "" ASM_LABEL(rgb_s) ":\n   mov (%rcx), %r9d\n   movzbl %r9b, %r11d\n   shr $8, %r9d\n   movzbl %r9b, %r10d\n   shr $8, %r9d\n   movzbl %r9b, %r9d\n"
+    "imul $19595, %r9d, %eax\n   imul $38470, %r10d, %ebx\n   add %ebx, %eax\n   imul $7471, %r11d, %ebx\n   add %ebx, %eax\n   add $32768, %eax\n"
+    "shr $16, %eax\n   mov %al, (%rdi)\n"
+    "imul $-11059, %r9d, %eax\n   imul $-21709, %r10d, %ebx\n   add %ebx, %eax\n   mov %r11d, %ebx\n   shl $15, %ebx\n   add %ebx, %eax\n"
+    "add $8421375, %eax\n   sar $16, %eax\n   mov %al, (%rsi)\n"
+    "imul $-27439, %r10d, %eax\n   imul $-5329, %r11d, %ebx\n   add %ebx, %eax\n   mov %r9d, %ebx\n   shl $15, %ebx\n   add %ebx, %eax\n"
+    "add $8421375, %eax\n   sar $16, %eax\n   mov %al, (%rdx)\n"
+    "add $4, %rcx\n   inc %rdi\n   inc %rsi\n   inc %rdx\n   dec %r8\n   jnz " ASM_LABEL(rgb_s) "\n   pop %rbx\n"
+    "" ASM_LABEL(rgb_done) ":\n" ASM_RET
+    ASM_END(pixels_to_ycbcr)
+
+    //      samples_double: rdi into, rsi from, rdx count. Eight samples a turn from the second on, while the one after the eight is
+    //      there (from[x - 1] to from[x + 8] read by three 8-byte loads); the first, the last and what is between in scalars, the
+    //      ends replicated. An output pair is one word, the even sample low.
+    ASM_FUNC(samples_double)
+    "test %rdx, %rdx\n   jz " ASM_LABEL(sd_done) "\n   xor %eax, %eax\n   cmp $10, %rdx\n   jb " ASM_LABEL(sd_s) "\n"
+    "pxor %xmm15, %xmm15\n   lea -9(%rdx), %r9\n   movdqa " ASM_LABEL(pix_k) "+48(%rip), %xmm13\n   movdqa " ASM_LABEL(pix_k) "+208(%rip), %xmm14\n"
+    "call " ASM_LABEL(sd_one) "\n"
+    "" ASM_LABEL(sd_v) ":\n   movq -1(%rsi,%rax), %xmm0\n   movq (%rsi,%rax), %xmm1\n   movq 1(%rsi,%rax), %xmm2\n   punpcklbw %xmm15, %xmm0\n"
+    "punpcklbw %xmm15, %xmm1\n   punpcklbw %xmm15, %xmm2\n   movdqa %xmm1, %xmm3\n   paddw %xmm1, %xmm3\n   paddw %xmm1, %xmm3\n"
+    "movdqa %xmm3, %xmm4\n   paddw %xmm0, %xmm4\n   paddw %xmm13, %xmm4\n   psrlw $2, %xmm4\n   paddw %xmm2, %xmm3\n   paddw %xmm14, %xmm3\n"
+    "psrlw $2, %xmm3\n   psllw $8, %xmm3\n   por %xmm3, %xmm4\n   movdqu %xmm4, (%rdi,%rax,2)\n   add $8, %rax\n   cmp %r9, %rax\n"
+    "jbe " ASM_LABEL(sd_v) "\n"
+    "" ASM_LABEL(sd_s) ":\n   call " ASM_LABEL(sd_one) "\n   cmp %rdx, %rax\n   jb " ASM_LABEL(sd_s) "\n"
+    "" ASM_LABEL(sd_done) ":\n" ASM_RET
+    //      One output pair, of rax (which it steps): r10 the sample, r11 the one before, rcx the one after (r8 spent).
+    "" ASM_LABEL(sd_one) ":\n   movzbl (%rsi,%rax), %r10d\n   mov %r10d, %r11d\n   mov %r10d, %ecx\n   test %rax, %rax\n   jz 1f\n"
+    "movzbl -1(%rsi,%rax), %r11d\n1:  lea 1(%rax), %r8\n   cmp %rdx, %r8\n   jae 2f\n   movzbl 1(%rsi,%rax), %ecx\n"
+    "2:  lea (%r10,%r10,2), %r10d\n   lea 1(%r10,%r11), %r11d\n   shr $2, %r11d\n   mov %r11b, (%rdi,%rax,2)\n   lea 2(%r10,%rcx), %ecx\n"
+    "shr $2, %ecx\n   mov %cl, 1(%rdi,%rax,2)\n   inc %rax\n" ASM_RET
+    ASM_END(samples_double)
+
+    //      samples_double_rows: rdi into, rsi near, rdx far, rcx count. As samples_double, over the column sums 3 near + far made
+    //      for x - 1, x and x + 1 from their 8-byte loads.
+    ASM_FUNC(samples_double_rows)
+    "test %rcx, %rcx\n   jz " ASM_LABEL(sdr_done) "\n   push %rbx\n   push %r12\n   mov %rcx, %r12\n   xor %eax, %eax\n   cmp $10, %r12\n"
+    "jb " ASM_LABEL(sdr_s) "\n"
+    "pxor %xmm15, %xmm15\n   lea -9(%r12), %r9\n   movdqa " ASM_LABEL(pix_k) "+224(%rip), %xmm13\n   movdqa " ASM_LABEL(pix_k) "+240(%rip), %xmm14\n"
+    "call " ASM_LABEL(sdr_one) "\n"
+#define SAMPLES_X64_SUM(OFFSET, X)                                                                                                     \
+    "movq " OFFSET "(%rsi,%rax), %xmm" X "\n   movq " OFFSET "(%rdx,%rax), %xmm12\n   punpcklbw %xmm15, %xmm" X "\n   punpcklbw %xmm15, %xmm12\n" \
+    "movdqa %xmm" X ", %xmm11\n   paddw %xmm" X ", %xmm" X "\n   paddw %xmm11, %xmm" X "\n   paddw %xmm12, %xmm" X "\n"
+    "" ASM_LABEL(sdr_v) ":\n"
+    SAMPLES_X64_SUM("-1", "0") SAMPLES_X64_SUM("0", "1") SAMPLES_X64_SUM("1", "2")
+    "movdqa %xmm1, %xmm3\n   paddw %xmm1, %xmm3\n   paddw %xmm1, %xmm3\n   movdqa %xmm3, %xmm4\n   paddw %xmm0, %xmm4\n   paddw %xmm13, %xmm4\n"
+    "psrlw $4, %xmm4\n   paddw %xmm2, %xmm3\n   paddw %xmm14, %xmm3\n   psrlw $4, %xmm3\n   psllw $8, %xmm3\n   por %xmm3, %xmm4\n"
+    "movdqu %xmm4, (%rdi,%rax,2)\n   add $8, %rax\n   cmp %r9, %rax\n   jbe " ASM_LABEL(sdr_v) "\n"
+#undef SAMPLES_X64_SUM
+    "" ASM_LABEL(sdr_s) ":\n   call " ASM_LABEL(sdr_one) "\n   cmp %r12, %rax\n   jb " ASM_LABEL(sdr_s) "\n   pop %r12\n   pop %rbx\n"
+    "" ASM_LABEL(sdr_done) ":\n" ASM_RET
+    //      One output pair of rax (stepped): r10 the column's sum, r11 the one before, rbx the one after (r8 spent).
+    "" ASM_LABEL(sdr_one) ":\n   movzbl (%rsi,%rax), %r10d\n   lea (%r10,%r10,2), %r10d\n   movzbl (%rdx,%rax), %r8d\n   add %r8d, %r10d\n"
+    "mov %r10d, %r11d\n   mov %r10d, %ebx\n   test %rax, %rax\n   jz 1f\n   movzbl -1(%rsi,%rax), %r11d\n   lea (%r11,%r11,2), %r11d\n"
+    "movzbl -1(%rdx,%rax), %r8d\n   add %r8d, %r11d\n1:  lea 1(%rax), %r8\n   cmp %r12, %r8\n   jae 2f\n   movzbl 1(%rsi,%rax), %ebx\n"
+    "lea (%rbx,%rbx,2), %ebx\n   movzbl 1(%rdx,%rax), %r8d\n   add %r8d, %ebx\n"
+    "2:  lea (%r10,%r10,2), %r10d\n   lea 8(%r10,%r11), %r11d\n   shr $4, %r11d\n   mov %r11b, (%rdi,%rax,2)\n   lea 7(%r10,%rbx), %ebx\n"
+    "shr $4, %ebx\n   mov %bl, 1(%rdi,%rax,2)\n   inc %rax\n" ASM_RET
+    ASM_END(samples_double_rows)
+
+    //      samples_blend_rows: rdi into, rsi near, rdx far, rcx count, r8 bias. Sixteen a turn, the last sixteen again.
+    ASM_FUNC(samples_blend_rows)
+    "and $3, %r8d\n   cmp $16, %rcx\n   jb " ASM_LABEL(sbr_one) "\n   movd %r8d, %xmm7\n   pshuflw $0, %xmm7, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
+    "pxor %xmm15, %xmm15\n   xor %eax, %eax\n   lea -16(%rcx), %r9\n"
+    "" ASM_LABEL(sbr_v) ":\n   movdqu (%rsi,%rax), %xmm0\n   movdqu (%rdx,%rax), %xmm2\n   movdqa %xmm0, %xmm1\n   punpcklbw %xmm15, %xmm0\n"
+    "punpckhbw %xmm15, %xmm1\n   movdqa %xmm2, %xmm3\n   punpcklbw %xmm15, %xmm2\n   punpckhbw %xmm15, %xmm3\n   movdqa %xmm0, %xmm4\n"
+    "paddw %xmm0, %xmm0\n   paddw %xmm4, %xmm0\n   movdqa %xmm1, %xmm5\n   paddw %xmm1, %xmm1\n   paddw %xmm5, %xmm1\n   paddw %xmm2, %xmm0\n"
+    "paddw %xmm3, %xmm1\n   paddw %xmm7, %xmm0\n   paddw %xmm7, %xmm1\n   psrlw $2, %xmm0\n   psrlw $2, %xmm1\n   packuswb %xmm1, %xmm0\n"
+    "movdqu %xmm0, (%rdi,%rax)\n"
+    PIXELS_X64_NEXT("16", ASM_LABEL(sbr_v), ASM_LABEL(sbr_done))
+    "" ASM_LABEL(sbr_one) ":\n   test %rcx, %rcx\n   jz " ASM_LABEL(sbr_done) "\n"
+    "" ASM_LABEL(sbr_s) ":\n   movzbl (%rsi), %eax\n   lea (%rax,%rax,2), %eax\n   movzbl (%rdx), %r9d\n   add %r9d, %eax\n   add %r8d, %eax\n"
+    "shr $2, %eax\n   mov %al, (%rdi)\n   inc %rsi\n   inc %rdx\n   inc %rdi\n   dec %rcx\n   jnz " ASM_LABEL(sbr_s) "\n"
+    "" ASM_LABEL(sbr_done) ":\n" ASM_RET
+    ASM_END(samples_blend_rows)
+);
+#undef PIXELS_X64_BYTE
+#undef PIXELS_X64_STORE16
+#undef PIXELS_X64_NEXT
+#elif ARM64
+//      w5 held to 0..255 (w11 is 255).
+#define PIXELS_ARM_BYTE(R) "cmp " R ", #0\n   csel " R ", wzr, " R ", lt\n   cmp " R ", #255\n   csel " R ", w11, " R ", gt\n"
+//      The walk over groups of GROUP: x5 the group, x6 the last one's start; then the last one again from where it ends.
+#define PIXELS_ARM_NEXT(GROUP, LABEL, DONE)                                                                                             \
+    "add x5, x5, #" GROUP "\n   cmp x5, x6\n   b.ls " LABEL "\n   add x7, x6, #" GROUP "\n   cmp x5, x7\n   b.hs " DONE "\n"           \
+    "mov x5, x6\n   b " LABEL "\n"
+__asm__(
+    ASM_SECTION
+    //      pixels_from_ycbcr: x0 into, x1 y, x2 cb, x3 cr, x4 count. v0 the constants (by element), Cb' and Cr' widened by usubl.
+    ASM_FUNC(pixels_from_ycbcr)
+    "cmp x4, #16\n   b.lo 8f\n   adrp x9, " ASM_PAGE_LABEL(pix_a) "\n   add x9, x9, " ASM_LO12_LABEL(pix_a) "\n   ld1 {v0.8h}, [x9]\n"
+    "movi v31.16b, #128\n   movi v27.16b, #0xff\n   mov x5, #0\n   sub x6, x4, #16\n"
+    "1:  ldr q28, [x1, x5]\n   ldr q29, [x2, x5]\n   ldr q30, [x3, x5]\n"
+    "usubl v1.8h, v29.8b, v31.8b\n   usubl2 v2.8h, v29.16b, v31.16b\n   usubl v3.8h, v30.8b, v31.8b\n   usubl2 v4.8h, v30.16b, v31.16b\n"
+    "smull v16.4s, v3.4h, v0.h[0]\n   smull2 v17.4s, v3.8h, v0.h[0]\n   rshrn v5.4h, v16.4s, #16\n   rshrn2 v5.8h, v17.4s, #16\n   add v5.8h, v5.8h, v3.8h\n"
+    "smull v16.4s, v4.4h, v0.h[0]\n   smull2 v17.4s, v4.8h, v0.h[0]\n   rshrn v6.4h, v16.4s, #16\n   rshrn2 v6.8h, v17.4s, #16\n   add v6.8h, v6.8h, v4.8h\n"
+    "smull v16.4s, v1.4h, v0.h[1]\n   smull2 v17.4s, v1.8h, v0.h[1]\n   rshrn v7.4h, v16.4s, #16\n   rshrn2 v7.8h, v17.4s, #16\n   add v7.8h, v7.8h, v1.8h\n"
+    "add v7.8h, v7.8h, v1.8h\n"
+    "smull v16.4s, v2.4h, v0.h[1]\n   smull2 v17.4s, v2.8h, v0.h[1]\n   rshrn v18.4h, v16.4s, #16\n   rshrn2 v18.8h, v17.4s, #16\n   add v18.8h, v18.8h, v2.8h\n"
+    "add v18.8h, v18.8h, v2.8h\n"
+    "smull v16.4s, v1.4h, v0.h[2]\n   smlal v16.4s, v3.4h, v0.h[3]\n   smull2 v17.4s, v1.8h, v0.h[2]\n   smlal2 v17.4s, v3.8h, v0.h[3]\n"
+    "rshrn v19.4h, v16.4s, #16\n   rshrn2 v19.8h, v17.4s, #16\n   sub v19.8h, v19.8h, v3.8h\n"
+    "smull v16.4s, v2.4h, v0.h[2]\n   smlal v16.4s, v4.4h, v0.h[3]\n   smull2 v17.4s, v2.8h, v0.h[2]\n   smlal2 v17.4s, v4.8h, v0.h[3]\n"
+    "rshrn v20.4h, v16.4s, #16\n   rshrn2 v20.8h, v17.4s, #16\n   sub v20.8h, v20.8h, v4.8h\n"
+    "uxtl v21.8h, v28.8b\n   uxtl2 v22.8h, v28.16b\n"
+    "add v5.8h, v5.8h, v21.8h\n   add v6.8h, v6.8h, v22.8h\n   sqxtun v26.8b, v5.8h\n   sqxtun2 v26.16b, v6.8h\n"
+    "add v19.8h, v19.8h, v21.8h\n   add v20.8h, v20.8h, v22.8h\n   sqxtun v25.8b, v19.8h\n   sqxtun2 v25.16b, v20.8h\n"
+    "add v7.8h, v7.8h, v21.8h\n   add v18.8h, v18.8h, v22.8h\n   sqxtun v24.8b, v7.8h\n   sqxtun2 v24.16b, v18.8h\n"
+    "add x7, x0, x5, lsl #2\n   st4 {v24.16b, v25.16b, v26.16b, v27.16b}, [x7]\n"
+    PIXELS_ARM_NEXT("16", "1b", "9f")
+    "8:  cbz x4, 9f\n   mov w11, #255\n   movz w12, #0x66e9\n   movk w12, #1, lsl #16\n   mov w13, #-22554\n   mov w14, #-46802\n"
+    "movz w15, #0xc5a2\n   movk w15, #1, lsl #16\n"
+    "7:  ldrb w5, [x1], #1\n   ldrb w6, [x2], #1\n   sub w6, w6, #128\n   ldrb w7, [x3], #1\n   sub w7, w7, #128\n"
+    "mul w8, w7, w12\n   add w8, w8, #8, lsl #12\n   asr w8, w8, #16\n   add w8, w8, w5\n" PIXELS_ARM_BYTE("w8")
+    "mul w9, w6, w13\n   madd w9, w7, w14, w9\n   add w9, w9, #8, lsl #12\n   asr w9, w9, #16\n   add w9, w9, w5\n" PIXELS_ARM_BYTE("w9")
+    "mul w10, w6, w15\n   add w10, w10, #8, lsl #12\n   asr w10, w10, #16\n   add w10, w10, w5\n" PIXELS_ARM_BYTE("w10")
+    "orr w10, w10, w9, lsl #8\n   orr w10, w10, w8, lsl #16\n   orr w10, w10, #0xff000000\n   str w10, [x0], #4\n   subs x4, x4, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    //      26345 and -14942 (Cr' to R, Cb' to B, their fractions), -22554 and 18734 (to G); Y's three, Cb's two and Cr's two.
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(pix_a) ":\n   .short 26345, -14942, -22554, 18734, 0, 0, 0, 0\n   .short 19595, 38470, 7471, -11059, -21709, -27439, -5329, 0\n"
+    ".popsection\n"
+    ASM_END(pixels_from_ycbcr)
+
+    //      pixels_from_grey: x0 into, x1 y, x2 count. st4 of the sample three times and the alpha.
+    ASM_FUNC(pixels_from_grey)
+    "cmp x2, #16\n   b.lo 8f\n   movi v27.16b, #0xff\n   mov x5, #0\n   sub x6, x2, #16\n"
+    "1:  ldr q24, [x1, x5]\n   mov v25.16b, v24.16b\n   mov v26.16b, v24.16b\n   add x7, x0, x5, lsl #2\n   st4 {v24.16b, v25.16b, v26.16b, v27.16b}, [x7]\n"
+    PIXELS_ARM_NEXT("16", "1b", "9f")
+    "8:  cbz x2, 9f\n   movz w9, #0x0101\n   movk w9, #1, lsl #16\n"
+    "7:  ldrb w5, [x1], #1\n   mul w5, w5, w9\n   orr w5, w5, #0xff000000\n   str w5, [x0], #4\n   subs x2, x2, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_from_grey)
+
+    //      pixels_from_planes: x0 into, x1 r, x2 g, x3 b, x4 count.
+    ASM_FUNC(pixels_from_planes)
+    "cmp x4, #16\n   b.lo 8f\n   movi v27.16b, #0xff\n   mov x5, #0\n   sub x6, x4, #16\n"
+    "1:  ldr q26, [x1, x5]\n   ldr q25, [x2, x5]\n   ldr q24, [x3, x5]\n   add x7, x0, x5, lsl #2\n   st4 {v24.16b, v25.16b, v26.16b, v27.16b}, [x7]\n"
+    PIXELS_ARM_NEXT("16", "1b", "9f")
+    "8:  cbz x4, 9f\n"
+    "7:  ldrb w5, [x1], #1\n   ldrb w6, [x2], #1\n   ldrb w7, [x3], #1\n   orr w7, w7, w6, lsl #8\n   orr w7, w7, w5, lsl #16\n"
+    "orr w7, w7, #0xff000000\n   str w7, [x0], #4\n   subs x4, x4, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_from_planes)
+
+    //      pixels_to_ycbcr: x0 y, x1 cb, x2 cr, x3 from, x4 count. ld4 parts sixteen words into their bytes; Y by umull and umlal
+    //      (38470 is an unsigned halfword), Cb and Cr by smull and smlal with the 0.5 term a shift by 15. v7 the constants.
+#define PIXELS_ARM_TO_YCC(R, G, B, Y, CB, CR, HALF, HI)                                                                                \
+    "umull" HI " v20.4s, " R "." HALF ", v7.h[0]\n   umlal" HI " v20.4s, " G "." HALF ", v7.h[1]\n   umlal" HI " v20.4s, " B "." HALF ", v7.h[2]\n" \
+    "smull" HI " v21.4s, " R "." HALF ", v7.h[3]\n   smlal" HI " v21.4s, " G "." HALF ", v7.h[4]\n   sshll" HI " v22.4s, " B "." HALF ", #15\n" \
+    "add v21.4s, v21.4s, v22.4s\n   add v21.4s, v21.4s, v6.4s\n"                                                                      \
+    "smull" HI " v22.4s, " G "." HALF ", v7.h[5]\n   smlal" HI " v22.4s, " B "." HALF ", v7.h[6]\n   sshll" HI " v23.4s, " R "." HALF ", #15\n" \
+    "add v22.4s, v22.4s, v23.4s\n   add v22.4s, v22.4s, v6.4s\n"                                                                      \
+    "rshrn" HI " " Y ", v20.4s, #16\n   shrn" HI " " CB ", v21.4s, #16\n   shrn" HI " " CR ", v22.4s, #16\n"
+    ASM_FUNC(pixels_to_ycbcr)
+    "cmp x4, #16\n   b.lo 8f\n   adrp x9, " ASM_PAGE_LABEL(pix_a) "\n   add x9, x9, " ASM_LO12_LABEL(pix_a) "\n   add x9, x9, #16\n   ld1 {v7.8h}, [x9]\n"
+    "movz w9, #0x7fff\n   movk w9, #0x80, lsl #16\n   dup v6.4s, w9\n   mov x5, #0\n   sub x6, x4, #16\n"
+    "1:  add x7, x3, x5, lsl #2\n   ld4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x7]\n"
+    "uxtl v4.8h, v2.8b\n   uxtl2 v5.8h, v2.16b\n   uxtl v16.8h, v1.8b\n   uxtl2 v17.8h, v1.16b\n   uxtl v18.8h, v0.8b\n   uxtl2 v19.8h, v0.16b\n"
+    PIXELS_ARM_TO_YCC("v4", "v16", "v18", "v24.4h", "v25.4h", "v26.4h", "4h", "")
+    PIXELS_ARM_TO_YCC("v4", "v16", "v18", "v24.8h", "v25.8h", "v26.8h", "8h", "2")
+    PIXELS_ARM_TO_YCC("v5", "v17", "v19", "v27.4h", "v28.4h", "v29.4h", "4h", "")
+    PIXELS_ARM_TO_YCC("v5", "v17", "v19", "v27.8h", "v28.8h", "v29.8h", "8h", "2")
+    "xtn v24.8b, v24.8h\n   xtn2 v24.16b, v27.8h\n   xtn v25.8b, v25.8h\n   xtn2 v25.16b, v28.8h\n   xtn v26.8b, v26.8h\n   xtn2 v26.16b, v29.8h\n"
+    "str q24, [x0, x5]\n   str q25, [x1, x5]\n   str q26, [x2, x5]\n"
+    PIXELS_ARM_NEXT("16", "1b", "9f")
+#undef PIXELS_ARM_TO_YCC
+    "8:  cbz x4, 9f\n   mov w12, #19595\n   mov w13, #38470\n   mov w14, #7471\n   mov w15, #-11059\n   mov w16, #-21709\n   mov w17, #-27439\n"
+    "mov w10, #-5329\n   movz w11, #0x7fff\n   movk w11, #0x80, lsl #16\n"
+    "7:  ldr w5, [x3], #4\n   ubfx w6, w5, #16, #8\n   ubfx w7, w5, #8, #8\n   and w8, w5, #255\n"
+    "mul w9, w6, w12\n   madd w9, w7, w13, w9\n   madd w9, w8, w14, w9\n   add w9, w9, #8, lsl #12\n   lsr w9, w9, #16\n   strb w9, [x0], #1\n"
+    "mul w9, w6, w15\n   madd w9, w7, w16, w9\n   add w9, w9, w8, lsl #15\n   add w9, w9, w11\n   asr w9, w9, #16\n   strb w9, [x1], #1\n"
+    "mul w9, w7, w17\n   madd w9, w8, w10, w9\n   add w9, w9, w6, lsl #15\n   add w9, w9, w11\n   asr w9, w9, #16\n   strb w9, [x2], #1\n"
+    "subs x4, x4, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_to_ycbcr)
+
+    //      samples_double: x0 into, x1 from, x2 count. Eight a turn from the second on while from[x + 8] is there, st2 putting the
+    //      even and odd samples together; the first, the last and the rest one at a time, the ends replicated.
+    ASM_FUNC(samples_double)
+    "cbz x2, 9f\n   mov x12, x30\n   mov x5, #0\n   cmp x2, #10\n   b.lo 6f\n   movi v30.8h, #1\n   movi v31.8h, #2\n   bl 5f\n   sub x6, x2, #9\n"
+    "1:  add x7, x1, x5\n   ldur d0, [x7, #-1]\n   ldr d1, [x7]\n   ldur d2, [x7, #1]\n   uxtl v0.8h, v0.8b\n   uxtl v1.8h, v1.8b\n"
+    "uxtl v2.8h, v2.8b\n   add v3.8h, v1.8h, v1.8h\n   add v3.8h, v3.8h, v1.8h\n   add v4.8h, v3.8h, v0.8h\n   add v4.8h, v4.8h, v30.8h\n"
+    "ushr v4.8h, v4.8h, #2\n   add v5.8h, v3.8h, v2.8h\n   add v5.8h, v5.8h, v31.8h\n   ushr v5.8h, v5.8h, #2\n   xtn v4.8b, v4.8h\n"
+    "xtn v5.8b, v5.8h\n   add x7, x0, x5, lsl #1\n   st2 {v4.8b, v5.8b}, [x7]\n   add x5, x5, #8\n   cmp x5, x6\n   b.ls 1b\n"
+    "6:  bl 5f\n   cmp x5, x2\n   b.lo 6b\n   mov x30, x12\n"
+    "9:  " ASM_RET
+    //      One output pair of x5 (stepped): w8 the sample, w9 the one before, w10 the one after. The routine's own return is in x12.
+    "5:  ldrb w8, [x1, x5]\n   mov w9, w8\n   mov w10, w8\n   cbz x5, 3f\n   sub x7, x5, #1\n   ldrb w9, [x1, x7]\n"
+    "3:  add x7, x5, #1\n   cmp x7, x2\n   b.hs 4f\n   ldrb w10, [x1, x7]\n"
+    "4:  add w8, w8, w8, lsl #1\n   add w9, w8, w9\n   add w9, w9, #1\n   lsr w9, w9, #2\n   add w10, w8, w10\n   add w10, w10, #2\n"
+    "lsr w10, w10, #2\n   add x7, x0, x5, lsl #1\n   strb w9, [x7]\n   strb w10, [x7, #1]\n   add x5, x5, #1\n   ret\n"
+    ASM_END(samples_double)
+
+    //      samples_double_rows: x0 into, x1 near, x2 far, x3 count. As samples_double over the column sums 3 near + far.
+#define SAMPLES_ARM_SUM(OFFSET, V)                                                                                                     \
+    "ldur d16, [x7, #" OFFSET "]\n   ldur d17, [x14, #" OFFSET "]\n   uxtl v16.8h, v16.8b\n   uxtl v17.8h, v17.8b\n"                  \
+    "add " V ".8h, v16.8h, v16.8h\n   add " V ".8h, " V ".8h, v16.8h\n   add " V ".8h, " V ".8h, v17.8h\n"
+    ASM_FUNC(samples_double_rows)
+    "cbz x3, 9f\n   mov x12, x30\n   mov x5, #0\n   cmp x3, #10\n   b.lo 6f\n   movi v30.8h, #8\n   movi v31.8h, #7\n   bl 5f\n   sub x6, x3, #9\n"
+    "1:  add x7, x1, x5\n   add x14, x2, x5\n"
+    SAMPLES_ARM_SUM("-1", "v0") SAMPLES_ARM_SUM("0", "v1") SAMPLES_ARM_SUM("1", "v2")
+    "add v3.8h, v1.8h, v1.8h\n   add v3.8h, v3.8h, v1.8h\n   add v4.8h, v3.8h, v0.8h\n   add v4.8h, v4.8h, v30.8h\n   ushr v4.8h, v4.8h, #4\n"
+    "add v5.8h, v3.8h, v2.8h\n   add v5.8h, v5.8h, v31.8h\n   ushr v5.8h, v5.8h, #4\n   xtn v4.8b, v4.8h\n   xtn v5.8b, v5.8h\n"
+    "add x7, x0, x5, lsl #1\n   st2 {v4.8b, v5.8b}, [x7]\n   add x5, x5, #8\n   cmp x5, x6\n   b.ls 1b\n"
+    "6:  bl 5f\n   cmp x5, x3\n   b.lo 6b\n   mov x30, x12\n"
+    "9:  " ASM_RET
+    //      One output pair of x5 (stepped): w8 the column's sum, w9 the one before, w10 the one after.
+    "5:  ldrb w8, [x1, x5]\n   ldrb w11, [x2, x5]\n   add w8, w8, w8, lsl #1\n   add w8, w8, w11\n   mov w9, w8\n   mov w10, w8\n"
+    "cbz x5, 3f\n   sub x7, x5, #1\n   ldrb w9, [x1, x7]\n   ldrb w11, [x2, x7]\n   add w9, w9, w9, lsl #1\n   add w9, w9, w11\n"
+    "3:  add x7, x5, #1\n   cmp x7, x3\n   b.hs 4f\n   ldrb w10, [x1, x7]\n   ldrb w11, [x2, x7]\n   add w10, w10, w10, lsl #1\n   add w10, w10, w11\n"
+    "4:  add w8, w8, w8, lsl #1\n   add w9, w8, w9\n   add w9, w9, #8\n   lsr w9, w9, #4\n   add w10, w8, w10\n   add w10, w10, #7\n"
+    "lsr w10, w10, #4\n   add x7, x0, x5, lsl #1\n   strb w9, [x7]\n   strb w10, [x7, #1]\n   add x5, x5, #1\n   ret\n"
+    ASM_END(samples_double_rows)
+#undef SAMPLES_ARM_SUM
+
+    //      samples_blend_rows: x0 into, x1 near, x2 far, x3 count, w4 bias. Sixteen a turn (uxtl, the sum in halfwords).
+    ASM_FUNC(samples_blend_rows)
+    "and w4, w4, #3\n   cmp x3, #16\n   b.lo 8f\n   dup v7.8h, w4\n   mov x5, #0\n   sub x6, x3, #16\n"
+    "1:  ldr q0, [x1, x5]\n   ldr q1, [x2, x5]\n   uxtl v2.8h, v0.8b\n   uxtl2 v3.8h, v0.16b\n   uxtl v4.8h, v1.8b\n   uxtl2 v5.8h, v1.16b\n"
+    "add v16.8h, v2.8h, v2.8h\n   add v16.8h, v16.8h, v2.8h\n   add v16.8h, v16.8h, v4.8h\n   add v16.8h, v16.8h, v7.8h\n"
+    "add v17.8h, v3.8h, v3.8h\n   add v17.8h, v17.8h, v3.8h\n   add v17.8h, v17.8h, v5.8h\n   add v17.8h, v17.8h, v7.8h\n"
+    "shrn v18.8b, v16.8h, #2\n   shrn2 v18.16b, v17.8h, #2\n   str q18, [x0, x5]\n"
+    PIXELS_ARM_NEXT("16", "1b", "9f")
+    "8:  cbz x3, 9f\n"
+    "7:  ldrb w5, [x1], #1\n   ldrb w6, [x2], #1\n   add w5, w5, w5, lsl #1\n   add w5, w5, w6\n   add w5, w5, w4\n   lsr w5, w5, #2\n"
+    "strb w5, [x0], #1\n   subs x3, x3, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    ASM_END(samples_blend_rows)
+);
+#undef PIXELS_ARM_BYTE
+#undef PIXELS_ARM_NEXT
+#elif RISCV64
+//      t0 held to 0..255 (t6 spent).
+#define PIXELS_RV_BYTE(R) "li t6, 255\n   bleu " R ", t6, 1f\n   slt " R ", zero, " R "\n   neg " R ", " R "\n   andi " R ", " R ", 255\n1:\n"
+__asm__(
+    ASM_SECTION
+    //      pixels_from_ycbcr: a0 into, a1 y, a2 cb, a3 cr, a4 count; a pixel at a time, the constants in t3 to t5 and a5.
+    ASM_FUNC(pixels_from_ycbcr)
+    "beqz a4, 9f\n   li t3, 91881\n   li t4, -22554\n   li t5, -46802\n   li a5, 116130\n   li a6, 32768\n"
+    "2:  lbu t0, 0(a1)\n   lbu t1, 0(a2)\n   addi t1, t1, -128\n   lbu t2, 0(a3)\n   addi t2, t2, -128\n"
+    "mulw a7, t2, t3\n   addw a7, a7, a6\n   sraiw a7, a7, 16\n   addw a7, a7, t0\n" PIXELS_RV_BYTE("a7")
+    "mulw t1, t1, t4\n   mulw t6, t2, t5\n   addw t1, t1, t6\n   addw t1, t1, a6\n   sraiw t1, t1, 16\n   addw t1, t1, t0\n" PIXELS_RV_BYTE("t1")
+    "lbu t2, 0(a2)\n   addi t2, t2, -128\n   mulw t2, t2, a5\n   addw t2, t2, a6\n   sraiw t2, t2, 16\n   addw t2, t2, t0\n" PIXELS_RV_BYTE("t2")
+    "slli a7, a7, 16\n   slli t1, t1, 8\n   or t2, t2, t1\n   or t2, t2, a7\n   li t6, 0xff000000\n   or t2, t2, t6\n   sw t2, 0(a0)\n"
+    "addi a1, a1, 1\n   addi a2, a2, 1\n   addi a3, a3, 1\n   addi a0, a0, 4\n   addi a4, a4, -1\n   bnez a4, 2b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_from_ycbcr)
+
+    //      pixels_from_grey: a0 into, a1 y, a2 count.
+    ASM_FUNC(pixels_from_grey)
+    "beqz a2, 9f\n   li t1, 0x010101\n   li t2, 0xff000000\n"
+    "1:  lbu t0, 0(a1)\n   mul t0, t0, t1\n   or t0, t0, t2\n   sw t0, 0(a0)\n   addi a1, a1, 1\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_from_grey)
+
+    //      pixels_from_planes: a0 into, a1 r, a2 g, a3 b, a4 count.
+    ASM_FUNC(pixels_from_planes)
+    "beqz a4, 9f\n   li t3, 0xff000000\n"
+    "1:  lbu t0, 0(a1)\n   lbu t1, 0(a2)\n   lbu t2, 0(a3)\n   slli t0, t0, 16\n   slli t1, t1, 8\n   or t0, t0, t1\n   or t0, t0, t2\n"
+    "or t0, t0, t3\n   sw t0, 0(a0)\n   addi a1, a1, 1\n   addi a2, a2, 1\n   addi a3, a3, 1\n   addi a0, a0, 4\n   addi a4, a4, -1\n   bnez a4, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_from_planes)
+
+    //      pixels_to_ycbcr: a0 y, a1 cb, a2 cr, a3 from, a4 count.
+    ASM_FUNC(pixels_to_ycbcr)
+    "beqz a4, 9f\n   li t3, 19595\n   li t4, 38470\n   li t5, 7471\n   li a5, -11059\n   li a6, -21709\n   li a7, 8421375\n"
+    "1:  lwu t0, 0(a3)\n   srli t1, t0, 16\n   andi t1, t1, 255\n   srli t2, t0, 8\n   andi t2, t2, 255\n   andi t0, t0, 255\n"
+    "mulw t6, t1, t3\n   mulw t3, t2, t4\n   addw t6, t6, t3\n   mulw t3, t0, t5\n   addw t6, t6, t3\n   li t3, 32768\n   addw t6, t6, t3\n"
+    "srliw t6, t6, 16\n   sb t6, 0(a0)\n   li t3, 19595\n"
+    "mulw t6, t1, a5\n   mulw t4, t2, a6\n   addw t6, t6, t4\n   slliw t4, t0, 15\n   addw t6, t6, t4\n   addw t6, t6, a7\n   sraiw t6, t6, 16\n"
+    "sb t6, 0(a1)\n   li t4, -27439\n   mulw t6, t2, t4\n   li t4, -5329\n   mulw t4, t0, t4\n   addw t6, t6, t4\n   slliw t4, t1, 15\n"
+    "addw t6, t6, t4\n   addw t6, t6, a7\n   sraiw t6, t6, 16\n   sb t6, 0(a2)\n   li t4, 38470\n"
+    "addi a3, a3, 4\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, 1\n   addi a4, a4, -1\n   bnez a4, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(pixels_to_ycbcr)
+
+    //      samples_double: a0 into, a1 from, a2 count. t0 the index; the samples before and after it read in range, the ends again.
+    ASM_FUNC(samples_double)
+    "beqz a2, 9f\n   li t0, 0\n   addi a3, a2, -1\n"
+    "1:  add t1, a1, t0\n   lbu t2, 0(t1)\n   mv t3, t2\n   mv t4, t2\n   beqz t0, 2f\n   lbu t3, -1(t1)\n"
+    "2:  bgeu t0, a3, 3f\n   lbu t4, 1(t1)\n"
+    "3:  slli t5, t2, 1\n   add t2, t2, t5\n   add t3, t3, t2\n   addi t3, t3, 1\n   srli t3, t3, 2\n   add t4, t4, t2\n   addi t4, t4, 2\n"
+    "srli t4, t4, 2\n   slli t5, t0, 1\n   add t5, a0, t5\n   sb t3, 0(t5)\n   sb t4, 1(t5)\n   addi t0, t0, 1\n   bltu t0, a2, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(samples_double)
+
+    //      samples_double_rows: a0 into, a1 near, a2 far, a3 count. The column sum before, at and after the index.
+#define SAMPLES_RV_SUM(R, OFFSET) "lbu " R ", " OFFSET "(t1)\n   slli t6, " R ", 1\n   add " R ", " R ", t6\n   lbu t6, " OFFSET "(a5)\n   add " R ", " R ", t6\n"
+    ASM_FUNC(samples_double_rows)
+    "beqz a3, 9f\n   li t0, 0\n   addi a4, a3, -1\n"
+    "1:  add t1, a1, t0\n   add a5, a2, t0\n" SAMPLES_RV_SUM("t2", "0") "mv t3, t2\n   mv t4, t2\n   beqz t0, 2f\n" SAMPLES_RV_SUM("t3", "-1")
+    "2:  bgeu t0, a4, 3f\n" SAMPLES_RV_SUM("t4", "1")
+    "3:  slli t5, t2, 1\n   add t2, t2, t5\n   add t3, t3, t2\n   addi t3, t3, 8\n   srli t3, t3, 4\n   add t4, t4, t2\n   addi t4, t4, 7\n"
+    "srli t4, t4, 4\n   slli t5, t0, 1\n   add t5, a0, t5\n   sb t3, 0(t5)\n   sb t4, 1(t5)\n   addi t0, t0, 1\n   bltu t0, a3, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(samples_double_rows)
+#undef SAMPLES_RV_SUM
+
+    //      samples_blend_rows: a0 into, a1 near, a2 far, a3 count, a4 bias.
+    ASM_FUNC(samples_blend_rows)
+    "beqz a3, 9f\n   andi a4, a4, 3\n"
+    "1:  lbu t0, 0(a1)\n   lbu t1, 0(a2)\n   slli t2, t0, 1\n   add t0, t0, t2\n   add t0, t0, t1\n   add t0, t0, a4\n   srli t0, t0, 2\n"
+    "sb t0, 0(a0)\n   addi a1, a1, 1\n   addi a2, a2, 1\n   addi a0, a0, 1\n   addi a3, a3, -1\n   bnez a3, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(samples_blend_rows)
+);
+#undef PIXELS_RV_BYTE
+#endif
+#endif // KERNEL_MODE, pixels_from_ycbcr
 
 /*
         What this processor turned out to have.

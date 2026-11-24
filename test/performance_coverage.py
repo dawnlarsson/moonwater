@@ -298,6 +298,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_matrix', 'gemm_f32',
 cover('benchmark_context', 'test/checks.c#BENCH_matrix', 'matrix_engine_f32',
       'the blocked engine gemm_f32 hands its job to, timed in every gemm_f32 row',
       {'matrix_engine_f32': 'gemm_f32'})
+cover('direct_benchmark', 'test/checks.c#BENCH_jpeg',
+      'pixels_from_ycbcr pixels_from_grey pixels_from_planes pixels_to_ycbcr samples_double samples_double_rows samples_blend_rows',
+      'paired timing against their definitions in C (the check\'s jpeg_reference_*, the kernels ui.c had) over a 4K picture\'s row, '
+      'the two in turn; CHECK_jpeg holds them to those definitions at every input there is (the colour) and every count to 70')
 cover('direct_benchmark', 'test/checks.c#BENCH_jpeg', 'jpeg_idct_8x8',
       'paired timing against its definition in C (the check\'s jpeg_reference_idct_8x8, the kernel ui.c had) over 4096 honest '
       'and 4096 smooth blocks, the two in turn a round at a time; CHECK_jpeg holds it to that definition byte for byte')

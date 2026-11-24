@@ -73,6 +73,79 @@ static fn jpeg_reference_idct_8x8(p8 address_to into, positive pitch, const b16 
         }
 }
 
+static inline p8 jpeg_reference_byte(b32 value)
+{
+        return (p8)(value < 0 ? 0 : value > 255 ? 255 : value);
+}
+
+// pixels_from_ycbcr's definition: libjpeg's jdcolor.c in 16-bit fixed point, each term rounded as its tables round.
+static fn jpeg_reference_pixels_from_ycbcr(p32 address_to into, const p8 address_to y, const p8 address_to cb, const p8 address_to cr, positive count)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                b32 l = y[x], u = (b32)cb[x] - 128, v = (b32)cr[x] - 128;
+
+                into[x] = 0xff000000u | (p32)jpeg_reference_byte(l + ((91881 * v + 32768) >> 16)) << 16 |
+                          (p32)jpeg_reference_byte(l + ((-22554 * u - 46802 * v + 32768) >> 16)) << 8 |
+                          jpeg_reference_byte(l + ((116130 * u + 32768) >> 16));
+        }
+}
+
+static fn jpeg_reference_pixels_from_grey(p32 address_to into, const p8 address_to y, positive count)
+{
+        for (positive x = 0; x < count; x++)
+                into[x] = 0xff000000u | (p32)y[x] * 0x010101u;
+}
+
+static fn jpeg_reference_pixels_from_planes(p32 address_to into, const p8 address_to r, const p8 address_to g, const p8 address_to b, positive count)
+{
+        for (positive x = 0; x < count; x++)
+                into[x] = 0xff000000u | (p32)r[x] << 16 | (p32)g[x] << 8 | b[x];
+}
+
+// pixels_to_ycbcr's definition: libjpeg's jccolor.c (the alpha byte not read), Cb and Cr rounded by one half less a 65536th.
+static fn jpeg_reference_pixels_to_ycbcr(p8 address_to y, p8 address_to cb, p8 address_to cr, const p32 address_to from, positive count)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                b32 r = (b32)(from[x] >> 16 & 255), g = (b32)(from[x] >> 8 & 255), b = (b32)(from[x] & 255);
+
+                y[x] = (p8)((19595 * r + 38470 * g + 7471 * b + 32768) >> 16);
+                cb[x] = (p8)((-11059 * r - 21709 * g + 32768 * b + (128 << 16) + 32767) >> 16);
+                cr[x] = (p8)((32768 * r - 27439 * g - 5329 * b + (128 << 16) + 32767) >> 16);
+        }
+}
+
+// samples_double's definition: libjpeg's h2v1 triangle filter, the samples beyond either end the end ones again.
+static fn jpeg_reference_samples_double(p8 address_to into, const p8 address_to from, positive count)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                p32 near = from[x] * 3u, left = from[x ? x - 1 : 0], right = from[x + 1 < count ? x + 1 : x];
+
+                into[2 * x] = (p8)((near + left + 1) >> 2), into[2 * x + 1] = (p8)((near + right + 2) >> 2);
+        }
+}
+
+// samples_double_rows's definition: libjpeg's h2v2 triangle filter's row, the column sums 3 near + far, beyond the ends the end ones.
+static fn jpeg_reference_samples_double_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                positive l = x ? x - 1 : 0, r = x + 1 < count ? x + 1 : x;
+                p32 c = near[x] * 3u + far[x], cl = near[l] * 3u + far[l], cr = near[r] * 3u + far[r];
+
+                into[2 * x] = (p8)((c * 3 + cl + 8) >> 4), into[2 * x + 1] = (p8)((c * 3 + cr + 7) >> 4);
+        }
+}
+
+// samples_blend_rows's definition: libjpeg's h1v2 triangle filter's row, (3 near + far + bias) / 4 with bias 0 to 3.
+static fn jpeg_reference_samples_blend_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count, p32 bias)
+{
+        for (positive x = 0; x < count; x++)
+                into[x] = (p8)((near[x] * 3u + far[x] + (bias & 3)) >> 2);
+}
+
 /* ---- end of the references ---- */
 
 static unsigned long long jpeg_state = 0x2545f4914f6cdd1dull;
@@ -113,6 +186,144 @@ static fn jpeg_block_of(b16 address_to c, p16 address_to q, p32 kind)
                 }
 }
 
+/* ---- the comparisons ---- */
+
+/*
+        Each routine of the family against its reference, written over nothing but the references, the routines, jpeg_next and
+        memory_fill and memory_compare, so the same text runs in CHECK_jpeg and wherever else the routines are (a harness of the
+        machine's own lifts it). Each returns how many cases differed. The colour conversions are held to their references at
+        every input there is (2^24 of each); the rest at every count to 70 and a few long ones, random and extreme samples, with
+        16 sentinel bytes either side of every output, so a byte written outside a count is a difference too.
+*/
+#define JPEG_SENTINEL 16
+static p8 jpeg_compare_a[4 * 4200 + 2 * JPEG_SENTINEL], jpeg_compare_b[4 * 4200 + 2 * JPEG_SENTINEL];
+static p8 jpeg_compare_in[3][4200 + 64];
+
+static positive jpeg_counts(positive at)
+{
+        static const positive longer[] = {255, 256, 257, 1000, 4096, 4097};
+
+        return at <= 70 ? at : longer[(at - 71) % 6];
+}
+
+static fn jpeg_compare_reset(void)
+{
+        memory_fill(jpeg_compare_a, 0xa5, sizeof(jpeg_compare_a)), memory_fill(jpeg_compare_b, 0xa5, sizeof(jpeg_compare_b));
+}
+
+static fn jpeg_compare_fill(positive count, p32 kind)
+{
+        for (int plane = 0; plane < 3; plane++)
+                for (positive at = 0; at < count + 64; at++)
+                        jpeg_compare_in[plane][at] = (p8)(kind == 0 ? jpeg_next() : kind == 1 ? (jpeg_next() & 1) * 255 : (at * 37 + plane * 11) & 255);
+}
+
+static positive jpeg_compare_colour(void)
+{
+        static p8 y[65536], cb[65536], cr[65536];
+        static p32 want[65536], got[65536];
+        positive wrong = 0;
+
+        // Every (Cb, Cr) pair at each Y: all 2^24 inputs, a row of 65536 at a time.
+        for (positive at = 0; at < 65536; at++)
+                cb[at] = (p8)(at & 255), cr[at] = (p8)(at >> 8);
+        for (positive l = 0; l < 256; l++)
+        {
+                memory_fill(y, (p8)l, sizeof(y));
+                jpeg_reference_pixels_from_ycbcr(want, y, cb, cr, 65536);
+                pixels_from_ycbcr(got, y, cb, cr, 65536);
+                wrong += memory_compare(want, got, sizeof(want)) != 0;
+        }
+        // And every count to 70 and the long ones, with sentinels.
+        for (positive at = 0; at < 71 + 6 * 2; at++)
+                for (p32 kind = 0; kind < 3; kind++)
+                {
+                        positive count = jpeg_counts(at);
+
+                        jpeg_compare_fill(count, kind), jpeg_compare_reset();
+                        jpeg_reference_pixels_from_ycbcr((p32 address_to)(jpeg_compare_a + JPEG_SENTINEL), jpeg_compare_in[0], jpeg_compare_in[1], jpeg_compare_in[2], count);
+                        pixels_from_ycbcr((p32 address_to)(jpeg_compare_b + JPEG_SENTINEL), jpeg_compare_in[0], jpeg_compare_in[1], jpeg_compare_in[2], count);
+                        wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+                        jpeg_compare_reset();
+                        jpeg_reference_pixels_from_grey((p32 address_to)(jpeg_compare_a + JPEG_SENTINEL), jpeg_compare_in[0], count);
+                        pixels_from_grey((p32 address_to)(jpeg_compare_b + JPEG_SENTINEL), jpeg_compare_in[0], count);
+                        wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+                        jpeg_compare_reset();
+                        jpeg_reference_pixels_from_planes((p32 address_to)(jpeg_compare_a + JPEG_SENTINEL), jpeg_compare_in[0], jpeg_compare_in[1], jpeg_compare_in[2], count);
+                        pixels_from_planes((p32 address_to)(jpeg_compare_b + JPEG_SENTINEL), jpeg_compare_in[0], jpeg_compare_in[1], jpeg_compare_in[2], count);
+                        wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+                }
+        return wrong;
+}
+
+static positive jpeg_compare_to_ycbcr(void)
+{
+        static p32 from[65536];
+        static p8 want[3][65536], got[3][65536];
+        positive wrong = 0;
+
+        // Every RGB there is, a row of 65536 at a time, each word's alpha byte a different value (it is not read).
+        for (positive r = 0; r < 256; r++)
+        {
+                for (positive at = 0; at < 65536; at++)
+                        from[at] = (p32)(at * 2654435761u) << 24 | (p32)r << 16 | (p32)at;
+                jpeg_reference_pixels_to_ycbcr(want[0], want[1], want[2], from, 65536);
+                pixels_to_ycbcr(got[0], got[1], got[2], from, 65536);
+                wrong += memory_compare(want, got, sizeof(want)) != 0;
+        }
+        for (positive at = 0; at < 71 + 6 * 2; at++)
+        {
+                positive count = jpeg_counts(at);
+                p32 address_to words = (p32 address_to)jpeg_compare_in[0];
+
+                for (positive k = 0; k < count && k < 1050; k++)
+                        words[k] = jpeg_next();
+                if (count > 1050)
+                        continue;
+                jpeg_compare_reset();
+                jpeg_reference_pixels_to_ycbcr(jpeg_compare_a + JPEG_SENTINEL, jpeg_compare_a + 2 * JPEG_SENTINEL + count,
+                                               jpeg_compare_a + 3 * JPEG_SENTINEL + 2 * count, words, count);
+                pixels_to_ycbcr(jpeg_compare_b + JPEG_SENTINEL, jpeg_compare_b + 2 * JPEG_SENTINEL + count, jpeg_compare_b + 3 * JPEG_SENTINEL + 2 * count,
+                                words, count);
+                wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+        }
+        return wrong;
+}
+
+static positive jpeg_compare_samples(void)
+{
+        positive wrong = 0;
+
+        for (positive at = 0; at < 71 + 6 * 2; at++)
+                for (p32 kind = 0; kind < 3; kind++)
+                {
+                        positive count = jpeg_counts(at);
+
+                        jpeg_compare_fill(count, kind);
+                        if (count)
+                        {
+                                jpeg_compare_reset();
+                                jpeg_reference_samples_double(jpeg_compare_a + JPEG_SENTINEL, jpeg_compare_in[0], count);
+                                samples_double(jpeg_compare_b + JPEG_SENTINEL, jpeg_compare_in[0], count);
+                                wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+                                jpeg_compare_reset();
+                                jpeg_reference_samples_double_rows(jpeg_compare_a + JPEG_SENTINEL, jpeg_compare_in[0], jpeg_compare_in[1], count);
+                                samples_double_rows(jpeg_compare_b + JPEG_SENTINEL, jpeg_compare_in[0], jpeg_compare_in[1], count);
+                                wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+                        }
+                        for (p32 bias = 0; bias < 8; bias++)
+                        {
+                                jpeg_compare_reset();
+                                jpeg_reference_samples_blend_rows(jpeg_compare_a + JPEG_SENTINEL, jpeg_compare_in[0], jpeg_compare_in[1], count, bias);
+                                samples_blend_rows(jpeg_compare_b + JPEG_SENTINEL, jpeg_compare_in[0], jpeg_compare_in[1], count, bias);
+                                wrong += memory_compare(jpeg_compare_a, jpeg_compare_b, sizeof(jpeg_compare_a)) != 0;
+                        }
+                }
+        return wrong;
+}
+
+/* ---- end of the comparisons ---- */
+
 /*
         A page that faults after each array a routine reads or writes, so a read or write past an end is caught; the output's
         rows lie in a region with sentinel bytes around each row, at an odd pitch, so a byte written outside a row is seen.
@@ -151,12 +362,20 @@ static positive jpeg_idct_8x8_wrong(positive blocks)
 
 static fn jpeg_tier(string_address tier)
 {
-        positive wrong = jpeg_idct_8x8_wrong(400000);
+        positive wrong = jpeg_idct_8x8_wrong(400000), colour = jpeg_compare_colour(), to = jpeg_compare_to_ycbcr(), samples = jpeg_compare_samples();
 
-        string_format(log, "  %s: jpeg_idct_8x8 %p of 400000 blocks differ\n", tier, wrong);
+        string_format(log, "  %s: jpeg_idct_8x8 %p of 400000 blocks differ; colour %p, to YCbCr %p, samples %p cases differ\n", tier, wrong,
+                      colour, to, samples);
         check("jpeg_idct_8x8: any coefficients and quantizers, honest, extreme, large and smooth blocks, the reference's bytes and "
               "nothing outside its rows or past its arrays",
               wrong == 0);
+        check("pixels_from_ycbcr, pixels_from_grey and pixels_from_planes: every input there is, every count to 70 and longer, the "
+              "reference's words and nothing outside them",
+              colour == 0);
+        check("pixels_to_ycbcr: every RGB there is (the alpha not read), counts to 70, the reference's bytes and nothing outside them", to == 0);
+        check("samples_double, samples_double_rows and samples_blend_rows: every count to 70 and longer, random, extreme and ramp "
+              "samples, every bias, the reference's bytes and nothing outside them",
+              samples == 0);
 }
 
 b32 main()
@@ -216,10 +435,47 @@ static fn jpeg_bench_idct(p32 kind, string_address name)
                       (positive)(best_reference * 100 / BLOCKS), (positive)(best * 100 / BLOCKS));
 }
 
+//      A row of 3840 samples (a 4K picture's) through each of the rest, the reference and the routine in turn; ticks a row.
+#define JPEG_BENCH_ROW(NAME, REFERENCE, ROUTINE)                                                                                         \
+        do                                                                                                                              \
+        {                                                                                                                               \
+                p64 best_reference = ~0ull, best = ~0ull;                                                                               \
+                for (int round = 0; round < 41; round++)                                                                                \
+                {                                                                                                                       \
+                        p64 t0 = jpeg_now();                                                                                            \
+                        REFERENCE;                                                                                                      \
+                        p64 t1 = jpeg_now();                                                                                            \
+                        ROUTINE;                                                                                                        \
+                        p64 t2 = jpeg_now();                                                                                            \
+                        if (round)                                                                                                      \
+                                best_reference = t1 - t0 < best_reference ? t1 - t0 : best_reference, best = t2 - t1 < best ? t2 - t1 : best; \
+                }                                                                                                                       \
+                string_format(log, "  %s, 3840 a row: reference %p, lib.c %p ticks\n", (string_address)NAME, (positive)best_reference, (positive)best); \
+        } while (0)
+
+static fn jpeg_bench_rows(void)
+{
+        static p8 y[3840 + 64], cb[3840 + 64], cr[3840 + 64], out8[2 * 3840 + 64], planes[3][3840];
+        static p32 out[3840];
+
+        for (int at = 0; at < 3840 + 64; at++)
+                y[at] = (p8)jpeg_next(), cb[at] = (p8)(96 + jpeg_next() % 64), cr[at] = (p8)(96 + jpeg_next() % 64);
+        JPEG_BENCH_ROW("pixels_from_ycbcr", jpeg_reference_pixels_from_ycbcr(out, y, cb, cr, 3840), pixels_from_ycbcr(out, y, cb, cr, 3840));
+        JPEG_BENCH_ROW("pixels_from_grey", jpeg_reference_pixels_from_grey(out, y, 3840), pixels_from_grey(out, y, 3840));
+        JPEG_BENCH_ROW("pixels_from_planes", jpeg_reference_pixels_from_planes(out, y, cb, cr, 3840), pixels_from_planes(out, y, cb, cr, 3840));
+        JPEG_BENCH_ROW("pixels_to_ycbcr", jpeg_reference_pixels_to_ycbcr(planes[0], planes[1], planes[2], out, 3840),
+                       pixels_to_ycbcr(planes[0], planes[1], planes[2], out, 3840));
+        JPEG_BENCH_ROW("samples_double (1920 to 3840)", jpeg_reference_samples_double(out8, cb, 1920), samples_double(out8, cb, 1920));
+        JPEG_BENCH_ROW("samples_double_rows (1920 to 3840)", jpeg_reference_samples_double_rows(out8, cb, cr, 1920),
+                       samples_double_rows(out8, cb, cr, 1920));
+        JPEG_BENCH_ROW("samples_blend_rows", jpeg_reference_samples_blend_rows(out8, cb, cr, 3840, 1), samples_blend_rows(out8, cb, cr, 3840, 1));
+}
+
 b32 main()
 {
         jpeg_bench_idct(1, "honest");
         jpeg_bench_idct(4, "smooth");
+        jpeg_bench_rows();
         log_flush();
         return 0;
 }

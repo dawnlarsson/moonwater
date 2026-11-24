@@ -428,6 +428,9 @@ cover('folds_already', 'count', 'memory_s16_to_u8',
 cover('folds_already', 'frames', 'memory_window_peaks',
       'the frames are a source block (the sink\'s period, 16 to 512 or more), and the window is the source\'s rate over the stream\'s, '
       'both set at run time; a literal count would remove one compare from a loop of vector turns of four frames')
+cover('folds_already', 'count', 'pixels_from_ycbcr pixels_from_grey pixels_from_planes pixels_to_ycbcr samples_double samples_double_rows samples_blend_rows',
+      'a row of a picture, its width the picture\'s at run time; a literal would remove one compare a group of sixteen '
+      'from a row of hundreds to thousands')
 cover('nothing_to_fold', None, 'jpeg_idct_8x8',
       'a block of a picture: the coefficients and quantizers are the file\'s and the pitch its plane\'s, none of them known '
       'where it is called; the work is fixed, 64 coefficients a call')
