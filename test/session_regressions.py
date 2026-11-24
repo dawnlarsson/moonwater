@@ -1038,7 +1038,7 @@ def test_canvas_spaces_invariants():
     check("GPU 2012-2026: AMD multi-gen PM4 (GFX6-12), ib[64] headroom & native GFX10/11/12 ISA sets",
           "unsigned int ib[64], n = 0;" in gpu_c and
           "GPU_PKT(0x43, 3)" in gpu_c and "GPU_PKT(0x58, 5)" in gpu_c and "GPU_PKT(0x58, 6)" in gpu_c and
-          "ib[n++] = 0x225" in gpu_c and "ib[n++] = 0x229" in gpu_c and
+          "ib[n++] = 0x22b" in gpu_c and "ib[n++] = 0x223" in gpu_c and
           "gpu_amd_rdna3" in gpu_c and "gpu_amd_rdna4" in gpu_c and
           "gpuasm_assemble_isa(" in gpuasm_c)
     check("GPU 2012-2026: Intel Gen7-Gen11 active with EU patching, Xe-HPG/Xe2 COMPUTE_WALKER & full xe KMD UAPI",

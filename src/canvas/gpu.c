@@ -784,9 +784,11 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
         }
         if (gfx >= 11u)
         {
-                // GFX11/12 (RDNA3/3.5/4): enable SE4..SE6 (0x225..0x227) and SE7 (0x229) for 6-SE Navi31+
-                ib[n++] = GPU_PKT(0x76, 3), ib[n++] = 0x225, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffffu;
-                ib[n++] = GPU_PKT(0x76, 1), ib[n++] = 0x229, ib[n++] = 0xffffffffu;
+                // GFX11/12 (RDNA3/3.5/4): COMPUTE_STATIC_THREAD_MGMT_SE4..SE7 (0x22b..0x22e: registers 0x1bcb..0x1bce, as PGM_LO's 0x1bac is 0x20c), the
+                // shader engines past the fourth (Navi 31 has six); GFX12 has a ninth, SE8 (0x223: register 0x1bc3)
+                ib[n++] = GPU_PKT(0x76, 4), ib[n++] = 0x22b, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffffu;
+                if (gfx >= 12u)
+                        ib[n++] = GPU_PKT(0x76, 1), ib[n++] = 0x223, ib[n++] = 0xffffffffu;
         }
         if (gfx >= 10u)
                 ib[n++] = GPU_PKT(0x76, 1), ib[n++] = 0x228, ib[n++] = 0; // COMPUTE_PGM_RSRC3 (GFX10+ only)

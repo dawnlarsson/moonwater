@@ -2647,6 +2647,49 @@ static void gpu_pool_rows(void)
 }
 
 /*
+        The SH registers 0x200 to 0x23f a job of one generation's block sets (gpu_amd_submit by gpu_amd_gfx_major), read from the packets of a job the fake
+        kernel refuses before it is asked (ECANCELED, so no card is needed): a bit for each register set to all ones, once, and in *written a bit for each
+        register written at all. 0 and 0 for a job that was not refused so, or whose words are not whole packets.
+*/
+static p64 gpu_preamble_engines(unsigned int major, p64 *written)
+{
+        static const unsigned int kernel[2] = {0, 0};
+        unsigned int packets[64], kept_major = gpu_amd_gfx_major, error;
+        struct gpu_job job = {.kernel = kernel, .code = 0x100000, .arguments = 0x200000, .columns = 1, .rows = 1, .packets_at = packets, .packets = 0x300000};
+        positive sequence = 0;
+        p64 ones = 0;
+
+        *written = 0;
+        gpu_amd_gfx_major = major, gpu_fake_cancel = 1, gpu_fake_ib_words = 0;
+        error = gpu_amd_submit(&job, 0, 0, &sequence);
+        gpu_amd_gfx_major = kept_major, gpu_fake_cancel = 0;
+        if (error != 125)
+                return 0;
+        for (unsigned int at = 0; at < gpu_fake_ib_words;)
+        {
+                unsigned int head = gpu_fake_ib[at], body = (head >> 16 & 0x3fff) + 1;
+
+                if (head >> 30 != 3 || at + 1 + body > gpu_fake_ib_words)
+                        return *written = 0, 0;
+                if ((head >> 8 & 255) == 0x76) // SET_SH_REG: the first dword is the register, the rest its value and those of the registers after it
+                        for (unsigned int n = 1; n < body; n++)
+                        {
+                                unsigned int reg = gpu_fake_ib[at + 1] + n - 1 - 0x200;
+
+                                if (reg >= 64)
+                                        continue;
+                                if (gpu_fake_ib[at + 1 + n] == 0xffffffffu && !(*written >> reg & 1))
+                                        ones |= 1ull << reg;
+                                else
+                                        ones &= ~(1ull << reg);
+                                *written |= 1ull << reg;
+                        }
+                at += 1 + body;
+        }
+        return ones;
+}
+
+/*
         The registers a compute job's IB sets, read from the words the fake submit kept (gpu_fake_ib): a job after another must not read the shared state the
         last one left, so the thread management of every shader engine (COMPUTE_STATIC_THREAD_MGMT_SE0 to SE3, dwords 0x216, 0x217, 0x219, 0x21a from the
         SH registers' base, gc_10_3_0_offset.h's mm minus 0x19a0) is all enabled, and COMPUTE_PGM_RSRC3 (0x228) is set, with the registers the job set
@@ -2659,6 +2702,19 @@ static void gpu_preamble_rows(void)
         unsigned int value[REGISTERS], seen[REGISTERS], dispatches = 0, sets = 0, all = 0xffffffffu;
         b32 shaped, enabled = true;
 
+        // The shader engines past the fourth, by the block: gc_11_0_0_offset.h has COMPUTE_STATIC_THREAD_MGMT_SE4 to SE7 at 0x1bcb to 0x1bce (0x22b to 0x22e
+        // by the rule above) and gc_12_0_0_offset.h a ninth, SE8, at 0x1bc3 (0x223); 0x224 to 0x227 are COMPUTE_USER_ACCUM_0 to 3 and 0x229 COMPUTE_DDID_INDEX
+        // in all three, which no job is to write.
+        {
+                const p64 four = 1ull << 0x16 | 1ull << 0x17 | 1ull << 0x19 | 1ull << 0x1a, past = 0xfull << 0x2b, ninth = 1ull << 0x23, others = 0xfull << 0x24 | 1ull << 0x29;
+                p64 wrote10 = 0, wrote11 = 0, wrote12 = 0, ones10 = gpu_preamble_engines(10, &wrote10), ones11 = gpu_preamble_engines(11, &wrote11),
+                    ones12 = gpu_preamble_engines(12, &wrote12);
+
+                check("gpu preamble: a gfx10 job enables its four shader engines, a gfx11 one SE4 to SE7 too (0x22b to 0x22e), a gfx12 one the ninth as well (SE8, 0x223)",
+                      ones10 == four && ones11 == (four | past) && ones12 == (four | past | ninth));
+                check("gpu preamble: no job writes the accumulators or the dispatch's index (0x224 to 0x227, 0x229), and none but gfx12's the ninth engine's register",
+                      wrote10 && !(wrote10 & (others | past | ninth)) && wrote11 && !(wrote11 & (others | ninth)) && wrote12 && !(wrote12 & others));
+        }
         if (gpu.fd < 0 || gpu.broken)
         {
                 check("gpu preamble: no card here, so no job's packets are read", true);
