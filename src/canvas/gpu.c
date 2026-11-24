@@ -3523,13 +3523,18 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
 }
 
 #define GPU_SCENE_COVER(kind) (((kind) & ~1u) == 0x20u) // a cover for the image record after it (0x21: that image is opaque, its alpha the cover)
+#define GPU_SCENE_MIX(kind) (((kind) & ~0x81u) == 0x30u) // a colour (0x30) or an image (0x31, with the optional swap) mixed through the cover before it, in linear light
+#define GPU_I915_MIX_ROWS 16u // the mix's tables at the head of the long lists (entry 2): 8 rows sRGB to linear, 8 the least linear value of each sRGB byte
 /*
         The Intel scene (op 6, the kernel gpu_i915_scene: fill 0, tone over 1, image copy 4 and premultiplied image over 11, the images with an
         optional 0x80 R/B swap, drawn in order over the damage, a thread a strip of eight 8 by 8 tiles). A cover (0x20, or 0x21 for an opaque
         picture: GPU_SCENE_COVER) is a record that names a picture as an image's does, whose alpha the image over (11) right after it, on the same
         rectangle, is multiplied by before it is laid over: a picture through a round corner's cover, made by the card. The damage is the patch the arguments name
         (a->x0 patches of 64 pixels, a->y0 of 4 rows, a->w by a->rows as gpu_scene_build sets them) clipped to the picture (a->sp by a->gp); the
-        records are a->count of 8 words at a->ops (64-byte aligned, inside the buffer). The batch clips each record to the damage and bins it into
+        records are a->count of 8 words at a->ops (64-byte aligned, inside the buffer). A mix (GPU_SCENE_MIX: 0x30 a colour, 0x31 an image) is
+        laid through the cover right before it, on the same rectangle, as canvas_mix_linear lays it: the processor's linear-light mix of a round
+        corner's line and of an opaque picture's edge there, by the kernel's tables (gpu_i915_mix_tables), which the batch puts in the first
+        GPU_I915_MIX_ROWS rows of the long lists when a scene has one. The batch clips each record to the damage and bins it into
         the damage's cells of 64 by 64 pixels (from the damage's first pixel), a cell's list in the order of the records and started at the last
         record that covers all of the cell's damage opaque (a fill or a copy: the records before it there cannot show, and are not listed). The
         lists are laid in the bins' room (a->g, a->room bytes: the job's own side) as the kernel reads them:
@@ -3558,6 +3563,37 @@ static inline b32 gpu_i915_scene_clip(const unsigned int r[8], const unsigned in
         c[2] = (int)r[3] < (long long)damage[2] ? (int)r[3] : (long long)damage[2], c[3] = (int)r[4] < (long long)damage[3] ? (int)r[4] : (long long)damage[3];
         return c[2] > c[0] && c[3] > c[1];
 }
+// The mix's tables as the scene's kernel reads them into registers (rows of 64 bytes, a row's first half then every row's second half: the
+// kernel reads the halves apart): 256 words of canvas_srgb_to_lin, then 256 words that are, for each sRGB byte k, the least linear value whose
+// canvas_lin_to_srgb is k or more (0 for k = 0), so the sRGB of a linear value is the most k whose word is not past it.
+static const p8 address_to gpu_i915_mix_tables(void)
+{
+        static p8 rows[64 * GPU_I915_MIX_ROWS];
+        static b32 made;
+
+        if (!made)
+        {
+                unsigned short least[256];
+                unsigned int k = 1;
+
+                least[0] = 0;
+                for (unsigned int v = 0; v < 4096 && k < 256; v++)
+                        while (k < 256 && canvas_lin_to_srgb[v] >= k)
+                                least[k++] = (unsigned short)v;
+                while (k < 256)
+                        least[k++] = 0xffff; // (a byte no linear value reaches: never found)
+                for (unsigned int i = 0; i < 256; i++)
+                {
+                        unsigned int at = i < 128 ? 64 * (i / 16) + 2 * (i % 16) : 64 * ((i - 128) / 16) + 32 + 2 * (i % 16);
+                        unsigned short lin = canvas_srgb_to_lin[i];
+
+                        memory_copy(rows + at, &lin, 2), memory_copy(rows + 512 + at, &least[i], 2);
+                }
+                made = true;
+        }
+        return rows;
+}
+
 HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
@@ -3567,7 +3603,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         p8 address_to state, address_to pack;
         const unsigned int address_to rec;
         unsigned int cover[4];
-        b32 any = false, covered = false;
+        b32 any = false, covered = false, mixes = false;
 
         if (!a || !a->count || a->ops < GPU_VA || (a->ops & 63) || !a->sp || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA ||
@@ -3621,11 +3657,13 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
 
                 memory_copy(r, rec + 8 * i, 32);
                 k = r[0] & ~0x80u;
-                if (r[0] > 1u && k != 4u && k != 11u && !GPU_SCENE_COVER(r[0]))
+                if (r[0] > 1u && k != 4u && k != 11u && !GPU_SCENE_COVER(r[0]) && !GPU_SCENE_MIX(r[0]))
                         return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0);
-                // A cover is the next record's, an image over on its rectangle (so the two are in the same cells' lists, side by side).
-                if (covered && (k != 11u || memory_compare(r + 1, cover, sizeof cover)))
+                // A cover is the next record's, an image over or a mix on its rectangle (so the two are in the same cells' lists, side by side),
+                // and a mix is laid through a cover: one with none before it is not a scene the kernel draws.
+                if (covered ? (k != 11u && !GPU_SCENE_MIX(r[0])) || memory_compare(r + 1, cover, sizeof cover) : GPU_SCENE_MIX(r[0]))
                         return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0);
+                mixes |= GPU_SCENE_MIX(r[0]);
                 covered = GPU_SCENE_COVER(r[0]);
                 if (covered)
                         memory_copy(cover, r + 1, sizeof cover);
@@ -3645,6 +3683,8 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                                         n[1] = i;
                         }
         }
+        if (mixes) // (the mix's tables are the long lists' first rows: the lists begin after them)
+                more = GPU_I915_MIX_ROWS;
         for (unsigned int n = 0; n < cells; n++)
         {
                 if (cell[4 * n] > 65535u)
@@ -3664,6 +3704,8 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                 words[0] = 0x05000000u, words[1] = 0u;
                 return 2;
         }
+        if (mixes)
+                memory_copy(pack + heads, gpu_i915_mix_tables(), 64 * GPU_I915_MIX_ROWS);
         for (unsigned int i = 0; i < a->count; i++)
         {
                 unsigned int r[8], k;
@@ -3684,7 +3726,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                                 if (!made)
                                 {
                                         made = true;
-                                        if (k == 4u || k == 11u || GPU_SCENE_COVER(r[0]))
+                                        if (k == 4u || k == 11u || k == 0x31u || GPU_SCENE_COVER(r[0]))
                                         {
                                                 // The image's first pixel in the damage, the 64-byte line it is on, and the surface from there: as wide as the
                                                 // record's part of the damage, its rows, at the picture's own pitch (r[7] pixels).
@@ -3806,9 +3848,9 @@ static b32 gpu_scene_takes(const unsigned int address_to ops, unsigned int n)
 
                 memory_copy(r, ops + 8 * i, 32);
                 k = r[0] & ~0x80u;
-                if (r[0] > 1u && k != 4u && k != 11u && !GPU_SCENE_COVER(r[0]))
+                if (r[0] > 1u && k != 4u && k != 11u && !GPU_SCENE_COVER(r[0]) && !GPU_SCENE_MIX(r[0]))
                         return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0) != 0;
-                if ((k == 4u || k == 11u || GPU_SCENE_COVER(r[0])) && (!r[7] || r[7] > 65535u || (r[7] & 15u)))
+                if ((k == 4u || k == 11u || k == 0x31u || GPU_SCENE_COVER(r[0])) && (!r[7] || r[7] > 65535u || (r[7] & 15u)))
                         return gpu_scene_not(GPU_SCENE_NOT_PITCH, r[0], r[7]) != 0;
         }
         return true;

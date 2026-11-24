@@ -19,6 +19,15 @@
 // no pixel of it made by the processor. The records are clipped to the damage, and a cell's list starts at the last record that
 // covers all of the cell's damage, by the encoder (gpu_i915_scene_batch). A strip reads its cell's list once.
 //
+// A mix (0x30 a colour, word 5; 0x31 an image, named as an image's record names it, with the optional swap) is laid through the cover held, as
+// the processor's canvas_mix_linear lays it (src/lib.util.c: a round corner's line and a picture's edge there): each of the blue, green and red
+// bytes the sRGB of (the pixel's linear * (256 - w) + the ink's linear * w + 128) >> 8, w the cover's alpha a plus a >> 7, the alpha byte 0; a
+// pixel of no cover is left and one of a whole cover is the ink. The two tables are the encoder's, rows 0 to 15 of entry 2, read once a thread
+// into registers: sRGB to linear (256 words, r64 to r79) and, for linear to sRGB, the least linear value of each sRGB byte (256 words, r80 to
+// r95): a byte is found as the most whose least value is not past the mix, a bit at a time. A lane's word is read by its own address (a0.0 to
+// a0.7: r[a0.0,0]<1,0>). r56 the mix's scalars (.0 32 y .1 the channel's shift .2 the bit .3 the row's y mask .4 4 y), r58 r59 the row's ink
+// and cover, r60 a, r61 w, r62 256 - w, r63 the pixel made, r96 to r106 scratch; the tile's rows move up one as each is done (r57 keeps the one).
+//
 // A tile: the last record that covers it whole and opaque is found (a fill, or a copy: what was under it cannot show), and the
 // records from it on are drawn (or from the first, over the tile as it was read). A tile row is written under its lanes' mask,
 // x in [x0, x1) and the row's y in [y0, y1).
@@ -60,6 +69,7 @@ send (16|M0)             r40:ud        r11:ud    0xC  0x02890001
 shr (1|M0)               r4.2<1>:ud    r40.0<0;1,0>:ud   16:ud
 and (1|M0)               r4.3<1>:ud    r40.0<0;1,0>:ud   0xff00:ud
 mov (1|M0)               r2.6<1>:ud    0:ud
+mov (1|M0)               r4.7<1>:ud    0:ud
 mov (1|M0)               r4.1<1>:ud    0:ud
 cmp (16|M0)  (eq)f0.1    null:ud       r4.2<0;1,0>:ud    0:ud
 (W&f0.1) jmpi end
@@ -187,6 +197,8 @@ cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    1:ud
 and (1|M0)               r8.3<1>:ud    r8.2<0;1,0>:ud    0x7e:ud
 cmp (16|M0)  (eq)f0.1    null:ud       r8.3<0;1,0>:ud    0x20:ud
 (W&f0.1) jmpi kind_cover
+cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    0x30:ud
+(W&f0.1) jmpi kind_mix_colour
 // an image (4, 11): its tile read through its own entry (word 7), the descriptor made in a0.0
 add (1|M0)               r12.0<1>:ud   r39.5<0;1,0>:ud   r2.7<0;1,0>:ud
 add (1|M0)               r12.1<1>:ud   r39.6<0;1,0>:ud   r2.1<0;1,0>:ud
@@ -252,6 +264,8 @@ shl (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   16:ud
 or (8|M0)                r29.0<1>:ud   r30.0<8;8,1>:ud   r31.0<8;8,1>:ud
 or (8|M0)                r29.0<1>:ud   r29.0<8;8,1>:ud   r32.0<8;8,1>:ud
 kind_ordered:
+cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    0x31:ud
+(W&f0.1) jmpi kind_mix
 cmp (16|M0)  (eq)f0.1    null:ud       r4.5<0;1,0>:ud    0:ud
 (W&f0.1) jmpi kind_plain
 // the image under the cover held: each row's pixels times the cover's alpha there, every channel, and laid over
@@ -423,6 +437,103 @@ and (1|M0)               r8.3<1>:ud    r39.0<0;1,0>:ud   1:ud
 add (1|M0)               r8.3<1>:ud    -r8.3<0;1,0>:ud   0:ud
 and (1|M0)               r4.6<1>:ud    r8.3<0;1,0>:ud    0xff000000:ud
 mov (1|M0)               r4.5<1>:ud    1:ud
+(W) jmpi draw_next
+kind_mix_colour:
+mov (8|M0)               r22.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r23.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r24.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r25.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r26.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r27.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r28.0<1>:ud   r39.5<0;1,0>:ud
+mov (8|M0)               r29.0<1>:ud   r39.5<0;1,0>:ud
+kind_mix:
+// the tables, read once a thread: rows 0 to 7 of entry 2 are sRGB to linear (r64 to r79), rows 8 to 15 the least linear value of each sRGB byte (r80 to r95)
+cmp (16|M0)  (ne)f0.1    null:ud       r4.7<0;1,0>:ud    0:ud
+(W&f0.1) jmpi mix_have
+mov (1|M0)               r11.0<1>:ud   0:ud
+mov (1|M0)               r11.1<1>:ud   0:ud
+send (16|M0)             r64:ud        r11:ud    0xC  0x02890002
+mov (1|M0)               r11.0<1>:ud   32:ud
+send (16|M0)             r72:ud        r11:ud    0xC  0x02890002
+mov (1|M0)               r11.1<1>:ud   8:ud
+send (16|M0)             r88:ud        r11:ud    0xC  0x02890002
+mov (1|M0)               r11.0<1>:ud   0:ud
+send (16|M0)             r80:ud        r11:ud    0xC  0x02890002
+mov (1|M0)               r4.7<1>:ud    1:ud
+mix_have:
+mov (1|M0)               r56.0<1>:ud   0:ud
+mix_row:
+// the row's ink (r22 + y), its cover (r48 + y) and its y mask (r10's lane y); its pixels are r14
+add (1|M0)               a0.0<1>:uw    r56.0<0;1,0>:uw   704:uw
+mov (8|M0)               r58.0<1>:ud   r[a0.0]<8;8,1>:ud
+add (1|M0)               a0.0<1>:uw    r56.0<0;1,0>:uw   1536:uw
+mov (8|M0)               r59.0<1>:ud   r[a0.0]<8;8,1>:ud
+shr (1|M0)               r56.4<1>:ud   r56.0<0;1,0>:ud   3:ud
+add (1|M0)               a0.0<1>:uw    r56.8<0;1,0>:uw   320:uw
+mov (1|M0)               r56.3<1>:ud   r[a0.0]<0;1,0>:ud
+shr (8|M0)               r60.0<1>:ud   r59.0<8;8,1>:ud   24:ud
+shr (8|M0)               r61.0<1>:ud   r60.0<8;8,1>:ud   7:ud
+add (8|M0)               r61.0<1>:ud   r61.0<8;8,1>:ud   r60.0<8;8,1>:ud
+add (8|M0)               r62.0<1>:ud   -r61.0<8;8,1>:ud  256:ud
+mov (8|M0)               r63.0<1>:ud   0:ud
+mov (1|M0)               r56.1<1>:ud   0:ud
+mix_channel:
+shr (8|M0)               r96.0<1>:ud   r14.0<8;8,1>:ud   r56.1<0;1,0>:ud
+and (8|M0)               r96.0<1>:ud   r96.0<8;8,1>:ud   0xff:ud
+shl (8|M0)               r96.0<1>:ud   r96.0<8;8,1>:ud   1:ud
+add (8|M0)               a0.0<1>:uw    r96.0<16;8,2>:uw  2048:uw
+mov (8|M0)               r99.0<1>:ud   r[a0.0,0]<1,0>:uw
+shr (8|M0)               r97.0<1>:ud   r58.0<8;8,1>:ud   r56.1<0;1,0>:ud
+and (8|M0)               r97.0<1>:ud   r97.0<8;8,1>:ud   0xff:ud
+shl (8|M0)               r97.0<1>:ud   r97.0<8;8,1>:ud   1:ud
+add (8|M0)               a0.0<1>:uw    r97.0<16;8,2>:uw  2048:uw
+mov (8|M0)               r100.0<1>:ud  r[a0.0,0]<1,0>:uw
+mul (8|M0)               r99.0<1>:ud   r99.0<8;8,1>:ud   r62.0<16;8,2>:uw
+mul (8|M0)               r100.0<1>:ud  r100.0<8;8,1>:ud  r61.0<16;8,2>:uw
+add (8|M0)               r99.0<1>:ud   r99.0<8;8,1>:ud   r100.0<8;8,1>:ud
+add (8|M0)               r99.0<1>:ud   r99.0<8;8,1>:ud   128:ud
+shr (8|M0)               r99.0<1>:ud   r99.0<8;8,1>:ud   8:ud
+// its sRGB byte: the most whose least linear value is not past the mix
+mov (8|M0)               r103.0<1>:ud  0:ud
+mov (1|M0)               r56.2<1>:ud   128:ud
+mix_bit:
+add (8|M0)               r104.0<1>:ud  r103.0<8;8,1>:ud  r56.2<0;1,0>:ud
+shl (8|M0)               r105.0<1>:ud  r104.0<8;8,1>:ud  1:ud
+add (8|M0)               a0.0<1>:uw    r105.0<16;8,2>:uw 2560:uw
+mov (8|M0)               r106.0<1>:ud  r[a0.0,0]<1,0>:uw
+cmp (8|M0)   (le)f0.0    null:ud       r106.0<8;8,1>:ud  r99.0<8;8,1>:ud
+(f0.0) mov (8|M0)        r103.0<1>:ud  r104.0<8;8,1>:ud
+shr (1|M0)               r56.2<1>:ud   r56.2<0;1,0>:ud   1:ud
+cmp (16|M0)  (ne)f0.1    null:ud       r56.2<0;1,0>:ud   0:ud
+(W&f0.1) jmpi mix_bit
+shl (8|M0)               r103.0<1>:ud  r103.0<8;8,1>:ud  r56.1<0;1,0>:ud
+or (8|M0)                r63.0<1>:ud   r63.0<8;8,1>:ud   r103.0<8;8,1>:ud
+add (1|M0)               r56.1<1>:ud   r56.1<0;1,0>:ud   8:ud
+cmp (16|M0)  (lt)f0.1    null:ud       r56.1<0;1,0>:ud   24:ud
+(W&f0.1) jmpi mix_channel
+// no cover leaves the pixel, a whole one is the ink
+cmp (8|M0)   (eq)f0.0    null:ud       r60.0<8;8,1>:ud   0:ud
+(f0.0) mov (8|M0)        r63.0<1>:ud   r14.0<8;8,1>:ud
+cmp (8|M0)   (ge)f0.0    null:ud       r60.0<8;8,1>:ud   255:ud
+(f0.0) mov (8|M0)        r63.0<1>:ud   r58.0<8;8,1>:ud
+// written under the masks; the tile moves up a row, the row done its last
+or (8|M0)                r38.0<1>:ud   r9.0<8;8,1>:ud    r56.3<0;1,0>:ud
+cmp (8|M0)   (ge)f0.0    null:d        r38.0<8;8,1>:d    0:d
+(f0.0) mov (8|M0)        r14.0<1>:ud   r63.0<8;8,1>:ud
+mov (8|M0)               r57.0<1>:ud   r14.0<8;8,1>:ud
+mov (8|M0)               r14.0<1>:ud   r15.0<8;8,1>:ud
+mov (8|M0)               r15.0<1>:ud   r16.0<8;8,1>:ud
+mov (8|M0)               r16.0<1>:ud   r17.0<8;8,1>:ud
+mov (8|M0)               r17.0<1>:ud   r18.0<8;8,1>:ud
+mov (8|M0)               r18.0<1>:ud   r19.0<8;8,1>:ud
+mov (8|M0)               r19.0<1>:ud   r20.0<8;8,1>:ud
+mov (8|M0)               r20.0<1>:ud   r21.0<8;8,1>:ud
+mov (8|M0)               r21.0<1>:ud   r57.0<8;8,1>:ud
+add (1|M0)               r56.0<1>:ud   r56.0<0;1,0>:ud   32:ud
+cmp (16|M0)  (lt)f0.1    null:ud       r56.0<0;1,0>:ud   256:ud
+(W&f0.1) jmpi mix_row
+mov (1|M0)               r4.5<1>:ud    0:ud
 (W) jmpi draw_next
 kind_fill:
 mov (8|M0)               r22.0<1>:ud   r39.5<0;1,0>:ud

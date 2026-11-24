@@ -1742,8 +1742,31 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                         g->count++;
                         return;
                 }
+                // A colour mixed through a cover in linear light (13: a round corner's line, as canvas_mix_linear lays it) is the card's mix: the
+                // cover (its bytes the alpha of a tile made once and kept) and the colour mixed through it by the scene's kernel, the pixels the
+                // processor's.
+                if (r > 0 && !frame && kind == 13)
+                {
+                        int w = cx1 - cx0, h = cy1 - cy0, hit = 0;
+                        unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), tp = compositor_gpu_i915_tile_pitch(w);
+                        positive cover_va = 0;
+                        unsigned int *tile = compositor_gpu_i915_solid_tile(slice_off, COMPOSITOR_I915_COVER, w, h, r, &cover_va, &hit);
+
+                        for (int row = 0; tile && row < h && !hit; row++)
+                                for (int col = 0; col < w; col++)
+                                        tile[(unsigned long)row * tp + col] = (unsigned int)g->tables[slice_off + (unsigned int)(row * r + col)] * 0x01010101u;
+                        if (tile && g->count + 1 < g->room)
+                        {
+                                op[0] = 0x20u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
+                                op[5] = (unsigned int)cover_va, op[6] = (unsigned int)(cover_va >> 32), op[7] = tp;
+                                op[8] = 0x30u, op[9] = (unsigned int)cx0, op[10] = (unsigned int)cy0, op[11] = (unsigned int)cx1, op[12] = (unsigned int)cy1;
+                                op[13] = colour & 0xffffffu, op[14] = op[15] = 0;
+                                g->count += 2;
+                                return;
+                        }
+                }
                 // A colour through a cover is a tile of that colour made once and kept (the cover's bytes its alpha): laid over.
-                if (r > 0 && !frame)
+                else if (r > 0 && !frame)
                 {
                         int w = cx1 - cx0, h = cy1 - cy0, hit = 0;
                         unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), tp = compositor_gpu_i915_tile_pitch(w);
@@ -1806,9 +1829,11 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                                 at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
                         if (tile && at && g->count + 1 < g->room)
                         {
-                                op[0] = kind == 12 ? 0x20u : 0x21u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
+                                // (13, an opaque picture's round corner, is the picture mixed through the cover in linear light, as the processor
+                                // mixes it: the kernel's mix; 12 and 5 are the picture times the cover laid over)
+                                op[0] = kind == 12 || kind == 13 ? 0x20u : 0x21u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
                                 op[5] = (unsigned int)cover_va, op[6] = (unsigned int)(cover_va >> 32), op[7] = tp;
-                                op[8] = frame->swap ? 0x8bu : 11u, op[9] = (unsigned int)cx0, op[10] = (unsigned int)cy0, op[11] = (unsigned int)cx1, op[12] = (unsigned int)cy1;
+                                op[8] = (kind == 13 ? 0x31u : 11u) | (frame->swap ? 0x80u : 0u), op[9] = (unsigned int)cx0, op[10] = (unsigned int)cy0, op[11] = (unsigned int)cx1, op[12] = (unsigned int)cy1;
                                 op[13] = (unsigned int)at, op[14] = (unsigned int)(at >> 32), op[15] = pitch;
                                 g->count += 2;
                                 return;

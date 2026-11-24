@@ -844,13 +844,14 @@ static const unsigned int *gs_grain(int x, int y)
 
 // One record applied to the model's picture inside the damage, as the kernels draw it. A cover (0x20, 0x21: a set with its own command words
 // has them) is kept, and the image over after it is laid through it: each channel times the cover's alpha there by the processor's rounding
-// (c * a + 128, plus its high byte, the high byte of that), the image's alpha first 255 for 0x21.
+// (c * a + 128, plus its high byte, the high byte of that), the image's alpha first 255 for 0x21. A mix after a cover (0x30 a colour, 0x31 an
+// image) is canvas_mix_linear through the cover's alpha: the processor's own linear-light mix, which the card's pixels must be.
 static const unsigned int address_to gs_cover;
 static void gs_apply(unsigned int address_to want, const unsigned int q[8], const unsigned int damage[4])
 {
         unsigned int kind = q[0] & ~0x80u;
         long long x0 = (int)q[1], y0 = (int)q[2], x1 = (int)q[3], y1 = (int)q[4];
-        const unsigned int address_to from = kind == 4 || kind == 11 ? (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)q[5] | (positive)q[6] << 32) - GPU_VA)) : 0;
+        const unsigned int address_to from = kind == 4 || kind == 11 || kind == 0x31 ? (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)q[5] | (positive)q[6] << 32) - GPU_VA)) : 0;
         const unsigned int address_to cover = gs_cover;
         const unsigned int address_to through = cover ? (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)cover[5] | (positive)cover[6] << 32) - GPU_VA)) : 0;
 
@@ -872,6 +873,13 @@ static void gs_apply(unsigned int address_to want, const unsigned int q[8], cons
                                 v = from[(y - y0) * q[7] + (x - x0)];
                                 if (q[0] & 0x80u)
                                         v = (v & 0xff00ff00u) | (v >> 16 & 255u) | (v & 255u) << 16;
+                        }
+                        if (through && (kind == 0x30 || kind == 0x31))
+                        {
+                                unsigned int alpha = through[(y - (int)cover[2]) * cover[7] + (x - (int)cover[1])] >> 24;
+
+                                *p = canvas_mix_linear(*p, v, alpha);
+                                continue;
                         }
                         if (through && from)
                         {
@@ -912,12 +920,16 @@ static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int
                         kind = 0x20u | (gs_random() & 1u);
                 else if (gpu_set->batch && k && (q[-8] & ~1u) == 0x20u)
                 {
-                        kind = 11u | (gs_random() & 0x80u);
+                        // (the record a cover is for: an image over, or a mix of a colour or of an image)
+                        static const unsigned int after[4] = {11u, 11u, 0x30u, 0x31u};
+
+                        kind = after[gs_random() & 3u];
+                        kind |= kind == 0x30u ? 0u : gs_random() & 0x80u;
                         x0 = (int)q[-7], y0 = (int)q[-6], rw = q[-5] - q[-7], rh = q[-4] - q[-6];
                 }
                 q[0] = kind, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)(x0 + (int)rw), q[4] = (unsigned int)(y0 + (int)rh);
                 q[5] = gs_random(), q[6] = q[7] = 0;
-                if (kind > 1)
+                if (kind > 1 && kind != 0x30u)
                 {
                         // The picture's pitch: the atlas's, or (a third of them) another that holds the record: any on a set that reads a picture
                         // by its bytes, whole 64-byte lines on one that makes its own command words (i915 finds a row only on a line).
@@ -1006,7 +1018,7 @@ static positive gs_rows(const unsigned int address_to ops, unsigned int n, const
                 long long x1 = (int)q[3] < (long long)damage[2] ? (int)q[3] : (long long)damage[2], y1 = (int)q[4] < (long long)damage[3] ? (int)q[4] : (long long)damage[3];
                 unsigned int address_to into = gs_want + y0 * GS_PITCH + x0;
 
-                if (x1 <= x0 || y1 <= y0)
+                if (x1 <= x0 || y1 <= y0 || q[0] == 0x30u) // (a colour mixed through a cover names no picture: not timed here)
                         continue;
                 if (q[0] == 0)
                         memory_fill_u32_rect(into, GS_PITCH, (positive)(x1 - x0), (positive)(y1 - y0), q[5]);
