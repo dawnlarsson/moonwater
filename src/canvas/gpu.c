@@ -1639,17 +1639,18 @@ static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row
 #define GPU_BACKENDS (sizeof(gpu_backends) / sizeof(gpu_backends[0]))
 static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: the picked node's (amdgpu's until a start picks one: a check's fake card is amdgpu's)
 
-// The generations whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower): none. i915's Gen7 to Gen11 were (715dc66e7,
-// d4330c65e: a scene of many records did not finish, each tile looking at every record). With the scene a strip a thread and its records binned by cell,
-// and Gen7's pictures read by the sampler cache's port, CHECK_gpu_scene draws every scene right (145 million checks, 1 to 2000 records) on an Ivy
-// Bridge HD 2500, two Haswells (HD 4400, HD 4600) and a Coffee Lake UHD 630, a 1080p desktop's scene in 3.0, 2.9 and 1.5 ms with the clock held, and
-// the compositor with a terminal scrolling fullscreen spends a sixth to a third of the processor time it spends composing itself. Gen12 by its own
-// words, on an Alder Lake UHD 710 (16 EUs, a thread a fused pair): the same 145 million right, the desktop's scene 2.0 ms against 3.7 by the
-// processor's rows, and the compositor with the terminal fullscreen 18 ticks in ten seconds against 75 composing itself.
+// The generations whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower): every i915 family. The scene is right
+// and fast on them alone (CHECK_gpu_scene: no pixel wrong of 157 million on an Ivy Bridge, a Haswell and an Alder Lake; a 1080p desktop's scene 1.3 to
+// 3.0 ms; headless, the compositor a sixth to a third of its processor time), and it was the default for an afternoon (5150098dc, c544b3a83). On the
+// lab's desktops with a person at them it was not right: i915's pointer is drawn into the scene (no plane of its own there yet), so nine presents in
+// ten held the pointer's pieces, which the scene's batch refuses, and were drawn by the processor after the card had been tried; and with the pointer
+// over the taskbar the card took the presents and the pointer did not move on the screen until something else drew (a virtual mouse swept over the
+// taskbar: 23 of 24 steps changed nothing on an Ivy Bridge, a Haswell and an Alder Lake, none with canvas gpu off). Until a desktop with its pointer is
+// right and measured faster, the processor composes there by default and canvas gpu on is the way to the card.
 static b32 gpu_slower(const struct gpu_backend *backend, unsigned int family)
 {
-        (void)backend, (void)family;
-        return false;
+        (void)family;
+        return backend == &gpu_i915_row;
 }
 
 static const struct gpu_backend *gpu_backend_of(const char *name)
