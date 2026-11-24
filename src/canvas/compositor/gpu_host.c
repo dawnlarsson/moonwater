@@ -549,6 +549,14 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
 
         if (f->builtin || f->width <= 0 || f->height <= 0) // no area: no picture to map
                 return 1;
+        if (f->glass_under) // glass: the program's picture, and the composed picture with the ground after it (one buffer: one map of both)
+        {
+                struct compositor_frame over = *f;
+                positive both = 8ull * f->pitch * (positive)f->height;
+
+                over.pixels = f->glass_over, over.pitch = f->glass_over_pitch, over.glass_under = 0, over.glass_over = 0, over.gpu_base = 0;
+                return compositor_gpu_picture(&over) && (gpu_va_bytes(f->pixels, both) || (gpu_map(f->pixels, both) && gpu_va_bytes(f->pixels, both)));
+        }
         if (!f->pixels) // a frame with no picture is its line and corners only (a grid's border), and nothing to map
                 return 1;
         if (f->tiled_kind) // a client's tiled/DCC dma-buf sampled via image_load in scene: already imported to the card
@@ -836,8 +844,11 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         continue;
                 dp = compositor_gpu_scaled_pitch(f->width);
                 bytes = 4ull * (positive)dp * (positive)f->height;
+                // (a scaled glass window is made from its composed picture, which the processor makes here: a landing's few frames)
+                if (f->glass_under && f->row_plus1)
+                        compositor_glass_settle(f->row_plus1 - 1);
                 source = *f;
-                source.width = sw, source.height = sh, source.source_w = source.source_h = 0;
+                source.width = sw, source.height = sh, source.source_w = source.source_h = 0, source.glass_under = 0;
                 // The source's address: a picture on a pitch i915 does not read is not mapped by compositor_gpu_picture (it was the processor's to
                 // copy), so it is mapped here; one that cannot be (a client's own memory on a chip with no maps to read) stays the processor's copy.
                 if (!compositor_gpu_picture(&source))
@@ -913,6 +924,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool.memory + at / 4, compositor_gpu_scaled_copy[k].pitch = (unsigned long)dp;
                 compositor_gpu_scaled_copy[k].gpu_base = dst_va;
                 compositor_gpu_scaled_copy[k].tiled_kind = 0; // the copy is in the linear pool: its descriptor is no longer its picture's
+                compositor_gpu_scaled_copy[k].glass_under = 0, compositor_gpu_scaled_copy[k].glass_over = 0; // and it is one picture, not layers
                 compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
                 at += (bytes + 255) & ~255ull, tabled += (4ull * (positive)(f->width + f->height) + 255) & ~255ull;
         }

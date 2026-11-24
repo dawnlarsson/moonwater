@@ -732,6 +732,7 @@ static struct
         int (*glass_blocks)[4];
         unsigned long *glass_cut;
         int (*glass_made)[4], (*stale)[4], (*dirty)[4];
+        int (*unsettled)[4]; // a glass row's rectangle whose composed picture is not made yet (compositor_glass_settle): the card lays the layers itself
         unsigned int *glass_side, *glass_told, *lifted, theme_word, theme_side;
         unsigned int *blur, *frost, *rise;
         unsigned long blur_bytes, frost_bytes, rise_bytes;
@@ -1706,7 +1707,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor.backdrop, COMPOSITOR_ROWS_ROW) X(compositor.tinted, COMPOSITOR_ROWS_ROW) X(compositor.composed, COMPOSITOR_ROWS_ROW) \
         X(compositor.boosted, COMPOSITOR_ROWS_ROW) X(compositor.glass_sum, COMPOSITOR_ROWS_ROW) X(compositor.glass_blocks, COMPOSITOR_ROWS_ROW) \
         X(compositor.glass_cut, COMPOSITOR_ROWS_ROW) X(compositor.glass_made, COMPOSITOR_ROWS_ROW) X(compositor.stale, COMPOSITOR_ROWS_ROW) \
-        X(compositor.dirty, COMPOSITOR_ROWS_ROW) X(compositor.glass_side, COMPOSITOR_ROWS_ROW) X(compositor.glass_told, COMPOSITOR_ROWS_ROW) \
+        X(compositor.dirty, COMPOSITOR_ROWS_ROW) X(compositor.unsettled, COMPOSITOR_ROWS_ROW) X(compositor.glass_side, COMPOSITOR_ROWS_ROW) X(compositor.glass_told, COMPOSITOR_ROWS_ROW) \
         X(compositor.lifted, COMPOSITOR_ROWS_ROW) X(compositor.hold_rect, COMPOSITOR_ROWS_ROW) X(compositor.hold_how, COMPOSITOR_ROWS_ROW) \
         X(compositor.shared_sizes, COMPOSITOR_ROWS_ROW) X(compositor.osk_pan, COMPOSITOR_ROWS_ROW) X(compositor.osk_height, COMPOSITOR_ROWS_ROW) \
         X(compositor.osk_edges, COMPOSITOR_ROWS_ROW) X(compositor.text_purpose, COMPOSITOR_ROWS_ROW) X(compositor.caret, COMPOSITOR_ROWS_ROW) \

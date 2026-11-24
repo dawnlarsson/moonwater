@@ -1693,7 +1693,9 @@ static void compositor_present_frames(void)
                 compositor.table->pointer_plane = compositor_pointer_plane_word();
                 compositor.table->overlay = compositor.overlay_state;
         }
+        compositor_glass_lazy = 1; // these frames keep glass as its layers: the card lays them, and what the processor reads is settled below
         windows = count = present_build_frames(frames, rows);
+        compositor_glass_lazy = 0;
         compositor_record_scene(frames, windows);
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
@@ -1844,6 +1846,9 @@ static void compositor_present_frames(void)
                 compositor.mirror = compositor.scanout, compositor.mirror_pitch = compositor.scanout_pitch / 4;
         if (!apart && compositor.mirror_bytes)
                 compositor.mirror_stale = 1;
+        // The glass windows' composed pictures made where the processor is about to read them: its own compose, or a share's.
+        if (!gpu_composed || compositor_cast_screens())
+                compositor_glass_settle_frames(frames, windows);
         clips = present_compose_damage(frames, count, gpu_drawn, apart, clip);
         if (apart)
         {

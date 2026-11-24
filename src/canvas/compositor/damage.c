@@ -1606,6 +1606,18 @@ static inline unsigned long compositor_glass_pitch(int row)
         return ((unsigned long)compositor.w[row] + 15) & ~15ul;
 }
 
+// A glass row's ground: its backdrop risen to full size, tinted, with the grain, a picture as large as the composed one and kept after it
+// (compositor_glass_room). The program's picture laid over it is the window: the card lays it (the frame's glass_under and glass_over), and the
+// composed picture is made of the two only where the processor reads it (compositor_glass_settle, glass.c).
+static inline unsigned int *compositor_glass_ground(int row)
+{
+        return compositor.composed[row] ? compositor.composed[row] + compositor_glass_pitch(row) * (unsigned long)compositor.h[row] : null;
+}
+static void compositor_glass_settle(int row);
+static void compositor_glass_settle_rect(int row, const int *c);
+static void compositor_glass_settle_frames(const struct compositor_frame *frames, unsigned int count);
+static int compositor_glass_lazy; // the frames being built are a present's: glass is left as layers, and the present settles what its path reads
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line = compositor_frame_line(row), scale = compositor_row_scale(row);
@@ -1689,6 +1701,12 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         if (compositor.glassy[row] && compositor.composed[row] && compositor.glass_made[row][2] == (int)compositor.w[row] &&
             compositor.glass_made[row][3] == (int)compositor.h[row])
         {
+                // A present's frame keeps the layers for the card (the picture the row had is the program's); any other reader is given the
+                // composed picture made.
+                if (compositor_glass_lazy && frame->pixels)
+                        frame->glass_under = compositor_glass_ground(row), frame->glass_over = frame->pixels, frame->glass_over_pitch = frame->pitch;
+                else
+                        compositor_glass_settle(row);
                 frame->pixels = compositor.composed[row];
                 frame->pitch = compositor_glass_pitch(row);
         }

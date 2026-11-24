@@ -99,6 +99,11 @@ struct compositor_frame
         // side, their inset from the window's edge and from each other, and their top from the window's top, in device pixels. 0 for the
         // kit's place, UI_CLOSE and UI_CLOSE_IN at the frame's scale.
         int ctl_side, ctl_in, ctl_top;
+        // A glass window in a present's frames, as the card draws it: its ground (the backdrop risen, tinted and grained, glass_under, on the
+        // frame's own pitch) copied and the program's premultiplied picture (glass_over) laid over it, the same pixels as the composed picture
+        // (pixels), which is then not made unless the processor reads it (compositor_glass_settle). Null for every other frame.
+        const unsigned int *glass_under, *glass_over;
+        unsigned long glass_over_pitch;
         unsigned int close_mean; // the mean colour under the close button, made once a present (compositor_close_mean)
         int close_side;          // the close button's ink side, 1 dark or 2 light, from the row's hysteresis (compositor_close_mean); 0: the plain test
         int row_plus1;           // the window's row + 1 (compositor_frame_of), 0 for a frame that is not a window's: the row keeps its ink side
@@ -1914,10 +1919,21 @@ static void canvas_gpu_contents(void *ctx, const struct compositor_frame *f, uns
         }
         if (f->builtin)
                 compositor_gpu_rect(0, x, y, x + w, y + h, tab, 0, 0, 0);
+        else if (f->glass_under)
+        {
+                // Glass: its ground copied, its picture laid over (the layers of the composed picture, which the card does not need made).
+                struct compositor_frame under = *f, over = *f;
+
+                under.pixels = f->glass_under, under.gpu_base = 0;
+                over.pixels = f->glass_over, over.pitch = f->glass_over_pitch, over.gpu_base = 0;
+                compositor_gpu_rect(4, x, y, x + w, y + h, 0, &under, 0, 0);
+                compositor_gpu_rect(11, x, y, x + w, y + h, 0, &over, 0, 0);
+        }
         else
                 compositor_gpu_rect(f->blend ? 11 : 4, x, y, x + w, y + h, 0, f, 0, 0);
 }
 
+static void compositor_glass_settle_rect(int row, const int *c); // glass.c: a glass row's composed picture made over a rectangle
 static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, int corner, int r, int b, int ri,
                                    int cx, int cy, int sx1, int sy1, int sx2, int sy2, unsigned int edge, unsigned int tab)
 {
@@ -1930,6 +1946,15 @@ static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, 
                 return g->why = COMPOSITOR_GPU_WHY_POOL, 0;
         if (b)
                 compositor_gpu_rect(13, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
+        if (picture && ri && sx2 > sx1 && sy2 > sy1 && f->glass_under && !f->builtin && f->row_plus1)
+        {
+                // Glass through a corner's cover is its composed picture's pixels through it: the two layers each through the cover are not
+                // (what is behind shows twice where the cover is partial). The corner's square of the composed picture is made, a few
+                // hundred pixels, and read as any window's.
+                int square[4] = {sx1, sy1, sx2, sy2};
+
+                compositor_glass_settle_rect(f->row_plus1 - 1, square);
+        }
         if (picture && ri && sx2 > sx1 && sy2 > sy1)
                 compositor_gpu_rect(f->blend ? 12 : 13, sx1, sy1, sx2, sy2, f->builtin ? tab : f->fill,
                                     (f->builtin || !f->pixels) ? 0 : f,
@@ -1970,7 +1995,17 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         if (!compositor_frame_meets(f, g->clip))
                 return true;
         // A frame of no area has no picture to read (a snap preview's lifted frame is one: its tint is in compositor_gpu_frames).
-        if (!f->builtin && !f->tiled_kind && f->pixels && w > 0 && h > 0 && !compositor_gpu_copied(f) && !compositor_gpu_va(f))
+        if (f->glass_under && !f->builtin && w > 0 && h > 0)
+        {
+                // (glass is drawn from its layers: both are to be the card's to read)
+                struct compositor_frame under = *f, over = *f;
+
+                under.pixels = f->glass_under, under.gpu_base = 0;
+                over.pixels = f->glass_over, over.pitch = f->glass_over_pitch, over.gpu_base = 0;
+                if (!compositor_gpu_va(&under) || !compositor_gpu_va(&over) || !compositor_gpu_va(f)) // (the composed picture too: its corners are read)
+                        return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
+        }
+        else if (!f->builtin && !f->tiled_kind && f->pixels && w > 0 && h > 0 && !compositor_gpu_copied(f) && !compositor_gpu_va(f))
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (compositor_scaled(f))
                 return g->why = COMPOSITOR_GPU_WHY_SCALED, false;

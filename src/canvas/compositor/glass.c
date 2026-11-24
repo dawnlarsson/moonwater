@@ -216,6 +216,8 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
                 if (!gpu_pic)
                 {
                         int fy0 = ay > 0 ? ay : 0, fy1 = ay + ah < compositor.height ? ay + ah : compositor.height;
+
+                        compositor_glass_settle_frames(frames, count); // the glass windows under this one are read as their composed pictures
                         if (fy1 <= fy0)
                                 fy0 = ay + ah <= 0 ? 0 : compositor.height - 1, fy1 = fy0 + 1;
                         struct compositor_target full_under = {strip, (unsigned long)aw, compositor.width, compositor.height,
@@ -789,34 +791,82 @@ static positive __attribute__((unused)) compositor_glass_ground_va(const unsigne
 }
 #endif
 
-static int compositor_glass_compose(int row, const int *c)
+/*
+        A glass row's ground made again over the rectangle c of the output: the small tinted picture risen to full size, and its grain put in
+        (memory_glass_over_u32 with nothing laid over: the ground's bytes with the grain added and taken away, as the composed picture had them).
+        The card copies it and lays the program's picture over, so a program that draws in its glass window costs the processor nothing here; it
+        is made again only where the picture under the window changed.
+*/
+static int compositor_glass_ground_make(int row, const int *c)
 {
-        // A lent buffer is a client's, with the client's pitch; the table's own picture is the compositor's stride (wl-host: no lent row
-        // carries WINDOW_GLASS today, so this is the guard, not a fix of a reachable read).
-        unsigned long picture_pitch = (unsigned long)compositor_stride();
-        const unsigned int *picture = compositor_lent_pixels(row, &picture_pitch);
+        static const unsigned int none[1024]; // a picture of nothing
         int *blocks = compositor.glass_blocks[row], width = c[2] - c[0];
+        unsigned int *into = compositor_glass_ground(row);
 
-        if (!picture)
-                picture = compositor_pixels(row), picture_pitch = (unsigned long)compositor_stride();
-
+        if (!into || width <= 0 || c[3] <= c[1])
+                return into != null;
         for (int y0 = c[1]; y0 < c[3]; y0 += COMPOSITOR_GLASS_BAND)
         {
                 int y1 = y0 + COMPOSITOR_GLASS_BAND < c[3] ? y0 + COMPOSITOR_GLASS_BAND : c[3];
                 unsigned long pitch;
-                const unsigned int *ground = compositor_rise(compositor.tinted[row], (unsigned long)blocks[2], blocks[0],
-                                                             blocks[1], c[0], y0, c[2], y1, &pitch);
+                const unsigned int *risen = compositor_rise(compositor.tinted[row], (unsigned long)blocks[2], blocks[0],
+                                                            blocks[1], c[0], y0, c[2], y1, &pitch);
 
-                if (!ground)
+                if (!risen)
                         return 0;
                 for (int y = y0; y < y1; y++)
-                        memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor_glass_pitch(row) + (unsigned long)(c[0] - compositor.x[row]),
-                                              picture + (unsigned long)(y - compositor.y[row]) * picture_pitch + (unsigned long)(c[0] - compositor.x[row]),
-                                              ground + (unsigned long)(y - y0) * pitch, (positive)width,
-                                              compositor_grain_row(compositor.glass_side[row], c[0], y));
+                        for (int x = 0; x < width; x += 1024)
+                                memory_glass_over_u32(into + (unsigned long)(y - compositor.y[row]) * compositor_glass_pitch(row) + (unsigned long)(c[0] + x - compositor.x[row]),
+                                                      none, risen + (unsigned long)(y - y0) * pitch + (unsigned long)x,
+                                                      (positive)(width - x < 1024 ? width - x : 1024), compositor_grain_row(compositor.glass_side[row], c[0] + x, y));
+        }
+        return 1;
+}
+
+// The composed picture made over the rectangle c: the program's premultiplied picture laid over the ground (whose grain is in it), for a reader
+// that is the processor (its compose, a blur of what is over this window, a close button's mean, a share).
+static void compositor_glass_settle_rect(int row, const int *c)
+{
+        static const unsigned int plain[128]; // no grain: the ground has its own
+        // A lent buffer is a client's, with the client's pitch; the table's own picture is the compositor's stride (wl-host: no lent row
+        // carries WINDOW_GLASS today, so this is the guard, not a fix of a reachable read).
+        unsigned long picture_pitch = (unsigned long)compositor_stride();
+        const unsigned int *picture = compositor_lent_pixels(row, &picture_pitch), *ground = compositor_glass_ground(row);
+        int width = c[2] - c[0];
+
+        if (!ground || width <= 0 || c[3] <= c[1])
+                return;
+        if (!picture)
+                picture = compositor_pixels(row), picture_pitch = (unsigned long)compositor_stride();
+        for (int y = c[1]; y < c[3]; y++)
+        {
+                unsigned long at = (unsigned long)(y - compositor.y[row]) * compositor_glass_pitch(row) + (unsigned long)(c[0] - compositor.x[row]);
+
+                memory_glass_over_u32(compositor.composed[row] + at, picture + (unsigned long)(y - compositor.y[row]) * picture_pitch + (unsigned long)(c[0] - compositor.x[row]),
+                                      ground + at, (positive)width, plain);
         }
         compositor.recomposed += (positive)width * (positive)(c[3] - c[1]);
-        return 1;
+}
+
+// A row's composed picture made where it is not yet (compositor.unsettled: what the program drew, or the ground under it changed, since).
+static void compositor_glass_settle(int row)
+{
+        int *c;
+
+        if (row < 0 || row >= (int)compositor_rows_in_use || !compositor.unsettled)
+                return;
+        c = compositor.unsettled[row];
+        if (compositor.glassy[row] && compositor.composed[row] && c[2] > c[0] && c[3] > c[1])
+                compositor_glass_settle_rect(row, c);
+        memory_zero(c, sizeof(compositor.unsettled[row]));
+}
+
+// Every glass window of the frames settled: before the processor reads their pictures.
+static void compositor_glass_settle_frames(const struct compositor_frame *frames, unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (frames[at].glass_under && frames[at].row_plus1)
+                        compositor_glass_settle(frames[at].row_plus1 - 1);
 }
 
 static int compositor_glass_side(int row)
@@ -859,6 +909,7 @@ static void compositor_glass_drop(int row)
         memory_zero(compositor.glass_blocks[row], sizeof(compositor.glass_blocks[row]));
         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
         memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
+        memory_zero(compositor.unsettled[row], sizeof(compositor.unsettled[row]));
 }
 
 static int compositor_glass_room(int row)
@@ -872,9 +923,10 @@ static int compositor_glass_room(int row)
         blocks[2] = compositor_ceil_shift(x + w, shift) + margin - blocks[0];
         blocks[3] = compositor_ceil_shift(y + h, shift) + margin - blocks[1];
         cells = (unsigned long)blocks[2] * (unsigned long)blocks[3];
-        need = ((cells * 3 + pixels) * 4 + 4095) & ~4095ul;
+        // (the composed picture and, after it, the ground it is made over: compositor_glass_ground)
+        need = ((cells * 3 + 2 * pixels) * 4 + 4095) & ~4095ul;
         most = (((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 3 +
-                 (((unsigned long)compositor.width + 15) & ~15ul) * (unsigned long)compositor.height) * 4 + 4095) & ~4095ul;
+                 2 * (((unsigned long)compositor.width + 15) & ~15ul) * (unsigned long)compositor.height) * 4 + 4095) & ~4095ul;
         need = need > most ? need : most;
         if (need > compositor.glass_cut[row])
         {
@@ -974,6 +1026,13 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                                 compositor_glass_tone_span(compositor.tinted[row], compositor.boosted[row],
                                                                            (positive)blocks[2] * (positive)blocks[3], compositor.glass_side[row]);
                                                 memory_copy(compositor.dirty[row], box, sizeof(box));
+                                                memory_copy(shown, box, sizeof(box));
+                                        }
+                                        // The ground is the small picture's: made again where that changed (all of it when the side did).
+                                        if (!compositor_glass_ground_make(row, shown))
+                                        {
+                                                compositor_glass_drop(row);
+                                                continue;
                                         }
                                 }
                         }
@@ -983,17 +1042,23 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                 {
                         int *c = compositor.dirty[row];
 
-                        if (!compositor_glass_compose(row, c))
-                        {
-                                compositor_glass_drop(row);
-                                continue;
-                        }
+                        // What the program drew, or what changed under it, is not composed here: the card lays the layers, and the composed
+                        // picture is made of them when the processor reads it (compositor_glass_settle).
+                        compositor_union(compositor.unsettled[row], c);
                         compositor_damage_from(c[0], c[1], c[2] - c[0], c[3] - c[1], row + 1);
                 }
                 if (!deferred)
                         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
                 memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
                 frames[at].pixels = compositor.composed[row], frames[at].pitch = compositor_glass_pitch(row);
+                {
+                        unsigned long picture_pitch = (unsigned long)compositor_stride();
+                        const unsigned int *picture = compositor_lent_pixels(row, &picture_pitch);
+
+                        if (!picture)
+                                picture = compositor_pixels(row), picture_pitch = (unsigned long)compositor_stride();
+                        frames[at].glass_under = compositor_glass_ground(row), frames[at].glass_over = picture, frames[at].glass_over_pitch = picture_pitch;
+                }
         }
 }
 
@@ -1014,6 +1079,14 @@ static int compositor_close_mean_read(struct compositor_frame *frame)
         }
         if (!touched)
                 return 1;
+        if (frame->glass_under && frame->row_plus1 && !compositor_scaled(frame))
+        {
+                // (a glass window's pixels under the button are its composed picture's: made for the button's square alone)
+                int box[4] = {bx, by, bx + side, by + side}, inside[4] = {frame->x, frame->y, frame->x + frame->width, frame->y + frame->height};
+
+                compositor_meet(box, inside);
+                compositor_glass_settle_rect(frame->row_plus1 - 1, box);
+        }
         picture = compositor_scaled(frame) ? 0 : frame->pixels;
         // Stride by 4 when reading write-combined client dma-bufs to cut uncached PCIe reads 16x with identical lightness mean.
         step = frame->gpu_base ? 4 : 1;
