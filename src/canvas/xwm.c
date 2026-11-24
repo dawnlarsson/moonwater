@@ -3558,6 +3558,12 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                                                 compositor_layer_set(w->row, on ? WINDOW_LAYER_ABOVE : WINDOW_LAYER_NORMAL, -1);
                                 }
                         }
+                        // Every ask is answered with the state as it now is, taken, refused, already so or not known here (a skip of the
+                        // taskbar): Wine (Proton 10 and on) waits for _NET_WM_STATE to change after each ask it sends, and until it does
+                        // it sends no configure of its own and takes none of the manager's, so a window whose ask went unanswered kept a
+                        // place and size Canvas had long since changed. A withdrawn window's property is its client's own to write.
+                        if (w->state & COMPOSITOR_XWM_MAPPED)
+                                compositor_xwm_net_state(x, w->id, (int)w->state);
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_REQ_FRAME_EXTENTS])
                         compositor_xwm_frame_extents(x, e->window);
