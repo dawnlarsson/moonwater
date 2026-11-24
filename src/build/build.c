@@ -5123,6 +5123,27 @@ static b32 build_gpu_kernels(string_address input, string_address output)
                         unlink(temporary);
                         return string_report(log_error, 1, "gpu-kernels (gfx12): %s\n", gpuasm_message);
                 }
+                if (system_write_all((positive)handle, gpuasm_output, gpuasm_output_length) != gpuasm_output_length)
+                {
+                        system_close(handle);
+                        unlink(temporary);
+                        return string_report(log_error, 1, "gpu-kernels: cannot write %s\n", temporary);
+                }
+                // And the gfx9 tables (Vega, and the Raven to Cezanne APUs), of the same text where it keeps to what gfx9 has. The
+                // kernels the build ships must; another text (test/gpu_stress.asm, which is every form gfx10 takes: s102 on, null)
+                // is written without them, and the line says why.
+                if (!gpuasm_assemble_isa(input, (string_address)build_gpu_source, GPUASM_GFX9, (string_address)"9_"))
+                {
+                        if (string_equals(input, build_setting_get("gpu_source")))
+                        {
+                                system_close(handle);
+                                unlink(temporary);
+                                return string_report(log_error, 1, "gpu-kernels (gfx9): %s\n", gpuasm_message);
+                        }
+                        string_format(log, "gpu-kernels: no gfx9 tables of %s: %s\n", input, gpuasm_message);
+                        log_flush();
+                        gpuasm_output_length = 0;
+                }
                 ok = system_write_all((positive)handle, gpuasm_output, gpuasm_output_length) == gpuasm_output_length;
                 if (system_close(handle) < 0 || !ok)
                 {

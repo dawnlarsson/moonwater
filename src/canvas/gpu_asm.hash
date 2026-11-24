@@ -1,3 +1,3 @@
 // src/canvas/gpu.asm's FNV-1a 64: what artifacts/gpu_kernels.inc is held to (gpu.c). Made again with
 // python3 -I test/gpu_kernels.py --hash src/canvas/gpu.asm > src/canvas/gpu_asm.hash whenever gpu.asm changes.
-#define GPU_ASM_HASH 0xfbec13b706154fc9ull
+#define GPU_ASM_HASH 0x9a9aa5133babd42full

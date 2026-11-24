@@ -4,7 +4,11 @@
         src/canvas/gpu.asm is the source of the programs the card runs
         (AMD RDNA2, gfx1036, wave64), and this turns it into the arrays
         src/canvas/gpu.c is built with: for each kernel, the two resource
-        words the dispatch is given and then the code. build.c includes this
+        words the dispatch is given and then the code. The same text is
+        assembled for gfx11, gfx12 and gfx9 (gpuasm_assemble_isa): each row of
+        the table has its opcode on each, and where an encoding is laid out
+        another way the instruction's branch says how; gfx9 also takes two
+        forms of the text another way (gpuasm_lowered). build.c includes this
         file and `build gpu-kernels` runs it, so the words are made by the
         build from the source and nothing generated is kept in the tree, and
         no LLVM is needed to build.
@@ -61,6 +65,7 @@
 #define GPUASM_NOP 0xbf800000u
 #define GPUASM_RSRC1 0xe0ac0000u
 #define GPUASM_RSRC1_GFX12 0xe00c0000u
+#define GPUASM_RSRC1_GFX9 0x00ac0000u
 #define GPUASM_RSRC2 0x0000018cu
 #define GPUASM_TARGET "\"amdgcn-amd-amdhsa--gfx1036\""
 
@@ -68,7 +73,8 @@ enum gpuasm_isa
 {
         GPUASM_GFX10 = 0,
         GPUASM_GFX11 = 1,
-        GPUASM_GFX12 = 2
+        GPUASM_GFX12 = 2,
+        GPUASM_GFX9 = 3
 };
 
 enum
@@ -118,107 +124,108 @@ typedef struct gpuasm_op
         p8 form;
         p16 code;
         p16 code11;
+        p16 code9;
         string_address shape;
 } gpuasm_op;
 
 static const gpuasm_op gpuasm_ops[] = {
-        {"s_mov_b32", GPUASM_SOP1, 0x03, 0x00, "p1i1"},
-        {"s_mov_b64", GPUASM_SOP1, 0x04, 0x01, "p2i2"},
-        {"s_and_saveexec_b64", GPUASM_SOP1, 0x24, 0x21, "p2i2"},
-        {"s_add_u32", GPUASM_SOP2, 0x00, 0x00, "p1i1i1"},
-        {"s_sub_u32", GPUASM_SOP2, 0x01, 0x01, "p1i1i1"},
-        {"s_add_i32", GPUASM_SOP2, 0x02, 0x02, "p1i1i1"},
-        {"s_sub_i32", GPUASM_SOP2, 0x03, 0x03, "p1i1i1"},
-        {"s_addc_u32", GPUASM_SOP2, 0x04, 0x04, "p1i1i1"},
-        {"s_min_i32", GPUASM_SOP2, 0x06, 0x12, "p1i1i1"},
-        {"s_min_u32", GPUASM_SOP2, 0x07, 0x13, "p1i1i1"},
-        {"s_and_b32", GPUASM_SOP2, 0x0e, 0x16, "p1i1i1"},
-        {"s_or_b32", GPUASM_SOP2, 0x10, 0x18, "p1i1i1"},
-        {"s_lshl_b32", GPUASM_SOP2, 0x1e, 0x08, "p1i1i1"},
-        {"s_lshr_b32", GPUASM_SOP2, 0x20, 0x0a, "p1i1i1"},
-        {"s_mul_i32", GPUASM_SOP2, 0x26, 0x2c, "p1i1i1"},
-        {"s_bfe_u32", GPUASM_SOP2, 0x27, 0x26, "p1i1i1"},
-        {"s_and_b64", GPUASM_SOP2, 0x0f, 0x17, "p2i2i2"},
-        {"s_or_b64", GPUASM_SOP2, 0x11, 0x19, "p2i2i2"},
-        {"s_andn2_b64", GPUASM_SOP2, 0x15, 0x23, "p2i2i2"},
-        {"s_cmp_eq_u32", GPUASM_SOPC, 0x06, 0x06, "i1i1"},
-        {"s_cmp_lg_u32", GPUASM_SOPC, 0x07, 0x07, "i1i1"},
-        {"s_cmp_gt_u32", GPUASM_SOPC, 0x08, 0x08, "i1i1"},
-        {"s_cmp_ge_u32", GPUASM_SOPC, 0x09, 0x09, "i1i1"},
-        {"s_cmp_lt_u32", GPUASM_SOPC, 0x0a, 0x0a, "i1i1"},
-        {"s_cmp_le_u32", GPUASM_SOPC, 0x0b, 0x0b, "i1i1"},
-        {"s_cmp_eq_i32", GPUASM_SOPC, 0x00, 0x00, "i1i1"},
-        {"s_cmp_gt_i32", GPUASM_SOPC, 0x02, 0x02, "i1i1"},
-        {"s_cmp_ge_i32", GPUASM_SOPC, 0x03, 0x03, "i1i1"},
-        {"s_cmp_lt_i32", GPUASM_SOPC, 0x04, 0x04, "i1i1"},
-        {"s_cmp_le_i32", GPUASM_SOPC, 0x05, 0x05, "i1i1"},
-        {"s_bitcmp0_b32", GPUASM_SOPC, 0x0c, 0x0c, "i1i1"},
-        {"s_bitcmp1_b32", GPUASM_SOPC, 0x0d, 0x0d, "i1i1"},
-        {"s_endpgm", GPUASM_SOPP, 0x01, 0x30, ""},
-        {"s_waitcnt", GPUASM_SOPP, 0x0c, 0x09, "w1"},
-        {"s_branch", GPUASM_SOPP, 0x02, 0x20, "l1"},
-        {"s_cbranch_scc0", GPUASM_SOPP, 0x04, 0x21, "l1"},
-        {"s_cbranch_scc1", GPUASM_SOPP, 0x05, 0x22, "l1"},
-        {"s_cbranch_execz", GPUASM_SOPP, 0x08, 0x25, "l1"},
-        {"s_load_dword", GPUASM_SMEM, 0x00, 0x00, "p1b2o1"},
-        {"s_load_dwordx2", GPUASM_SMEM, 0x01, 0x01, "p2b2o1"},
-        {"s_load_dwordx4", GPUASM_SMEM, 0x02, 0x02, "p4b2o1"},
-        {"s_load_dwordx8", GPUASM_SMEM, 0x03, 0x03, "p8b2o1"},
-        {"v_mov_b32", GPUASM_VOP1, 0x01, 0x01, "d1s1"},
-        {"v_cvt_f32_u32", GPUASM_VOP1, 0x06, 0x06, "d1s1"},
-        {"v_cvt_u32_f32", GPUASM_VOP1, 0x07, 0x07, "d1s1"},
-        {"v_rcp_f32", GPUASM_VOP1, 0x2a, 0x2a, "d1s1"},
-        {"v_sqrt_f32", GPUASM_VOP1, 0x33, 0x33, "d1s1"},
-        {"v_add_nc_u32", GPUASM_VOP2, 0x25, 0x25, "d1s1v1"},
-        {"v_sub_nc_u32", GPUASM_VOP2, 0x26, 0x26, "d1s1v1"},
-        {"v_subrev_nc_u32", GPUASM_VOP2, 0x27, 0x27, "d1s1v1"},
-        {"v_and_b32", GPUASM_VOP2, 0x1b, 0x1b, "d1s1v1"},
-        {"v_xor_b32", GPUASM_VOP2, 0x1d, 0x1d, "d1s1v1"},
-        {"v_lshrrev_b32", GPUASM_VOP2, 0x16, 0x19, "d1s1v1"},
-        {"v_lshlrev_b32", GPUASM_VOP2, 0x1a, 0x18, "d1s1v1"},
-        {"v_max_i32", GPUASM_VOP2, 0x12, 0x12, "d1s1v1"},
-        {"v_min_i32", GPUASM_VOP2, 0x11, 0x11, "d1s1v1"},
-        {"v_mul_u32_u24", GPUASM_VOP2, 0x0b, 0x0b, "d1s1v1"},
-        {"v_mul_f32", GPUASM_VOP2, 0x08, 0x08, "d1s1v1"},
-        {"v_ashrrev_i32", GPUASM_VOP2, 0x18, 0x1a, "d1s1v1"},
-        {"v_max_u32", GPUASM_VOP2, 0x14, 0x14, "d1s1v1"},
-        {"v_min_u32", GPUASM_VOP2, 0x13, 0x13, "d1s1v1"},
-        {"v_cmp_eq_u32", GPUASM_VOPC, 0xc2, 0x4a, "m2s1v1"},
-        {"v_cmp_ne_u32", GPUASM_VOPC, 0xc5, 0x4d, "m2s1v1"},
-        {"v_cmp_gt_u32", GPUASM_VOPC, 0xc4, 0x4c, "m2s1v1"},
-        {"v_cmp_le_u32", GPUASM_VOPC, 0xc3, 0x4b, "m2s1v1"},
-        {"v_cmp_lt_u32", GPUASM_VOPC, 0xc1, 0x49, "m2s1v1"},
-        {"v_cmp_ge_u32", GPUASM_VOPC, 0xc6, 0x4e, "m2s1v1"},
-        {"v_cmp_gt_i32", GPUASM_VOPC, 0x84, 0x44, "m2s1v1"},
-        {"v_cmp_le_i32", GPUASM_VOPC, 0x83, 0x43, "m2s1v1"},
-        {"v_cmp_lt_i32", GPUASM_VOPC, 0x81, 0x41, "m2s1v1"},
-        {"v_cmp_ge_i32", GPUASM_VOPC, 0x86, 0x46, "m2s1v1"},
-        {"v_cmp_gt_u64", GPUASM_VOPC, 0xe4, 0x5c, "m2s2v2"},
-        {"v_cmp_le_u64", GPUASM_VOPC, 0xe3, 0x5b, "m2s2v2"},
-        {"v_cndmask_b32_e64", GPUASM_VOP3, 0x101, 0x101, "d1s1s1k2"},
-        {"v_mad_i32_i24", GPUASM_VOP3, 0x142, 0x20a, "d1s1s1s1"},
-        {"v_mad_u32_u24", GPUASM_VOP3, 0x143, 0x20b, "d1s1s1s1"},
-        {"v_med3_i32", GPUASM_VOP3, 0x158, 0x220, "d1s1s1s1"},
-        {"v_add3_u32", GPUASM_VOP3, 0x36d, 0x255, "d1s1s1s1"},
-        {"v_lshl_or_b32", GPUASM_VOP3, 0x36f, 0x256, "d1s1s1s1"},
-        {"v_lshl_add_u32", GPUASM_VOP3, 0x346, 0x246, "d1s1s1s1"},
-        {"v_alignbit_b32", GPUASM_VOP3, 0x14e, 0x216, "d1s1s1s1"},
-        {"v_perm_b32", GPUASM_VOP3, 0x344, 0x244, "d1s1s1s1"},
-        {"v_bfe_u32", GPUASM_VOP3, 0x148, 0x210, "d1s1s1s1"},
-        {"v_mul_lo_u32", GPUASM_VOP3, 0x169, 0x32c, "d1s1s1"},
-        {"v_mad_u64_u32", GPUASM_VOP3B, 0x176, 0x2fe, "d2n2s1s1s2"},
-        {"v_add_co_u32", GPUASM_VOP3B, 0x30f, 0x300, "d1n2s1s1"},
-        {"v_add_co_ci_u32", GPUASM_VOP2C, 0x28, 0x20, "d1m2s1v1k2"},
-        {"v_pk_min_u16", GPUASM_VOP3P, 0x0d, 0x0d, "d1s1s1"},
-        {"v_pk_sub_u16", GPUASM_VOP3P, 0x0b, 0x0b, "d1s1s1"},
-        {"ds_bpermute_b32", GPUASM_DS, 0xb3, 0xb3, "d1v1v1"},
-        {"global_load_ubyte", GPUASM_GLD, 0x08, 0x10, "d1v1b2"},
-        {"global_load_ushort", GPUASM_GLD, 0x0a, 0x12, "d1v1b2"},
-        {"global_load_dword", GPUASM_GLD, 0x0c, 0x14, "d1v1b2"},
-        {"global_load_dwordx4", GPUASM_GLD, 0x0e, 0x17, "d4v1b2"},
-        {"global_store_dword", GPUASM_GST, 0x1c, 0x1a, "v1v1b2"},
-        {"global_store_dwordx4", GPUASM_GST, 0x1e, 0x1d, "v1v4b2"},
-        {"image_load", GPUASM_MIMG, 0x00, 0x00, "d4v2r8"},
+        {"s_mov_b32", GPUASM_SOP1, 0x03, 0x00, 0x00, "p1i1"},
+        {"s_mov_b64", GPUASM_SOP1, 0x04, 0x01, 0x01, "p2i2"},
+        {"s_and_saveexec_b64", GPUASM_SOP1, 0x24, 0x21, 0x20, "p2i2"},
+        {"s_add_u32", GPUASM_SOP2, 0x00, 0x00, 0x00, "p1i1i1"},
+        {"s_sub_u32", GPUASM_SOP2, 0x01, 0x01, 0x01, "p1i1i1"},
+        {"s_add_i32", GPUASM_SOP2, 0x02, 0x02, 0x02, "p1i1i1"},
+        {"s_sub_i32", GPUASM_SOP2, 0x03, 0x03, 0x03, "p1i1i1"},
+        {"s_addc_u32", GPUASM_SOP2, 0x04, 0x04, 0x04, "p1i1i1"},
+        {"s_min_i32", GPUASM_SOP2, 0x06, 0x12, 0x06, "p1i1i1"},
+        {"s_min_u32", GPUASM_SOP2, 0x07, 0x13, 0x07, "p1i1i1"},
+        {"s_and_b32", GPUASM_SOP2, 0x0e, 0x16, 0x0c, "p1i1i1"},
+        {"s_or_b32", GPUASM_SOP2, 0x10, 0x18, 0x0e, "p1i1i1"},
+        {"s_lshl_b32", GPUASM_SOP2, 0x1e, 0x08, 0x1c, "p1i1i1"},
+        {"s_lshr_b32", GPUASM_SOP2, 0x20, 0x0a, 0x1e, "p1i1i1"},
+        {"s_mul_i32", GPUASM_SOP2, 0x26, 0x2c, 0x24, "p1i1i1"},
+        {"s_bfe_u32", GPUASM_SOP2, 0x27, 0x26, 0x25, "p1i1i1"},
+        {"s_and_b64", GPUASM_SOP2, 0x0f, 0x17, 0x0d, "p2i2i2"},
+        {"s_or_b64", GPUASM_SOP2, 0x11, 0x19, 0x0f, "p2i2i2"},
+        {"s_andn2_b64", GPUASM_SOP2, 0x15, 0x23, 0x13, "p2i2i2"},
+        {"s_cmp_eq_u32", GPUASM_SOPC, 0x06, 0x06, 0x06, "i1i1"},
+        {"s_cmp_lg_u32", GPUASM_SOPC, 0x07, 0x07, 0x07, "i1i1"},
+        {"s_cmp_gt_u32", GPUASM_SOPC, 0x08, 0x08, 0x08, "i1i1"},
+        {"s_cmp_ge_u32", GPUASM_SOPC, 0x09, 0x09, 0x09, "i1i1"},
+        {"s_cmp_lt_u32", GPUASM_SOPC, 0x0a, 0x0a, 0x0a, "i1i1"},
+        {"s_cmp_le_u32", GPUASM_SOPC, 0x0b, 0x0b, 0x0b, "i1i1"},
+        {"s_cmp_eq_i32", GPUASM_SOPC, 0x00, 0x00, 0x00, "i1i1"},
+        {"s_cmp_gt_i32", GPUASM_SOPC, 0x02, 0x02, 0x02, "i1i1"},
+        {"s_cmp_ge_i32", GPUASM_SOPC, 0x03, 0x03, 0x03, "i1i1"},
+        {"s_cmp_lt_i32", GPUASM_SOPC, 0x04, 0x04, 0x04, "i1i1"},
+        {"s_cmp_le_i32", GPUASM_SOPC, 0x05, 0x05, 0x05, "i1i1"},
+        {"s_bitcmp0_b32", GPUASM_SOPC, 0x0c, 0x0c, 0x0c, "i1i1"},
+        {"s_bitcmp1_b32", GPUASM_SOPC, 0x0d, 0x0d, 0x0d, "i1i1"},
+        {"s_endpgm", GPUASM_SOPP, 0x01, 0x30, 0x01, ""},
+        {"s_waitcnt", GPUASM_SOPP, 0x0c, 0x09, 0x0c, "w1"},
+        {"s_branch", GPUASM_SOPP, 0x02, 0x20, 0x02, "l1"},
+        {"s_cbranch_scc0", GPUASM_SOPP, 0x04, 0x21, 0x04, "l1"},
+        {"s_cbranch_scc1", GPUASM_SOPP, 0x05, 0x22, 0x05, "l1"},
+        {"s_cbranch_execz", GPUASM_SOPP, 0x08, 0x25, 0x08, "l1"},
+        {"s_load_dword", GPUASM_SMEM, 0x00, 0x00, 0x00, "p1b2o1"},
+        {"s_load_dwordx2", GPUASM_SMEM, 0x01, 0x01, 0x01, "p2b2o1"},
+        {"s_load_dwordx4", GPUASM_SMEM, 0x02, 0x02, 0x02, "p4b2o1"},
+        {"s_load_dwordx8", GPUASM_SMEM, 0x03, 0x03, 0x03, "p8b2o1"},
+        {"v_mov_b32", GPUASM_VOP1, 0x01, 0x01, 0x01, "d1s1"},
+        {"v_cvt_f32_u32", GPUASM_VOP1, 0x06, 0x06, 0x06, "d1s1"},
+        {"v_cvt_u32_f32", GPUASM_VOP1, 0x07, 0x07, 0x07, "d1s1"},
+        {"v_rcp_f32", GPUASM_VOP1, 0x2a, 0x2a, 0x22, "d1s1"},
+        {"v_sqrt_f32", GPUASM_VOP1, 0x33, 0x33, 0x27, "d1s1"},
+        {"v_add_nc_u32", GPUASM_VOP2, 0x25, 0x25, 0x34, "d1s1v1"},
+        {"v_sub_nc_u32", GPUASM_VOP2, 0x26, 0x26, 0x35, "d1s1v1"},
+        {"v_subrev_nc_u32", GPUASM_VOP2, 0x27, 0x27, 0x36, "d1s1v1"},
+        {"v_and_b32", GPUASM_VOP2, 0x1b, 0x1b, 0x13, "d1s1v1"},
+        {"v_xor_b32", GPUASM_VOP2, 0x1d, 0x1d, 0x15, "d1s1v1"},
+        {"v_lshrrev_b32", GPUASM_VOP2, 0x16, 0x19, 0x10, "d1s1v1"},
+        {"v_lshlrev_b32", GPUASM_VOP2, 0x1a, 0x18, 0x12, "d1s1v1"},
+        {"v_max_i32", GPUASM_VOP2, 0x12, 0x12, 0x0d, "d1s1v1"},
+        {"v_min_i32", GPUASM_VOP2, 0x11, 0x11, 0x0c, "d1s1v1"},
+        {"v_mul_u32_u24", GPUASM_VOP2, 0x0b, 0x0b, 0x08, "d1s1v1"},
+        {"v_mul_f32", GPUASM_VOP2, 0x08, 0x08, 0x05, "d1s1v1"},
+        {"v_ashrrev_i32", GPUASM_VOP2, 0x18, 0x1a, 0x11, "d1s1v1"},
+        {"v_max_u32", GPUASM_VOP2, 0x14, 0x14, 0x0f, "d1s1v1"},
+        {"v_min_u32", GPUASM_VOP2, 0x13, 0x13, 0x0e, "d1s1v1"},
+        {"v_cmp_eq_u32", GPUASM_VOPC, 0xc2, 0x4a, 0xca, "m2s1v1"},
+        {"v_cmp_ne_u32", GPUASM_VOPC, 0xc5, 0x4d, 0xcd, "m2s1v1"},
+        {"v_cmp_gt_u32", GPUASM_VOPC, 0xc4, 0x4c, 0xcc, "m2s1v1"},
+        {"v_cmp_le_u32", GPUASM_VOPC, 0xc3, 0x4b, 0xcb, "m2s1v1"},
+        {"v_cmp_lt_u32", GPUASM_VOPC, 0xc1, 0x49, 0xc9, "m2s1v1"},
+        {"v_cmp_ge_u32", GPUASM_VOPC, 0xc6, 0x4e, 0xce, "m2s1v1"},
+        {"v_cmp_gt_i32", GPUASM_VOPC, 0x84, 0x44, 0xc4, "m2s1v1"},
+        {"v_cmp_le_i32", GPUASM_VOPC, 0x83, 0x43, 0xc3, "m2s1v1"},
+        {"v_cmp_lt_i32", GPUASM_VOPC, 0x81, 0x41, 0xc1, "m2s1v1"},
+        {"v_cmp_ge_i32", GPUASM_VOPC, 0x86, 0x46, 0xc6, "m2s1v1"},
+        {"v_cmp_gt_u64", GPUASM_VOPC, 0xe4, 0x5c, 0xec, "m2s2v2"},
+        {"v_cmp_le_u64", GPUASM_VOPC, 0xe3, 0x5b, 0xeb, "m2s2v2"},
+        {"v_cndmask_b32_e64", GPUASM_VOP3, 0x101, 0x101, 0x100, "d1s1s1k2"},
+        {"v_mad_i32_i24", GPUASM_VOP3, 0x142, 0x20a, 0x1c2, "d1s1s1s1"},
+        {"v_mad_u32_u24", GPUASM_VOP3, 0x143, 0x20b, 0x1c3, "d1s1s1s1"},
+        {"v_med3_i32", GPUASM_VOP3, 0x158, 0x220, 0x1d7, "d1s1s1s1"},
+        {"v_add3_u32", GPUASM_VOP3, 0x36d, 0x255, 0x1ff, "d1s1s1s1"},
+        {"v_lshl_or_b32", GPUASM_VOP3, 0x36f, 0x256, 0x200, "d1s1s1s1"},
+        {"v_lshl_add_u32", GPUASM_VOP3, 0x346, 0x246, 0x1fd, "d1s1s1s1"},
+        {"v_alignbit_b32", GPUASM_VOP3, 0x14e, 0x216, 0x1ce, "d1s1s1s1"},
+        {"v_perm_b32", GPUASM_VOP3, 0x344, 0x244, 0x1ed, "d1s1s1s1"},
+        {"v_bfe_u32", GPUASM_VOP3, 0x148, 0x210, 0x1c8, "d1s1s1s1"},
+        {"v_mul_lo_u32", GPUASM_VOP3, 0x169, 0x32c, 0x285, "d1s1s1"},
+        {"v_mad_u64_u32", GPUASM_VOP3B, 0x176, 0x2fe, 0x1e8, "d2n2s1s1s2"},
+        {"v_add_co_u32", GPUASM_VOP3B, 0x30f, 0x300, 0x119, "d1n2s1s1"},
+        {"v_add_co_ci_u32", GPUASM_VOP2C, 0x28, 0x20, 0x1c, "d1m2s1v1k2"},
+        {"v_pk_min_u16", GPUASM_VOP3P, 0x0d, 0x0d, 0x0d, "d1s1s1"},
+        {"v_pk_sub_u16", GPUASM_VOP3P, 0x0b, 0x0b, 0x0b, "d1s1s1"},
+        {"ds_bpermute_b32", GPUASM_DS, 0xb3, 0xb3, 0x3f, "d1v1v1"},
+        {"global_load_ubyte", GPUASM_GLD, 0x08, 0x10, 0x10, "d1v1b2"},
+        {"global_load_ushort", GPUASM_GLD, 0x0a, 0x12, 0x12, "d1v1b2"},
+        {"global_load_dword", GPUASM_GLD, 0x0c, 0x14, 0x14, "d1v1b2"},
+        {"global_load_dwordx4", GPUASM_GLD, 0x0e, 0x17, 0x17, "d4v1b2"},
+        {"global_store_dword", GPUASM_GST, 0x1c, 0x1a, 0x1c, "v1v1b2"},
+        {"global_store_dwordx4", GPUASM_GST, 0x1e, 0x1d, 0x1f, "v1v4b2"},
+        {"image_load", GPUASM_MIMG, 0x00, 0x00, 0x00, "d4v2r8"},
 };
 
 //      The instructions that take clamp, which LLVM says instruction by instruction.
@@ -303,6 +310,7 @@ typedef struct gpuasm_kernel
         positive name;
         positive length;
         positive vgprs;
+        positive sgprs;
         positive line;
 } gpuasm_kernel;
 
@@ -346,12 +354,99 @@ static struct
         bool block;
         positive seen;
         positive vgprs;
+        positive sgprs;
         positive kernel_name;
         positive kernel_length;
         positive kernel_line;
 } gpuasm;
 
 static bool gpuasm_run(string_address from, string_address stop, positive line);
+
+/*
+        gfx9 (Vega, and the Raven to Cezanne APUs). The one text is assembled for it as for the others, and two things its long vector
+        encodings cannot say are said another way, the same way test/gpu_kernels.py says them to LLVM:
+
+            a literal    gfx9's long encodings have none (gfx10 gave them one). The literals of a kernel that fall in a long encoding
+                         are kept in vector registers of the kernel's own, the ones after those its block declares, in the order the
+                         kernel first uses each value, and loaded at its label: a v_mov_b32 of each, once a wave, before anything
+                         else runs (exec is then every lane the wave has, and nothing gives it more later). The instruction reads
+                         the register; one that then fits its short encoding is written in it.
+            two scalars  a long encoding reads one scalar register on gfx9 and two on gfx10. Where an instruction names two, a lane
+                         mask or a carry stays (it has to be scalar) and so does the first 32-bit one where there is neither; the
+                         other is moved to one more vector register, the one after the constants, by a v_mov_b32 just before.
+
+        The text is read twice: once for the sites (where each such instruction fell, and its literal), from which each kernel's
+        constants are known once its label and its .size are, and again to make the words. A kernel's vector registers are then its
+        block's and these.
+*/
+typedef struct gpuasm_lowered
+{
+        positive name;
+        positive length;
+        positive vgprs;
+        positive count;
+        bool moves;
+        p32 value[256]; // one a vector register at most
+} gpuasm_lowered;
+
+static gpuasm_lowered gpuasm_lowers[GPUASM_KERNELS];
+static positive gpuasm_lower_count;
+static struct
+{
+        p32 at;
+        p32 value;
+        bool move;
+} gpuasm_sites[GPUASM_WORDS]; // an instruction a word at least
+static positive gpuasm_site_count;
+static struct
+{
+        positive pass;   // 0 for the other chips; 1 the reading for the sites, 2 the one that makes the words
+        positive kernel; // the kernel whose code is being made (gpuasm_lower_count for none yet)
+} gpuasm9;
+
+static bool gpuasm_fail(string_address what, string_address detail, positive length);
+static bool gpuasm_emit(p32 word);
+
+static bool gpuasm_site(p32 value, bool move)
+{
+        if (gpuasm_site_count >= GPUASM_WORDS)
+                return gpuasm_fail("the kernels are more than the room for their code", null, 0);
+        gpuasm_sites[gpuasm_site_count].at = (p32)gpuasm_position;
+        gpuasm_sites[gpuasm_site_count].value = value;
+        gpuasm_sites[gpuasm_site_count++].move = move;
+        return true;
+}
+
+//      The vector register a literal of a long encoding is read from.
+static bool gpuasm_constant(p32 value, p32 address_to reg)
+{
+        const gpuasm_lowered *kernel = gpuasm_lowers + gpuasm9.kernel;
+
+        *reg = 0;
+        if (gpuasm9.pass == 1)
+                return gpuasm_site(value, false);
+        if (gpuasm9.kernel >= gpuasm_lower_count)
+                return gpuasm_fail("a literal in a long encoding outside a kernel: gfx9 has none there", null, 0);
+        for (positive at = 0; at < kernel->count; at++)
+                if (kernel->value[at] == value)
+                {
+                        *reg = (p32)(kernel->vgprs + at);
+                        return true;
+                }
+        return gpuasm_fail("a literal the first reading of the text did not find", null, 0);
+}
+
+//      A scalar register's value moved to the kernel's spare vector register, which the instruction after reads.
+static bool gpuasm_moved(p32 scalar, p32 address_to reg)
+{
+        *reg = 0;
+        if (gpuasm9.pass == 1)
+                return gpuasm_site(0, true);
+        if (gpuasm9.kernel >= gpuasm_lower_count)
+                return gpuasm_fail("two scalar registers to a long encoding outside a kernel: gfx9 reads one there", null, 0);
+        *reg = (p32)(gpuasm_lowers[gpuasm9.kernel].vgprs + gpuasm_lowers[gpuasm9.kernel].count);
+        return gpuasm_emit(0x7e000000u | *reg << 17 | 0x01u << 9 | scalar);
+}
 
 /*
         The message. file:line: what, and the text it is about; inside a
@@ -604,6 +699,8 @@ static b32 gpuasm_register(gpuasm_span text, p32 address_to kind, p32 address_to
         }
         if (gpuasm_is(text, "null"))
         {
+                if (gpuasm.isa == GPUASM_GFX9)
+                        return gpuasm_fail("null, which gfx9 does not have (a register nobody reads takes its place)", null, 0), -1;
                 *kind = GPUASM_NULL;
                 *first = gpuasm.isa == GPUASM_GFX10 ? 125 : 124;
                 return 1;
@@ -648,7 +745,7 @@ static b32 gpuasm_register(gpuasm_span text, p32 address_to kind, p32 address_to
                         return 0;
                 high = low;
         }
-        if (high > (*kind == GPUASM_SGPR ? 105 : 255))
+        if (high > (*kind == GPUASM_VGPR ? 255 : gpuasm.isa == GPUASM_GFX9 ? 101 : 105))
                 return gpuasm_fail("a register out of range", text.at, text.length), -1;
         *first = (p32)low;
         return 1;
@@ -810,7 +907,7 @@ static bool gpuasm_waitcnt(gpuasm_span text, p32 address_to bits)
                         return gpuasm_fail_span("unknown counter", name);
                 if (seen & (1u << which))
                         return gpuasm_fail_span("a counter given twice", name);
-                if (value > (which == 1 ? 7 : 63))
+                if (value > (which == 1 ? 7 : which == 2 && gpuasm.isa == GPUASM_GFX9 ? 15 : 63))
                         return gpuasm_fail_span("a counter past its largest", name);
                 seen |= 1u << which;
                 if (which == 0)
@@ -829,6 +926,8 @@ static bool gpuasm_waitcnt(gpuasm_span text, p32 address_to bits)
         }
         if (gpuasm.isa == GPUASM_GFX10)
                 *bits = (vm & 15) | exp << 4 | lgkm << 8 | (vm >> 4) << 14;
+        else if (gpuasm.isa == GPUASM_GFX9)
+                *bits = (vm & 15) | exp << 4 | (lgkm & 15) << 8 | (vm >> 4) << 14; // lgkmcnt is four bits, and 15 when left out
         else if (gpuasm.isa == GPUASM_GFX11)
                 *bits = (vm << 10) | (lgkm << 4) | exp;
         else
@@ -876,6 +975,29 @@ static const gpuasm_op *gpuasm_find(gpuasm_span name)
         return null;
 }
 
+//      A carry's add that gfx9 has a short encoding of (its long opcode is a VOP2's, 0x100 on): the carry in vcc, the second
+//      source a vector register, as LLVM chooses.
+static bool gpuasm_carry_short(p32 opc, const gpuasm_operand *o, positive force, bool clamp)
+{
+        return gpuasm.isa == GPUASM_GFX9 && opc >= 0x100 && opc < 0x140 && force != 64 && !clamp && o[1].code == 106 && o[3].vector;
+}
+
+//      Whether the operands put an instruction in a long encoding (two words, the sources nine bits each).
+static bool gpuasm_long(positive form, p32 opc, const gpuasm_operand *o, positive wanted, positive force, bool clamp)
+{
+        if (form == GPUASM_VOP1)
+                return force == 64 || clamp;
+        if (form == GPUASM_VOP2)
+                return force == 64 || clamp || !o[2].vector;
+        if (form == GPUASM_VOPC)
+                return force == 64 || clamp || !o[2].vector || o[0].code != 106;
+        if (form == GPUASM_VOP2C)
+                return force == 64 || !(o[1].code == 106 && o[3].vector && (wanted < 5 || o[4].code == 106));
+        if (form == GPUASM_VOP3B)
+                return !gpuasm_carry_short(opc, o, force, clamp);
+        return form == GPUASM_VOP3 || form == GPUASM_VOP3P;
+}
+
 static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
 {
         const gpuasm_op *op = gpuasm_find(mnemonic);
@@ -901,6 +1023,8 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         p32 src[3] = {128, 128, 128};
         positive form;
         p32 opc;
+        p32 head = 0xd4000000u; // a long vector encoding's top bits, and what a source it does not have holds (gfx9: 0xd0000000 and 0, as LLVM writes it)
+        p32 unused = 128;
 
         if (!gpuasm.text)
                 return gpuasm_fail_span("an instruction outside .text", mnemonic);
@@ -928,8 +1052,10 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         if (!op)
                 return gpuasm_fail_span("unknown instruction", mnemonic);
         form = op->form;
-        opc = gpuasm.isa == GPUASM_GFX10 ? op->code : op->code11;
+        opc = gpuasm.isa == GPUASM_GFX10 ? op->code : gpuasm.isa == GPUASM_GFX9 ? op->code9 : op->code11;
         wanted = string_length(op->shape) / 2;
+        if (gpuasm.isa == GPUASM_GFX9)
+                head = 0xd0000000u, unused = 0, src[0] = src[1] = src[2] = 0;
 
         //      The modifiers after the operands: clamp, and offset:N on a memory instruction.
         for (;;)
@@ -1028,7 +1154,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                                 ok = gpuasm_fail_span("eight scalar registers from a multiple of four are wanted", part[at]);
                 }
                 else if (kind == 'b' && off)
-                        o[at].code = gpuasm.isa == GPUASM_GFX10 ? 125 : 124;
+                        o[at].code = gpuasm.isa == GPUASM_GFX10 ? 125 : gpuasm.isa == GPUASM_GFX9 ? 127 : 124;
                 else if (kind == 'b')
                 {
                         ok = gpuasm_destination(part[at], 'p', size, o + at);
@@ -1069,6 +1195,51 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                 }
         }
 
+        //      gfx9's long encodings: a literal is the kernel's register for it, and of two scalar registers one is moved (gpuasm_lowered).
+        if (gpuasm.isa == GPUASM_GFX9 && gpuasm_long(form, opc, o, wanted, force, clamp))
+        {
+                positive first = form == GPUASM_VOP3B || form == GPUASM_VOP2C ? 2 : 1;
+                p32 kept = 0x2000;
+                p32 other = 0x2000;
+                p32 reg;
+
+                if (literal)
+                {
+                        if (!gpuasm_constant(value, address_of reg))
+                                return false;
+                        for (positive at = first; at < wanted; at++)
+                                if (o[at].has_literal)
+                                        o[at].code = 256 + reg, o[at].vector = true, o[at].has_literal = false;
+                        literal = false;
+                }
+                //      The scalar registers the sources name: a pair's (a mask, a carry) is kept, else the first.
+                for (positive at = first; at < wanted && gpuasm_long(form, opc, o, wanted, force, clamp); at++)
+                        if (!o[at].vector && o[at].code < 128 && op->shape[2 * at + 1] == '2')
+                        {
+                                if (kept != 0x2000 && kept != (o[at].code | 0x1000u))
+                                        return gpuasm_fail_span("two scalar pairs to a long encoding, and gfx9 reads one:", mnemonic);
+                                kept = o[at].code | 0x1000u;
+                        }
+                for (positive at = first; at < wanted && gpuasm_long(form, opc, o, wanted, force, clamp); at++)
+                {
+                        if (o[at].vector || o[at].code >= 128 || op->shape[2 * at + 1] == '2')
+                                continue;
+                        if (kept == 0x2000)
+                                kept = o[at].code;
+                        if (kept == o[at].code)
+                                continue;
+                        if (other != 0x2000 && other != o[at].code)
+                                return gpuasm_fail_span("three scalar registers to a long encoding, and gfx9 has one register to move one to:", mnemonic);
+                        if (other == 0x2000 && !gpuasm_moved(o[at].code, address_of reg))
+                                return false;
+                        other = o[at].code;
+                        o[at].code = 256 + reg, o[at].vector = true;
+                }
+        }
+        if (gpuasm.isa == GPUASM_GFX9 && form == GPUASM_VOP2C && !gpuasm_long(form, opc, o, wanted, force, clamp) && !o[2].vector &&
+            (o[2].code < 128 || o[2].code == 255))
+                return gpuasm_fail_span("a scalar register or a literal beside the carry in vcc, and gfx9 reads one scalar value:", mnemonic);
+
         //      Which encoding a VOP1, VOP2 or VOPC is written in.
         if (form == GPUASM_VOP1 || form == GPUASM_VOP2 || form == GPUASM_VOPC)
         {
@@ -1082,12 +1253,12 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                         return gpuasm_fail_span("operands that do not fit the 32-bit encoding of", mnemonic);
                 if (force == 64 || !fits)
                 {
-                        p32 base = form == GPUASM_VOP1 ? 0x180 : form == GPUASM_VOP2 ? 0x100 : 0;
+                        p32 base = form == GPUASM_VOP1 ? (gpuasm.isa == GPUASM_GFX9 ? 0x140 : 0x180) : form == GPUASM_VOP2 ? 0x100 : 0;
 
                         src[0] = o[1].code;
                         if (form != GPUASM_VOP1)
                                 src[1] = o[2].code;
-                        w0 = 0xd4000000u | (base + opc) << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
+                        w0 = head | (base + opc) << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
                         w1 = src[0] | src[1] << 9 | src[2] << 18;
                         form = GPUASM_VOP3;
                 }
@@ -1108,8 +1279,8 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                         return gpuasm_fail_span("operands that do not fit the 32-bit encoding of", mnemonic);
                 if (force == 64 || !fits)
                 {
-                        w0 = 0xd4000000u | (0x100u + opc) << 16 | o[1].code << 8 | o[0].code;
-                        w1 = o[2].code | o[3].code << 9 | (wanted < 5 ? 128u : o[4].code) << 18;
+                        w0 = head | (0x100u + opc) << 16 | o[1].code << 8 | o[0].code;
+                        w1 = o[2].code | o[3].code << 9 | (wanted < 5 ? unused : o[4].code) << 18;
                         form = GPUASM_VOP3B;
                 }
                 else
@@ -1119,18 +1290,23 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         {
                 for (positive at = 1; at < wanted; at++)
                         src[at - 1] = o[at].code;
-                w0 = 0xd4000000u | opc << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
+                w0 = head | opc << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
                 w1 = src[0] | src[1] << 9 | src[2] << 18;
+        }
+        else if (form == GPUASM_VOP3B && gpuasm_carry_short(opc, o, force, clamp))
+        {
+                w0 = (opc - 0x100u) << 25 | o[0].code << 17 | (o[3].code - 256) << 9 | o[2].code;
+                form = GPUASM_VOP2;
         }
         else if (form == GPUASM_VOP3B)
         {
-                w0 = 0xd4000000u | opc << 16 | (clamp ? 1u << 15 : 0) | o[1].code << 8 | o[0].code;
-                w1 = o[2].code | o[3].code << 9 | (wanted < 5 ? 128u : o[4].code) << 18;
+                w0 = head | opc << 16 | (clamp ? 1u << 15 : 0) | o[1].code << 8 | o[0].code;
+                w1 = o[2].code | o[3].code << 9 | (wanted < 5 ? unused : o[4].code) << 18;
         }
         else if (form == GPUASM_VOP3P)
         {
-                w0 = 0xcc000000u | opc << 16 | (clamp ? 1u << 15 : 0) | 1u << 14 | o[0].code;
-                w1 = o[1].code | o[2].code << 9 | 128u << 18 | 3u << 27;
+                w0 = (gpuasm.isa == GPUASM_GFX9 ? 0xd3800000u : 0xcc000000u) | opc << 16 | (clamp ? 1u << 15 : 0) | 1u << 14 | o[0].code;
+                w1 = o[1].code | o[2].code << 9 | unused << 18 | 3u << 27;
         }
         else if (form == GPUASM_SOP1)
                 w0 = 0xbe800000u | o[0].code << 16 | opc << 8 | o[1].code;
@@ -1176,10 +1352,12 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         {
                 w0 = 0xf4000000u | (gpuasm.isa == GPUASM_GFX12 ? opc << 13 : opc << 18) | o[0].code << 6 | o[1].code >> 1;
                 w1 = (gpuasm.isa == GPUASM_GFX10 ? 0xfa000000u : 0xf8000000u) | o[2].literal;
+                if (gpuasm.isa == GPUASM_GFX9) // its own head, the offset an immediate (bit 17), and no offset register to say none of
+                        w0 = 0xc0020000u | opc << 18 | o[0].code << 6 | o[1].code >> 1, w1 = o[2].literal;
         }
         else if (form == GPUASM_DS)
         {
-                w0 = 0xd8000000u | opc << 18;
+                w0 = 0xd8000000u | (gpuasm.isa == GPUASM_GFX9 ? opc << 17 : opc << 18);
                 w1 = (o[1].code - 256) | (o[2].code - 256) << 8 | o[0].code << 24;
         }
         else if (form == GPUASM_MIMG)
@@ -1198,7 +1376,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                 }
                 else
                 {
-                        w0 = 0xf0000000u | opc << 18 | 1u << 12 | image_dmask << 8 | 1u << 3;
+                        w0 = 0xf0000000u | opc << 18 | 1u << 12 | image_dmask << 8 | (gpuasm.isa == GPUASM_GFX9 ? 0 : 1u << 3); // gfx9 has no dim: the resource says 2D
                         w1 = (o[1].code - 256) | o[0].code << 8 | (o[2].code >> 2) << 16;
                 }
         }
@@ -1215,7 +1393,10 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                 }
                 else
                 {
-                        w0 = (gpuasm.isa == GPUASM_GFX11 ? 0xdc020000u | ((p32)offset & 0x1fff) : 0xdc008000u | ((p32)offset & 0xfff)) | opc << 18;
+                        w0 = (gpuasm.isa == GPUASM_GFX11 ? 0xdc020000u | ((p32)offset & 0x1fff)
+                              : gpuasm.isa == GPUASM_GFX9 ? 0xdc008000u | ((p32)offset & 0x1fff)
+                                                          : 0xdc008000u | ((p32)offset & 0xfff)) |
+                             opc << 18;
                         if (form == GPUASM_GLD)
                                 w1 = (o[1].code - 256) | o[2].code << 16 | o[0].code << 24;
                         else
@@ -1270,6 +1451,18 @@ static bool gpuasm_define(gpuasm_span name)
                 return gpuasm_fail_span("a label defined twice", name);
         gpuasm_labels[at].defined = true;
         gpuasm_labels[at].at = gpuasm_position;
+        //      gfx9: a kernel's label is where its constants are loaded (gpuasm_lowered), each into its register.
+        for (positive which = 0; gpuasm9.pass == 2 && which < gpuasm_lower_count; which++)
+        {
+                const gpuasm_lowered *kernel = gpuasm_lowers + which;
+
+                if (kernel->length != name.length || memory_compare(gpuasm_pool + kernel->name, name.at, name.length))
+                        continue;
+                gpuasm9.kernel = which;
+                for (positive in = 0; in < kernel->count; in++)
+                        if (!gpuasm_emit(0x7e000000u | (p32)(kernel->vgprs + in) << 17 | 0x01u << 9 | 255u) || !gpuasm_emit(kernel->value[in]))
+                                return false;
+        }
         return true;
 }
 
@@ -1521,6 +1714,9 @@ static bool gpuasm_property(gpuasm_span head, gpuasm_span rest)
                 {
                         if (value > 106)
                                 return gpuasm_fail_span("scalar registers of 0 to 106", rest);
+                        if (gpuasm.isa == GPUASM_GFX9 && value > 102)
+                                return gpuasm_fail_span("scalar registers of 0 to 102, which is all gfx9 has, not", rest);
+                        gpuasm.sgprs = (positive)value;
                 }
                 else if (value != gpuasm_properties[at].value)
                         return gpuasm_fail_span(at == 1 ? "the dispatch gives a kernel no scratch:"
@@ -1630,6 +1826,7 @@ static bool gpuasm_directive(gpuasm_cursor address_to cursor, gpuasm_span head, 
                 kernel->name = gpuasm.kernel_name;
                 kernel->length = gpuasm.kernel_length;
                 kernel->vgprs = gpuasm.vgprs;
+                kernel->sgprs = gpuasm.sgprs;
                 kernel->line = gpuasm.kernel_line;
                 gpuasm.block = false;
                 return true;
@@ -1758,6 +1955,18 @@ static bool gpuasm_finish(void)
                 positive last;
                 positive total;
                 p32 rsrc1 = gpuasm.isa == GPUASM_GFX12 ? GPUASM_RSRC1_GFX12 : GPUASM_RSRC1;
+                positive vgprs = kernel->vgprs;
+
+                //      gfx9: the vector registers are the block's and the kernel's constants and spare (gpuasm_lowered), and the word has
+                //      the scalar ones too, in eights, with the six the chip keeps past them (vcc, the flat scratch pair, the XNACK mask).
+                if (gpuasm.isa == GPUASM_GFX9)
+                {
+                        rsrc1 = GPUASM_RSRC1_GFX9 | (p32)((kernel->sgprs + 6 + 7) / 8 - 1) << 6;
+                        for (positive which = 0; which < gpuasm_lower_count; which++)
+                                if (gpuasm_lowers[which].length == name.length &&
+                                    !memory_compare(gpuasm_pool + gpuasm_lowers[which].name, name.at, name.length))
+                                        vgprs += gpuasm_lowers[which].count + (gpuasm_lowers[which].moves ? 1 : 0);
+                }
 
                 gpuasm.line = kernel->line;
                 if (label >= GPUASM_LABELS || !gpuasm_labels[label].defined)
@@ -1779,7 +1988,7 @@ static bool gpuasm_finish(void)
                         GPUASM_OUT("    ");
                         for (positive in = word; in < word + 10 && in < total; in++)
                         {
-                                p32 value = in == 0   ? rsrc1 | ((kernel->vgprs + 3) / 4 - 1)
+                                p32 value = in == 0   ? rsrc1 | (p32)((vgprs + 3) / 4 - 1)
                                             : in == 1 ? GPUASM_RSRC2
                                                       : gpuasm_words[first + in - 2];
 
@@ -1805,7 +2014,9 @@ static bool gpuasm_finish(void)
         arrays in gpuasm_output, or false with the line that says why in
         gpuasm_message.
 */
-static bool gpuasm_assemble_isa(string_address file, string_address source, enum gpuasm_isa isa, string_address prefix)
+//      The state of a reading of the text, as it is before the first line. names is whether the names kept so far go too
+//      (gfx9's second reading keeps the first's: its kernels' names are there).
+static void gpuasm_begin(string_address file, enum gpuasm_isa isa, string_address prefix, bool names)
 {
         memory_zero(address_of gpuasm, sizeof(gpuasm));
         gpuasm_position = 0;
@@ -1815,14 +2026,76 @@ static bool gpuasm_assemble_isa(string_address file, string_address source, enum
         gpuasm_macro_count = 0;
         gpuasm_kernel_count = 0;
         gpuasm_arena_used = 0;
-        gpuasm_pool_used = 0;
+        if (names)
+                gpuasm_pool_used = 0;
         gpuasm_output_length = 0;
         gpuasm_message[0] = end;
         gpuasm.file = file;
         gpuasm.prefix = prefix;
         gpuasm.isa = isa;
         gpuasm.text = true;
+}
 
+/*
+        gfx9's first reading done: each kernel's constants, from the sites that fell between its label and its .size, in the order
+        they fell, and whether an instruction of it moves a scalar. A kernel with no label or no .size has none here, and the second
+        reading says what it lacks.
+*/
+static bool gpuasm_lower(void)
+{
+        gpuasm_lower_count = 0;
+        for (positive at = 0; at < gpuasm_kernel_count; at++)
+        {
+                gpuasm_lowered *kernel = gpuasm_lowers + gpuasm_lower_count++;
+                gpuasm_span name = {gpuasm_pool + gpuasm_kernels[at].name, gpuasm_kernels[at].length};
+                positive label = gpuasm_find_label(name);
+
+                kernel->name = gpuasm_kernels[at].name;
+                kernel->length = gpuasm_kernels[at].length;
+                kernel->vgprs = gpuasm_kernels[at].vgprs;
+                kernel->count = 0;
+                kernel->moves = false;
+                if (label >= GPUASM_LABELS || !gpuasm_labels[label].defined || !gpuasm_labels[label].sized)
+                        continue;
+                for (positive site = 0; site < gpuasm_site_count; site++)
+                {
+                        bool known = false;
+
+                        if (gpuasm_sites[site].at < gpuasm_labels[label].at || gpuasm_sites[site].at >= gpuasm_labels[label].stop)
+                                continue;
+                        if (gpuasm_sites[site].move)
+                        {
+                                kernel->moves = true;
+                                continue;
+                        }
+                        for (positive in = 0; in < kernel->count; in++)
+                                known = known || kernel->value[in] == gpuasm_sites[site].value;
+                        if (known)
+                                continue;
+                        gpuasm.line = gpuasm_kernels[at].line;
+                        if (kernel->vgprs + kernel->count + 1 >= 256)
+                                return gpuasm_fail_span("more literals in long encodings than gfx9 has vector registers left for, in", name);
+                        kernel->value[kernel->count++] = gpuasm_sites[site].value;
+                }
+        }
+        return true;
+}
+
+static bool gpuasm_assemble_isa(string_address file, string_address source, enum gpuasm_isa isa, string_address prefix)
+{
+        gpuasm_begin(file, isa, prefix, true);
+        gpuasm9.pass = 0;
+        gpuasm_lower_count = 0;
+        if (isa == GPUASM_GFX9)
+        {
+                gpuasm9.pass = 1;
+                gpuasm_site_count = 0;
+                if (!gpuasm_run(source, source + string_length(source), 0) || !gpuasm_lower())
+                        return false;
+                gpuasm_begin(file, isa, prefix, false);
+                gpuasm9.pass = 2;
+                gpuasm9.kernel = gpuasm_lower_count;
+        }
         return gpuasm_run(source, source + string_length(source), 0) && gpuasm_finish();
 }
 

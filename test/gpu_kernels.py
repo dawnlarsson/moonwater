@@ -86,10 +86,214 @@ def _rewrite_gfx12_image(m):
     return '%s, [v%d, v%d], %s' % (m.group(1), v0, v0 + 1, rest)
 
 
+# gfx9 (Vega, and the Raven to Cezanne APUs): LLVM's names for its chips, the first the one the others are held to.
+GFX9 = ('gfx900', 'gfx902', 'gfx904', 'gfx906', 'gfx909', 'gfx90c')
+GFX9_NAMES = {'v_add_nc_u32': 'v_add_u32', 'v_sub_nc_u32': 'v_sub_u32', 'v_subrev_nc_u32': 'v_subrev_u32', 'v_add_co_ci_u32': 'v_addc_co_u32'}
+GFX9_CARRIES = ('v_mad_u64_u32', 'v_add_co_u32', 'v_addc_co_u32')  # their second operand is a destination too
+GFX9_FLOATS = (0x3f000000, 0xbf000000, 0x3f800000, 0xbf800000, 0x40000000, 0xc0000000, 0x40800000, 0xc0800000, 0x3e22f983)
+
+
+def _statements(src):
+    """The text's statements with its macros and its .irp blocks expanded, as the build's assembler expands them: one a line,
+    comments gone, a label on a line of its own."""
+    macros = {}
+
+    def run(lines, out, depth=0):
+        if depth > 8:
+            sys.exit('expansions nested too deep')
+        at = 0
+        while at < len(lines):
+            line = lines[at].split(';', 1)[0].strip()
+            at += 1
+            if not line:
+                continue
+            word = line.split()[0]
+            if word in ('.macro', '.irp'):
+                close, depth_in, body = ('.endm' if word == '.macro' else '.endr'), 1, []
+                while True:
+                    if at >= len(lines):
+                        sys.exit('a block that is never closed: %s' % line)
+                    inner = lines[at].split(';', 1)[0].strip()
+                    first = inner.split()[0] if inner else ''
+                    at += 1
+                    if first == word:
+                        depth_in += 1
+                    elif first == close:
+                        depth_in -= 1
+                        if not depth_in:
+                            break
+                    body.append(lines[at - 1])
+                rest = line[len(word):].strip()
+                if word == '.macro':
+                    name, _, params = rest.partition(' ')
+                    macros[name.rstrip(',')] = ([q.strip() for q in params.split(',') if q.strip()], body)
+                else:
+                    variable, _, values = rest.partition(',')
+                    for value in values.split(','):
+                        run([substitute(b, [variable.strip()], [value.strip()]) for b in body], out, depth + 1)
+                continue
+            if word in macros:
+                params, body = macros[word]
+                values = _operands(line[len(word):])
+                if len(values) != len(params):
+                    sys.exit('the wrong number of arguments to the macro %s: %s' % (word, line))
+                run([substitute(b, params, values) for b in body], out, depth + 1)
+                continue
+            while re.match(r'^[\w.$]+:', line):
+                label, _, line = line.partition(':')
+                out.append(label + ':')
+                line = line.strip()
+            if line:
+                out.append(line)
+
+    def substitute(line, names, values):
+        return re.sub(r'\\([A-Za-z0-9_$]+)', lambda m: values[names.index(m.group(1))] if m.group(1) in names else m.group(0), line)
+
+    out = []
+    run(src.splitlines(), out)
+    return out
+
+
+def _operands(text):
+    parts, depth, start = [], 0, 0
+    text = text.strip()
+    if not text:
+        return []
+    for at, c in enumerate(text + ','):
+        if c in '[(':
+            depth += 1
+        elif c in '])' and depth:
+            depth -= 1
+        elif c == ',' and not depth:
+            parts.append(text[start:at].strip())
+            start = at + 1
+    return parts
+
+
+def _literal(word):
+    """A number that is no inline constant of a 32-bit operand: its 32 bits, or None."""
+    if not re.fullmatch(r'-?(0x[0-9a-fA-F]+|[0-9]+)', word):
+        return None
+    value = int(word, 0)
+    if -16 <= value <= 64 or -16 <= value - (1 << 32) <= -1 or (value & 0xffffffff) in GFX9_FLOATS:
+        return None
+    return value & 0xffffffff
+
+
+def gfx9(src, chip):
+    """The text as a gfx9 chip's LLVM takes it, and what gfx9's long encodings do not take said the build's assembler's way
+    (src/build/gpuasm.c, gpuasm_lowered): LLVM names each instruction it refuses, for a literal there or for two scalar registers,
+    and the literal becomes a register of the kernel's own loaded at its label, the second scalar a register moved to just before."""
+    lines = []
+    for line in _statements(src):
+        word = line.split()[0]
+        if word == '.amdgcn_target':
+            line = line.replace('--gfx1036"', '--%s"' % chip)
+        if word in ('.amdhsa_wavefront_size32', '.amdhsa_forward_progress'):
+            continue  # gfx10's: gfx9's waves are 64 lanes and its first resource word has no such bit
+        base, suffix = (word[:-4], word[-4:]) if word.endswith(('_e64', '_e32')) else (word, '')
+        if base in GFX9_NAMES:
+            line = GFX9_NAMES[base] + suffix + line[len(word):]
+        lines.append(line.replace(' dim:SQ_RSRC_IMG_2D', ''))
+    names = [l.split()[1] for l in lines if l.split()[0] == '.amdhsa_kernel']
+    span, inside = {}, None
+    for at, line in enumerate(lines):
+        if line.endswith(':') and line[:-1] in names:
+            inside = line[:-1]
+            span[inside] = [at, None]
+        elif inside and re.match(r'\.size\s+%s\s*,' % re.escape(inside), line):
+            span[inside][1], inside = at, None
+    kernel_of = {}
+    for name, (first, last) in span.items():
+        for at in range(first, last if last is not None else first):
+            kernel_of[at] = name
+    pooled, moved = {}, {}  # a statement's literal (its operand's index and its 32 bits); its scalar moved (the operand's index)
+    work = pathlib.Path(tempfile.mkdtemp())
+    try:
+        for attempt in range(8):
+            pools = {name: [] for name in names}
+            for at in sorted(pooled):
+                if pooled[at][1] not in pools[kernel_of[at]]:
+                    pools[kernel_of[at]].append(pooled[at][1])
+            moves = {name: any(kernel_of[at] == name for at in moved) for name in names}
+            vgprs, block = {}, None
+            for line in lines:
+                if line.split()[0] == '.amdhsa_kernel':
+                    block = line.split()[1]
+                elif line.split()[0] == '.amdhsa_next_free_vgpr':
+                    vgprs[block] = int(line.split()[1])
+            out, where, block = [], [], None
+            for at, line in enumerate(lines):
+                word = line.split()[0]
+                name = kernel_of.get(at)
+                if word == '.amdhsa_kernel':
+                    block = line.split()[1]
+                elif word == '.amdhsa_next_free_vgpr':
+                    line = '%s %d' % (word, vgprs[block] + len(pools[block]) + (1 if moves[block] else 0))
+                if at in pooled or at in moved:
+                    ops, tail = _operands(line[len(word):]), ''
+                    m = re.match(r'^(.*?)((?:\s+clamp)?)$', ops[-1])
+                    ops[-1], tail = m.group(1), m.group(2)
+                    if at in pooled:
+                        ops[pooled[at][0]] = 'v%d' % (vgprs[name] + pools[name].index(pooled[at][1]))
+                    if at in moved:
+                        spare = vgprs[name] + len(pools[name])
+                        out.append('v_mov_b32 v%d, %s' % (spare, ops[moved[at]]))
+                        where.append(at)
+                        ops = ['v%d' % spare if k >= 1 and o == ops[moved[at]] else o for k, o in enumerate(ops)]
+                    line = '%s %s%s' % (word, ', '.join(ops), tail)
+                out.append(line)
+                where.append(at)
+                if line.endswith(':') and line[:-1] in pools:
+                    for k, value in enumerate(pools[line[:-1]]):
+                        out.append('v_mov_b32 v%d, 0x%x' % (vgprs[line[:-1]] + k, value))
+                        where.append(at)
+            text = '\n'.join(out) + '\n'
+            (work / 'k.asm').write_text(text)
+            made = subprocess.run([tool('llvm-mc'), '-triple=amdgcn-amd-amdhsa', '-mcpu=' + chip, '-filetype=obj', str(work / 'k.asm'), '-o', str(work / 'k.o')],
+                                  capture_output=True, text=True)
+            if not made.returncode:
+                return text
+            errors = re.findall(r'k\.asm:(\d+):\d+: error: ([^\n]*)', made.stderr)
+            if not errors:
+                sys.exit('llvm-mc for %s: %s' % (chip, made.stderr.strip()[:400]))
+            fresh = 0
+            for number, what in errors:
+                at = where[int(number) - 1]
+                word = lines[at].split()[0]
+                ops = _operands(lines[at][len(word):])
+                ops[-1] = re.sub(r'\s+clamp$', '', ops[-1])
+                first = 2 if (word[:-4] if word.endswith('_e64') else word) in GFX9_CARRIES else 1
+                if at not in kernel_of:
+                    sys.exit('%s: outside a kernel, %s: %s' % (chip, what, lines[at]))
+                if what.startswith('literal operands are not supported') and at not in pooled:
+                    found = [(k, _literal(o)) for k, o in enumerate(ops) if k >= first and _literal(o) is not None]
+                    if len(found) != 1:
+                        sys.exit('%s: %s: %s' % (chip, what, lines[at]))
+                    pooled[at], fresh = found[0], fresh + 1
+                elif 'violates constant bus restrictions' in what and at not in moved:
+                    scalars = [(k, o) for k, o in enumerate(ops) if k >= first and re.fullmatch(r's\d+', o)]
+                    pair = any(k >= first and (re.fullmatch(r's\[\d+:\d+\]', o) or o in ('vcc', 'exec')) for k, o in enumerate(ops))
+                    others = [(k, o) for k, o in scalars if pair or o != scalars[0][1]]
+                    if not others or len(set(o for _, o in others)) != 1:
+                        sys.exit('%s: %s: %s' % (chip, what, lines[at]))
+                    moved[at], fresh = others[0][0], fresh + 1
+                elif at not in pooled and at not in moved:
+                    sys.exit('llvm-mc for %s: %s: %s' % (chip, what, lines[at]))
+            if not fresh:
+                sys.exit('llvm-mc for %s still refuses: %s' % (chip, made.stderr.strip()[:400]))
+        sys.exit('llvm-mc for %s: not settled' % chip)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def build(asm, chip=None):
     work = pathlib.Path(tempfile.mkdtemp())
     mc = MC
-    if chip:
+    if chip in GFX9:
+        (work / 'k.asm').write_text(gfx9(pathlib.Path(asm).read_text(), chip))
+        asm, mc = work / 'k.asm', ['-triple=amdgcn-amd-amdhsa', '-mcpu=' + chip]
+    elif chip:
         #   the same text for another chip: the target line and the processor name it, plus GFX11+/12 directive & waitcnt lowering
         src = pathlib.Path(asm).read_text().replace('--gfx1036"', '--%s"' % chip)
         if chip.startswith('gfx11') or chip.startswith('gfx12'):
@@ -131,6 +335,7 @@ def probe():
     (work / 'probe.asm').write_text(PROBE)
     try:
         words = kernels(build(work / 'probe.asm'))[0][1]
+        words9 = kernels(build(work / 'probe.asm', GFX9[0]))[0][1]
     finally:
         shutil.rmtree(work, ignore_errors=True)
     version = subprocess.run([tool('llvm-mc'), '--version'], capture_output=True, text=True).stdout
@@ -140,22 +345,31 @@ def probe():
         print('llvm-mc %s writes 0x%02x in the third source a two-source instruction does not have (v_pk_min_u16 v1, v2, v3 is %08x %08x), '
               'the build\'s assembler the constant 0, 0x80: the kernels are not compared with this LLVM\'s' % (version, third, words[2], words[3]))
         sys.exit(2)
+    third = words9[3] >> 18 & 0x1ff
+    if third:
+        print('llvm-mc %s writes 0x%02x for gfx9 in the third source a two-source instruction does not have (v_pk_min_u16 v1, v2, v3 is %08x %08x), '
+              'the build\'s assembler 0: the kernels are not compared with this LLVM\'s' % (version, third, words9[2], words9[3]))
+        sys.exit(2)
     print('llvm-mc %s writes the words the build\'s assembler is held to' % version)
 
 
 def chips(asm, names):
-    ours = kernels(build(asm))
-    for chip in names:
-        theirs = kernels(build(asm, chip))
-        if [n for n, _ in theirs] != [n for n, _ in ours]:
-            sys.exit('%s: for %s the kernels are %s' % (asm, chip, [n for n, _ in theirs]))
-        for (name, a), (_, b) in zip(ours, theirs):
-            bad = [i for i in range(max(len(a), len(b))) if i >= len(a) or i >= len(b) or a[i] != b[i]]
-            if bad:
-                sys.exit('%s: kernel %s is not the same words for %s as for gfx1036: %d differ, the first at word %d'
-                         % (asm, name, chip, len(bad), bad[0]))
-    print('gpu kernels: %s is the same %d words for gfx1036 and for %s'
-          % (asm, sum(len(w) for _, w in ours), ', '.join(names)))
+    #   a gfx9 chip is held to gfx900's words, the others to gfx1036's
+    for first, held in ((None, [n for n in names if n not in GFX9]), (GFX9[0], [n for n in names if n in GFX9])):
+        if not held:
+            continue
+        ours = kernels(build(asm, first))
+        for chip in held:
+            theirs = kernels(build(asm, chip))
+            if [n for n, _ in theirs] != [n for n, _ in ours]:
+                sys.exit('%s: for %s the kernels are %s' % (asm, chip, [n for n, _ in theirs]))
+            for (name, a), (_, b) in zip(ours, theirs):
+                bad = [i for i in range(max(len(a), len(b))) if i >= len(a) or i >= len(b) or a[i] != b[i]]
+                if bad:
+                    sys.exit('%s: kernel %s is not the same words for %s as for %s: %d differ, the first at word %d'
+                             % (asm, name, chip, first or 'gfx1036', len(bad), bad[0]))
+        print('gpu kernels: %s is the same %d words for %s and for %s'
+              % (asm, sum(len(w) for _, w in ours), first or 'gfx1036', ', '.join(held)))
 
 
 def sections(d):
@@ -199,7 +413,7 @@ def arrays(text, prefix=''):
         return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
                 for name, body in re.findall(r'static const unsigned int gpu_k_' + re.escape(prefix) + r'(\w+)\[\] = \{(.*?)\};', text, re.S)]
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
-            for name, body in re.findall(r'static const unsigned int gpu_k_(?!11_|12_)(\w+)\[\] = \{(.*?)\};', text, re.S)]
+            for name, body in re.findall(r'static const unsigned int gpu_k_(?!11_|12_|9_)(\w+)\[\] = \{(.*?)\};', text, re.S)]
 
 
 def asm_hash(asm):
@@ -2406,6 +2620,7 @@ def main():
         sys.stdout.write(text(kernels(build(sys.argv[2])), sys.argv[2]))
         sys.stdout.write(text(kernels(build(sys.argv[2], 'gfx1100')), None, '11_'))
         sys.stdout.write(text(kernels(build(sys.argv[2], 'gfx1200')), None, '12_'))
+        sys.stdout.write(text(kernels(build(sys.argv[2], GFX9[0])), None, '9_'))
         return
     if len(sys.argv) == 3 and sys.argv[1] == '--hash':
         sys.stdout.write('// src/canvas/gpu.asm\'s FNV-1a 64: what artifacts/gpu_kernels.inc is held to (gpu.c). Made again with\n'
@@ -2418,7 +2633,7 @@ def main():
     if pathlib.Path(asm).name != 'gpu_stress.asm':
         check_regs(asm)
     inc_text = pathlib.Path(inc).read_text()
-    for label, chip, prefix in [('gfx1036', None, ''), ('gfx1100', 'gfx1100', '11_'), ('gfx1200', 'gfx1200', '12_')]:
+    for label, chip, prefix in [('gfx1036', None, ''), ('gfx1100', 'gfx1100', '11_'), ('gfx1200', 'gfx1200', '12_'), (GFX9[0], GFX9[0], '9_')]:
         ours = arrays(inc_text, prefix)
         if prefix and not ours:
             continue

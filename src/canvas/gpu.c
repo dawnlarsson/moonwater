@@ -286,6 +286,11 @@ static const struct gpu_code gpu_kernels_gfx12[] = {
     {gpu_k_12_copy, sizeof(gpu_k_12_copy)}, {gpu_k_12_fill, sizeof(gpu_k_12_fill)}, {gpu_k_12_tone, sizeof(gpu_k_12_tone)}, {gpu_k_12_glass, sizeof(gpu_k_12_glass)},
     {0, 0}, {0, 0}, {gpu_k_12_scene, sizeof(gpu_k_12_scene)}, {gpu_k_12_scale, sizeof(gpu_k_12_scale)},
     {gpu_k_12_image, sizeof(gpu_k_12_image)}, {gpu_k_12_nv12, sizeof(gpu_k_12_nv12)}};
+// gfx9's (Vega, and the Raven to Cezanne APUs): the same text, its literals in registers where gfx9's long encodings take none (src/build/gpuasm.c).
+static const struct gpu_code gpu_kernels_gfx9[] = {
+    {gpu_k_9_copy, sizeof(gpu_k_9_copy)}, {gpu_k_9_fill, sizeof(gpu_k_9_fill)}, {gpu_k_9_tone, sizeof(gpu_k_9_tone)}, {gpu_k_9_glass, sizeof(gpu_k_9_glass)},
+    {0, 0}, {0, 0}, {gpu_k_9_scene, sizeof(gpu_k_9_scene)}, {gpu_k_9_scale, sizeof(gpu_k_9_scale)},
+    {gpu_k_9_image, sizeof(gpu_k_9_image)}, {gpu_k_9_nv12, sizeof(gpu_k_9_nv12)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
@@ -310,7 +315,7 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 #define GPU_FAMILIES_WIDE(f) ((f) == 143)
 static b32 gpu_wide; // the owner asked for them
 static b32 gpu_gfx103; // the open card's graphics core is 10.3 (RDNA2: Navi 21/22/23/24, Van Gogh, Rembrandt, Raphael, Mendocino)
-static unsigned int gpu_amd_gfx_major, gpu_amd_gfx_minor; // the graphics core's version as gpu_amd_identify read it (0.0 before a card is asked, and at each start)
+static unsigned int gpu_amd_gfx_major, gpu_amd_gfx_minor, gpu_amd_gfx_rev; // the graphics core's version as gpu_amd_identify read it (0.0.0 before a card is asked, and at each start)
 static b32 gpu_family_ok(unsigned int family)
 {
         // Every card whose core is 10.3 (RDNA2) or 10.1 (RDNA1) by its own version, whatever its family; a card that did not say one is held to the families
@@ -332,6 +337,7 @@ struct gpu_set
 static const struct gpu_set gpu_amd_rdna2 = {gpu_kernels, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
 static const struct gpu_set gpu_amd_rdna3 = {gpu_kernels_gfx11, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
 static const struct gpu_set gpu_amd_rdna4 = {gpu_kernels_gfx12, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
+static const struct gpu_set gpu_amd_gfx9 = {gpu_kernels_gfx9, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
 static const struct gpu_set *gpu_set = &gpu_amd_rdna2; // the started card's (amdgpu's until a start says otherwise: a check's fake card is one)
 // The prerequisites of the path, in the order it needs them. gpu_start stops at the first that fails and keeps it: the code, the kernel's error (its
 // errno; 0 where the step failed by what it found, not by a call), and a bit in gpu_req.mask for each that passed. The node the checks looked at (its path,
@@ -546,7 +552,7 @@ static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int 
         *family = e ? 0 : who[4], *device = e ? 0 : who[0];
         if (e)
                 return e;
-        gpu_gfx103 = 0, gpu_amd_gfx_major = 0, gpu_amd_gfx_minor = 0;
+        gpu_gfx103 = 0, gpu_amd_gfx_major = 0, gpu_amd_gfx_minor = 0, gpu_amd_gfx_rev = 0;
         gpu_amd_va_max = (positive)who[39] << 32 | who[38];
         if (!gpu_raw(fd, GPU_IO(1u, 5, 32), ip_ask))
         {
@@ -557,7 +563,7 @@ static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int 
                 // eighth (ip_discovery_version: the major in bits 23:16, the minor in 15:8), which the kernel fills for Vega 10 and every chip after it and
                 // leaves 0 before. The minor is the core's where the two agree on the major: 10.1 a Navi 10, 12 or 14, 10.3 a Navi 21 to 24 and the APUs.
                 if ((ip[7] >> 16 & 0xff) == ip[0])
-                        gpu_amd_gfx_minor = ip[7] >> 8 & 0xff;
+                        gpu_amd_gfx_minor = ip[7] >> 8 & 0xff, gpu_amd_gfx_rev = ip[7] & 0xff;
                 if (gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 3)
                         gpu_gfx103 = 1;
         }
@@ -589,6 +595,11 @@ static const struct gpu_set *gpu_amd_set(unsigned int family)
                 return &gpu_amd_rdna4;
         if (gpu_amd_gfx_major == 11)
                 return &gpu_amd_rdna3;
+        // gfx9: the cards and APUs that have a screen. The kernel's block is 9.0 for all of them, and the core says which: 9.0.1 Vega 10, 9.1.0 Raven and
+        // Picasso, 9.2.1 Vega 12, 9.2.2 Raven 2, 9.3.0 Renoir to Cezanne, 9.4.0 Vega 20 (amdgpu_discovery.c). From 9.4.1 on they are the compute cards
+        // (Arcturus, Aldebaran and after), which have no screen and other registers for their shader engines: none of those is taken.
+        if (gpu_amd_gfx_major == 9)
+                return gpu_amd_gfx_minor < 4 || (gpu_amd_gfx_minor == 4 && !gpu_amd_gfx_rev) ? &gpu_amd_gfx9 : 0;
         return gpu_family_ok(family) ? &gpu_amd_rdna2 : 0;
 }
 
@@ -760,9 +771,16 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
                 // GFX6 (SI): SURFACE_SYNC (0x43) with CP_COHER_CNTL (TC | TCL1 | ICACHE | KCACHE)
                 ib[n++] = GPU_PKT(0x43, 3), ib[n++] = 0x0ec00000u, ib[n++] = 0xffffffffu, ib[n++] = 0, ib[n++] = 10;
         }
-        else if (gfx >= 7u && gfx <= 9u)
+        else if (gfx == 9u)
         {
-                // GFX7/8/9 (CI/VI/Polaris/Vega): 6-payload ACQUIRE_MEM (0x58) with CP_COHER_CNTL (no GCR_CNTL)
+                // GFX9 (Vega, Raven to Cezanne): ACQUIRE_MEM (0x58) of six words, the one the kernel's own compute ring syncs memory with
+                // (gfx_v9_0_emit_mem_sync): CP_COHER_CNTL the shaders' instruction and constant caches (bits 29 and 27), the texture caches
+                // (23 and 22) and their write-back (18), over every address, polled every ten
+                ib[n++] = GPU_PKT(0x58, 5), ib[n++] = 0x28c40000u, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffu, ib[n++] = 0, ib[n++] = 0, ib[n++] = 10;
+        }
+        else if (gfx >= 7u && gfx <= 8u)
+        {
+                // GFX7/8 (CI/VI/Polaris): 6-payload ACQUIRE_MEM (0x58) with CP_COHER_CNTL (no GCR_CNTL)
                 ib[n++] = GPU_PKT(0x58, 5), ib[n++] = 0x0ec00000u, ib[n++] = 0xffffffffu, ib[n++] = 0xffffffu, ib[n++] = 0, ib[n++] = 0, ib[n++] = 10;
         }
         else
@@ -1938,7 +1956,7 @@ static b32 gpu_start(positive bytes)
         size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // last MiB is self-test
 
         memory_zero(&gpu_req, sizeof(gpu_req));
-        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = 0, gpu_userptr_ok = 0;
+        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = gpu_amd_gfx_rev = 0, gpu_userptr_ok = 0;
         gpu_userptr_off = gpu_flag("/run/moonwater/gpu-nouserptr"), gpu_userptr_gone = 0;
         gpu_own_userptr = gpu_flag("/run/moonwater/gpu-own-userptr");
         gpu_round_off = gpu_flag("/run/moonwater/gpu-round-off");
@@ -2582,12 +2600,12 @@ static void gpu_map_refused(positive from)
                         page = (unsigned char *)made, page[0] = 1;
         }
         {
-                unsigned int kept_103 = gpu_gfx103, kept_maj = gpu_amd_gfx_major, kept_min = gpu_amd_gfx_minor;
+                unsigned int kept_103 = gpu_gfx103, kept_maj = gpu_amd_gfx_major, kept_min = gpu_amd_gfx_minor, kept_rev = gpu_amd_gfx_rev;
                 positive kept_va = gpu_amd_va_max;
 
                 gpu_map_probe = (gpu_backend->identify(gpu.fd, &family, &device) == 0 ? 1u : 0u) | (page ? gpu_userptr_error((positive)page, GPU_USER_WRITTEN) : 255u) << 8 |
                                 gpu_userptr_error(from, GPU_USER_WRITTEN) << 16 | gpu_userptr_error(from, GPU_USER_LATER) << 24;
-                gpu_gfx103 = kept_103, gpu_amd_gfx_major = kept_maj, gpu_amd_gfx_minor = kept_min, gpu_amd_va_max = kept_va;
+                gpu_gfx103 = kept_103, gpu_amd_gfx_major = kept_maj, gpu_amd_gfx_minor = kept_min, gpu_amd_gfx_rev = kept_rev, gpu_amd_va_max = kept_va;
         }
         gpu_say_kernel();
 }

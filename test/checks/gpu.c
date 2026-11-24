@@ -3101,6 +3101,17 @@ static void gpu_preamble_rows(void)
                       ones10 == four && ones11 == (four | past) && ones12 == (four | past | ninth));
                 check("gpu preamble: no job writes the accumulators or the dispatch's index (0x224 to 0x227, 0x229), and none but gfx12's the ninth engine's register",
                       wrote10 && !(wrote10 & (others | past | ninth)) && wrote11 && !(wrote11 & (others | ninth)) && wrote12 && !(wrote12 & others));
+                // gfx9 (Vega, Raven to Cezanne): its registers are at the offsets gfx10's are (gc_9_0, gc_9_1 and gc_9_2_1_offset.h, the mm numbers less 0xc00), it
+                // has no COMPUTE_PGM_RSRC3 (0x228) and four shader engines' registers, and it syncs memory as the kernel's own compute ring does
+                // (gfx_v9_0_emit_mem_sync: an ACQUIRE_MEM of six words, CP_COHER_CNTL 0x28c40000). 41 words in all, the last the dispatch's initiator.
+                {
+                        p64 wrote9 = 0, ones9 = gpu_preamble_engines(9, &wrote9);
+
+                        check("gpu preamble: a gfx9 job syncs memory with the ring's own six-word ACQUIRE_MEM, enables its four shader engines, and writes no RSRC3 and no engine past the fourth",
+                              ones9 == four && wrote9 && !(wrote9 & (others | past | ninth | 1ull << 0x28)) && (wrote10 & 1ull << 0x28) && gpu_fake_ib_words == 41 &&
+                                  gpu_fake_ib[0] == 0xc0055802u && gpu_fake_ib[1] == 0x28c40000u && gpu_fake_ib[2] == 0xffffffffu && gpu_fake_ib[3] == 0xffffffu &&
+                                  gpu_fake_ib[4] == 0 && gpu_fake_ib[5] == 0 && gpu_fake_ib[6] == 10 && gpu_fake_ib[40] == 0x45);
+                }
         }
         if (gpu.fd < 0 || gpu.broken)
         {
@@ -4127,17 +4138,30 @@ static void gpu_import_rows(void)
                           !gpu_amd_set(143) && GPU_FAKE_SAID(143, "RDNA1 or RDNA2 (GFX10)") && (gpu_wide = 1, gpu_amd_set(143) == &gpu_amd_rdna2) && (gpu_wide = 0, true));
                 check("gpu family: an APU the kernels were run on (family 149, the core 10.3.6) is taken as it was, its core read too",
                       GPU_FAKE_CHIP(149, 0x01, 10, 10u << 16 | 3u << 8 | 6u, 1) == 0 && family == 149 && gpu_amd_gfx_minor == 3 && gpu_gfx103 && gpu_amd_set(149) == &gpu_amd_rdna2);
-                check("gpu family: the block's major picks the other sets (11.0 with the core 11.5.0 the gfx11 one, 12.0 the gfx12 one), and a Raven's 9.0 none",
+                check("gpu family: the block's major picks the other sets (11.0 with the core 11.5.0 the gfx11 one, 12.0 the gfx12 one, 9.0 the gfx9 one), and a Polaris's 8.0 none",
                       GPU_FAKE_CHIP(150, 0x01, 11, 11u << 16 | 5u << 8, 1) == 0 && gpu_amd_gfx_major == 11 && gpu_amd_gfx_minor == 5 && !gpu_gfx103 && gpu_amd_set(150) == &gpu_amd_rdna3 &&
                           GPU_FAKE_CHIP(152, 0x01, 12, 12u << 16 | 1u, 1) == 0 && gpu_amd_gfx_major == 12 && gpu_amd_set(152) == &gpu_amd_rdna4 &&
-                          GPU_FAKE_CHIP(142, 0x01, 9, 9u << 16 | 1u << 8, 1) == 0 && gpu_amd_gfx_major == 9 && gpu_amd_gfx_minor == 1 && !gpu_amd_set(142));
+                          GPU_FAKE_CHIP(142, 0x01, 9, 9u << 16 | 1u << 8, 1) == 0 && gpu_amd_gfx_major == 9 && gpu_amd_gfx_minor == 1 && gpu_amd_set(142) == &gpu_amd_gfx9 &&
+                          GPU_FAKE_CHIP(130, 0x01, 8, 0, 1) == 0 && gpu_amd_gfx_major == 8 && !gpu_amd_set(130));
+                // gfx9: the cards and APUs with a screen take its set by their core (amdgpu_discovery.c's versions), whatever the family says of them, with no
+                // file; the compute cards of the same block and family (Arcturus 9.4.1, Aldebaran 9.4.2) take none; a kernel that says no core is taken as 9.0.
+                check("gpu family: a Vega 10 (family 141, the core 9.0.1), a Vega 12 (9.2.1), a Vega 20 (9.4.0), a Raven 2 (142, 9.2.2) and a Renoir or a Cezanne (9.3.0) take the gfx9 set",
+                      GPU_FAKE_CHIP(141, 0x01, 9, 9u << 16 | 1u, 1) == 0 && family == 141 && gpu_amd_set(141) == &gpu_amd_gfx9 && GPU_FAKE_SAID(141, "Vega") &&
+                          GPU_FAKE_CHIP(141, 0x14, 9, 9u << 16 | 2u << 8 | 1u, 1) == 0 && gpu_amd_set(141) == &gpu_amd_gfx9 &&
+                          GPU_FAKE_CHIP(141, 0x28, 9, 9u << 16 | 4u << 8, 1) == 0 && gpu_amd_gfx_minor == 4 && gpu_amd_gfx_rev == 0 && gpu_amd_set(141) == &gpu_amd_gfx9 &&
+                          GPU_FAKE_CHIP(142, 0x81, 9, 9u << 16 | 2u << 8 | 2u, 1) == 0 && gpu_amd_set(142) == &gpu_amd_gfx9 &&
+                          GPU_FAKE_CHIP(142, 0x91, 9, 9u << 16 | 3u << 8, 1) == 0 && family == 142 && gpu_amd_gfx_minor == 3 && gpu_amd_set(142) == &gpu_amd_gfx9 && !gpu_wide);
+                check("gpu family: the compute cards of the gfx9 block take no set (Arcturus 9.4.1, Aldebaran 9.4.2, and 9.5.0), and a gfx9 chip whose kernel says no core does",
+                      GPU_FAKE_CHIP(141, 0x32, 9, 9u << 16 | 4u << 8 | 1u, 1) == 0 && gpu_amd_gfx_rev == 1 && !gpu_amd_set(141) &&
+                          GPU_FAKE_CHIP(141, 0x3c, 9, 9u << 16 | 4u << 8 | 2u, 1) == 0 && !gpu_amd_set(141) && GPU_FAKE_CHIP(141, 0x50, 9, 9u << 16 | 5u << 8, 1) == 0 && !gpu_amd_set(141) &&
+                          GPU_FAKE_CHIP(142, 0x01, 9, 0, 1) == 0 && gpu_amd_gfx_major == 9 && gpu_amd_gfx_minor == 0 && gpu_amd_set(142) == &gpu_amd_gfx9);
                 check("gpu family: a core of another major than the block's is not read (the block 10.0 keeps its 0), and a node with no compute ring is no card (ENODEV)",
                       GPU_FAKE_CHIP(143, 0x28, 10, 11u << 16 | 3u << 8, 1) == 0 && gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 0 && !gpu_family_ok(143) &&
                           GPU_FAKE_CHIP(143, 0x28, 10, 10u << 16 | 3u << 8, 0) == 19 && family == 0);
 #undef GPU_FAKE_SAID
 #undef GPU_FAKE_CHIP
                 gpu_kernel.info_family = 0, gpu_kernel.on = kept_on;
-                gpu_wide = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = 0, gpu_amd_va_max = kept_va;
+                gpu_wide = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = gpu_amd_gfx_rev = 0, gpu_amd_va_max = kept_va;
         }
         gpu_fake_wide = 0, gpu_fake_absent = 0;
         gpu.fd = GPU_KERNEL_FD, gpu.at = 0;

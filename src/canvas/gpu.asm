@@ -1,6 +1,8 @@
 ; The GPU's kernels, by hand: AMD RDNA2 (gfx1036), wave64. test/gpu_kernels.py assembles this and writes the arrays gpu.c holds.
 ; In: s[4:5] the arguments (struct gpu_args), s6 s7 the workgroup's x and y, v0 the lane. The pixels are 32 bits.
 ; The scalar registers are s0 to s101 and no instruction names null (a carry nobody reads goes to s[36:37]): a gfx9 chip has neither s102 on nor null.
+; The build makes gfx11's, gfx12's and gfx9's words of this text too (src/build/gpuasm.c). gfx9's long encodings take no literal: a kernel's literals
+; there are vector registers of its own, the ones after those its block declares, loaded at its label, so those are left free of it.
 .amdgcn_target "amdgcn-amd-amdhsa--gfx1036"
 .text
 

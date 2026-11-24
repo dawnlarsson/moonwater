@@ -8129,12 +8129,13 @@ gate_gpu_i915()
 }
 
 #       The kernels are written for gfx1036 and let onto the rest of gfx10 where the owner asks (gpu.c's gpu_wide): that they are
-#       the same words for those chips is asked of llvm-mc, which is compared with itself, so any LLVM will do.
+#       the same words for those chips is asked of llvm-mc, which is compared with itself, so any LLVM will do. The gfx9 set is one
+#       set of words for every gfx9 chip (Vega 10, 12 and 20, Raven, Raven 2, Renoir): asked the same way, against gfx900's.
 gate_gpu_kernels_chips()
 {
         command -v llvm-mc > /dev/null 2>&1 && command -v ld.lld > /dev/null 2>&1 ||
-                { echo "no llvm-mc or ld.lld here: the kernels are not assembled for the other gfx10 chips"; return 2; }
-        python3 test/gpu_kernels.py --chips src/canvas/gpu.asm gfx1010 gfx1012 gfx1030
+                { echo "no llvm-mc or ld.lld here: the kernels are not assembled for the other gfx10 and gfx9 chips"; return 2; }
+        python3 test/gpu_kernels.py --chips src/canvas/gpu.asm gfx1010 gfx1012 gfx1030 gfx902 gfx904 gfx906 gfx909 gfx90c
 }
 
 lane_gate()
