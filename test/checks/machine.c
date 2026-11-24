@@ -2026,6 +2026,104 @@ static fn machine_services(void)
                   machine_start_at[4] - machine_start_at[3] >= 1000000000ull);
 }
 
+static positive machine_vma_count(void)
+{
+        bipolar fd = system_open_at(AT_FDCWD, (string_address) "/proc/self/maps", FILE_READ | O_CLOEXEC);
+        if (fd < 0)
+                return 0;
+        p8 buf[4096];
+        positive lines = 0;
+        for (;;)
+        {
+                bipolar got = system_call_3(syscall(read), (positive)fd, (positive)buf, sizeof(buf));
+                if (got <= 0)
+                        break;
+                for (bipolar i = 0; i < got; i++)
+                        if (buf[i] == '\n')
+                                lines++;
+        }
+        system_close(fd);
+        return lines;
+}
+
+static fn machine_bluetooth_regressions(void)
+{
+        // HMB-001: bt_trait_visit must not read past entry when each < 5
+        {
+                positive page = 65536;
+                p8 address_to buf = (p8 address_to)mmap(null, page * 2, 3, 0x22, -1, 0);
+                b32 ok = false;
+                if (buf && (bipolar)buf > 0)
+                {
+                        (void)mprotect(buf + page, page, 0);
+                        buf[page - 4] = 0x01;
+                        buf[page - 3] = 0x00;
+                        buf[page - 2] = 0x02;
+                        buf[page - 1] = 0x03;
+                        bipolar child = system_fork();
+                        if (child == 0)
+                        {
+                                bt_hog hog;
+                                bt_traits traits;
+                                memory_zero(address_of hog, sizeof(hog));
+                                memory_zero(address_of traits, sizeof(traits));
+                                bool res = bt_trait_visit(address_of hog, buf + page - 4, 4, address_of traits);
+                                system_call_1(syscall(exit), (res && traits.count == 0) ? 0 : 1);
+                        }
+                        b32 status = -1;
+                        if (child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0)
+                                ok = (status == 0);
+                        munmap(buf, page * 2);
+                }
+                check("bluetooth: bt_trait_visit rejects 4-byte ATT entry without out-of-bounds read", ok);
+        }
+
+        // HMB-002: bt_keys_load must free all 4 key buffers without UB stack pointer walk
+        {
+                bipolar child = system_fork();
+                if (child == 0)
+                {
+                        bt_link link;
+                        bt_book book;
+                        memory_zero(address_of link, sizeof(link));
+                        memory_zero(address_of book, sizeof(book));
+                        link.mgmt = -1;
+                        link.supported = 0;
+                        bt_keys_load(address_of link, address_of book);
+                        positive before = machine_vma_count();
+                        for (positive i = 0; i < 32; i++)
+                                bt_keys_load(address_of link, address_of book);
+                        positive after = machine_vma_count();
+                        system_call_1(syscall(exit), (after <= before + 8) ? 0 : 1);
+                }
+                b32 status = -1;
+                b32 ok = child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0 && status == 0;
+                check("bluetooth: bt_keys_load frees all key buffers cleanly without UB pointer walk", ok);
+        }
+
+        // HMB-004: bt_att_walk must send 5 bytes (not 7) for ATT_OP_FIND_INFO_REQ (0x04)
+        {
+                b32 pair[2] = {-1, -1};
+                b32 ok = false;
+                if (system_call_4(syscall(socketpair), 1 /* AF_UNIX */, 2 /* SOCK_DGRAM */, 0, (positive)pair) == 0)
+                {
+                        p8 err_rsp[5] = {0x01, 0x04, 0x00, 0x00, 0x0a};
+                        (void)system_call_3(syscall(write), (positive)pair[1], (positive)err_rsp, sizeof(err_rsp));
+                        bt_hog hog;
+                        memory_zero(address_of hog, sizeof(hog));
+                        hog.att = pair[0];
+                        p16 handles[2] = {0, 0};
+                        (void)bt_att_walk(address_of hog, 0x04, 0x0001, 0x0010, 0x2803, bt_describe_visit, handles);
+                        p8 sent[16];
+                        bipolar got = system_call_3(syscall(read), (positive)pair[1], (positive)sent, sizeof(sent));
+                        ok = got == 5 && sent[0] == 0x04;
+                        system_close(pair[0]);
+                        system_close(pair[1]);
+                }
+                check("bluetooth: bt_att_walk sends 5 bytes for FIND_INFO_REQ (0x04) without stack leak", ok);
+        }
+}
+
 b32 main(void)
 {
         machine_hooks();
@@ -2041,6 +2139,7 @@ b32 main(void)
         machine_sntp();
         machine_auto();
         machine_services();
+        machine_bluetooth_regressions();
         return test_report(null);
 }
 #endif /* CHECK_machine */

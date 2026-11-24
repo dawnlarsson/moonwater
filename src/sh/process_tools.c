@@ -3029,9 +3029,9 @@ static b32 process_replay_timing(string_address line, bool address_to advanced,
         string_address at = line;
         p8 kind = 0;
         address_to text = null;
-        if (string_get(at + 1) == ' ' &&
-            (string_get(at) == 'I' || string_get(at) == 'O' ||
-             string_get(at) == 'S' || string_get(at) == 'H'))
+        if ((string_get(at) == 'I' || string_get(at) == 'O' ||
+             string_get(at) == 'S' || string_get(at) == 'H') &&
+            string_get(at + 1) == ' ')
         {
                 address_to advanced = true;
                 kind = string_get(at);

@@ -3925,6 +3925,19 @@ static fn disc_folder_rows(void)
                 rest = rest && disc_music_frames(&extra, 1) == 20000 - DISC_EXTRA_GAP && disc_music_frames(&extra, 0) == 150;
         }
         check("disc mount: DESTROY lets the folder go, and a CD-Extra's last track of music ends at its session's end", rest);
+        {
+                static struct disc_fs bad_fs;
+                static struct disc_toc bad_toc;
+                memory_zero(&bad_fs, sizeof(bad_fs)), memory_zero(&bad_toc, sizeof(bad_toc));
+                bad_toc.first = 1, bad_toc.count = 2, bad_toc.start[0] = 200, bad_toc.start[1] = 100, bad_toc.lead_out = 500;
+                b32 ok_nonmono = disc_fs_take(&bad_fs, &bad_toc) && bad_fs.count == 1 && bad_fs.frames[0] == 400 &&
+                                 disc_fs_size(&bad_fs, 0) == DISC_WAV_HEAD + 400ull * DISC_FRAME;
+                memory_zero(&bad_fs, sizeof(bad_fs)), memory_zero(&bad_toc, sizeof(bad_toc));
+                bad_toc.first = 1, bad_toc.count = 1, bad_toc.start[0] = 500, bad_toc.lead_out = 400;
+                b32 ok_empty = !disc_fs_take(&bad_fs, &bad_toc) && bad_fs.count == 0;
+                check("disc mount: non-monotonic or negative-length TOC tracks are skipped and never wrap file size",
+                      ok_nonmono && ok_empty);
+        }
 }
 
 /*
@@ -6910,6 +6923,193 @@ static fn update_scenes(void)
         update_directories(true);
 }
 
+static fn tools_security_regressions(void)
+{
+        // STF-01: ul_wipefs_wipe_one must pass work (not &work) to storage_each_signature_handle
+        {
+                p8 path[64];
+                string_copy((string_address)path, (string_address) "/tmp/mw_wipefs_reg.");
+                positive_into_string((string_address)(path + string_length((string_address)path)),
+                                     (positive)system_call(syscall(getpid)));
+                bipolar fd = system_call_4(syscall(openat), AT_FDCWD, (positive)path,
+                                           FILE_WRITE | FILE_CREATE | FILE_TRUNCATE | O_CLOEXEC, 0600);
+                b32 ok = false;
+                if (fd >= 0)
+                {
+                        static p8 zeros[8192];
+                        memory_zero(zeros, sizeof(zeros));
+                        memory_copy(zeros + 4096 - 10, "SWAPSPACE2", 10);
+                        (void)system_write_all((positive)fd, zeros, sizeof(zeros));
+                        system_close(fd);
+                        log_flush();
+                        bipolar child = system_fork();
+                        if (child == 0)
+                        {
+                                ul_wipefs_row rows[8];
+                                ul_wipefs_work work = {.rows = rows, .room = 8, .types = null, .count = 0, .failed = false};
+                                b32 rc = ul_wipefs_wipe_one(address_of work, (string_address)path,
+                                                            true, false, 0, true, true);
+                                b32 wiped = rc == 0 && work.count == 1 && !work.failed;
+                                bipolar check_fd = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+                                if (wiped && check_fd >= 0)
+                                {
+                                        p8 magic[10];
+                                        if (system_call_4(syscall(pread64), (positive)check_fd, (positive)magic, 10, 4096 - 10) == 10)
+                                        {
+                                                for (positive i = 0; i < 10; i++)
+                                                        if (magic[i] != 0)
+                                                                wiped = false;
+                                        }
+                                        else
+                                                wiped = false;
+                                        system_close(check_fd);
+                                }
+                                else
+                                        wiped = false;
+                                system_call_1(syscall(exit), wiped ? 0 : 1);
+                        }
+                        b32 status = -1;
+                        if (child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0)
+                                ok = (status == 0);
+                        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, 0);
+                }
+                check("wipefs: ul_wipefs_wipe_one erases swap signature without type confusion or crash", ok);
+        }
+
+        // STF-02: file_random_seed returns < 0 on getrandom failure; ul_swap_uuid must fail closed
+        {
+                log_flush();
+                bipolar child = system_fork();
+                if (child == 0)
+                {
+                        struct { p16 code; p8 jt, jf; p32 k; } filter[] = {
+                            {0x20, 0, 0, 0},
+                            {0x15, 0, 1, (p32)syscall(getrandom)},
+                            {0x06, 0, 0, 0x00050000u | (p32)ENOSYS},
+                            {0x06, 0, 0, 0x7fff0000u},
+                        };
+                        struct { p16 len; address_any filter; } prog = {4, filter};
+                        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0 ||
+                            system_call_3(syscall(prctl), 22, 2, (positive)address_of prog) < 0)
+                                system_call_1(syscall(exit), 2);
+                        file_random_state st;
+                        tools_uuid u;
+                        b32 seeded_neg = file_random_seed(address_of st) < 0;
+                        b32 refused = !ul_swap_uuid(null, address_of u, true);
+                        system_call_1(syscall(exit), (seeded_neg && refused) ? 0 : 1);
+                }
+                b32 status = -1;
+                b32 ok = child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0 && status == 0;
+                check("tools: ul_swap_uuid fails closed when getrandom returns negative errno", ok);
+        }
+
+        // STF-03: grep_set_gather must not overflow the C stack on deep RX_ALT spines
+        {
+                positive branches = 200000;
+                positive pat_len = branches * 3 - 1;
+                p8 address_to pat = (p8 address_to)mmap(null, pat_len + 1, 3 /* PROT_READ|PROT_WRITE */,
+                                                        0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0);
+                b32 ok = false;
+                if (pat && (bipolar)pat > 0)
+                {
+                        for (positive i = 0; i < branches; i++)
+                        {
+                                pat[i * 3] = 'a';
+                                pat[i * 3 + 1] = '.';
+                                if (i + 1 < branches)
+                                        pat[i * 3 + 2] = '|';
+                        }
+                        pat[pat_len] = end;
+                        log_flush();
+                        bipolar child = system_fork();
+                        if (child == 0)
+                        {
+                                regex_program prog;
+                                regex_pool.used = (rx_mark){0};
+                                bool compiled = rx_compile_length(address_of regex_pool, address_of prog,
+                                                                  (string_address)pat, pat_len, true, false, false, 0);
+                                bool gathered = compiled && grep_set_gather(address_of prog, prog.first, false, false);
+                                system_call_1(syscall(exit), (compiled && !gathered) ? 0 : 1);
+                        }
+                        b32 status = -1;
+                        if (child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0)
+                                ok = (status == 0);
+                        munmap(pat, pat_len + 1);
+                }
+                check("grep: grep_set_gather handles 200000 regex alternations without stack overflow", ok);
+        }
+
+        // STF-04: ul_namespace_run_mapper must not allocate unbounded stack VLAs
+        {
+                positive n = 100000;
+                positive bytes = n * sizeof(ul_id_map);
+                ul_id_map address_to ranges = (ul_id_map address_to)mmap(null, bytes, 3, 0x22, -1, 0);
+                b32 ok = false;
+                if (ranges && (bipolar)ranges > 0)
+                {
+                        for (positive i = 0; i < n; i++)
+                                ranges[i] = (ul_id_map){(p32)i, (p32)i, 1};
+                        log_flush();
+                        bipolar child = system_fork();
+                        if (child == 0)
+                        {
+                                (void)ul_namespace_run_mapper(1, false, (ul_id_map){0, 0, 1}, false, ranges, n);
+                                system_call_1(syscall(exit), 0);
+                        }
+                        b32 status = -1;
+                        if (child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0)
+                                ok = (status == 0);
+                        munmap(ranges, bytes);
+                }
+                check("unshare: ul_namespace_run_mapper handles large range_count without stack VLA overflow", ok);
+        }
+
+        // STF-05: rx_hints.shape_minimum must not overflow b16 on aa{32767,}
+        {
+                regex_program prog;
+                regex_pool.used = (rx_mark){0};
+                bool compiled = rx_compile_length(address_of regex_pool, address_of prog,
+                                                  (string_address) "aa{32767,}", 10, true, false, false, 0);
+                static p8 a_buf[32768];
+                memory_fill(a_buf, 'a', sizeof(a_buf));
+                p8 res = compiled ? rx_find(address_of regex_match, address_of prog, REGEX_FIRST, false,
+                                            (string_address)a_buf, sizeof(a_buf), 0)
+                                  : RX_NO_MATCH;
+                check("regex: aa{32767,} matches 32768 a's without 16-bit shape_minimum overflow",
+                      compiled && res == RX_MATCH && regex_match.slots[0] == 0 && regex_match.slots[1] == 32768);
+        }
+
+        // STF-06: process_replay_timing must not read at[1] past NUL on empty timing line
+        {
+                positive page = 65536;
+                p8 address_to buf = (p8 address_to)mmap(null, page * 2, 3, 0x22, -1, 0);
+                b32 ok = false;
+                if (buf && (bipolar)buf > 0)
+                {
+                        (void)mprotect(buf + page, page, 0);
+                        buf[page - 1] = end;
+                        log_flush();
+                        bipolar child = system_fork();
+                        if (child == 0)
+                        {
+                                bool adv = false;
+                                p8 stream = 0;
+                                positive delay = 0, cnt = 0;
+                                string_address txt = null;
+                                b32 got = process_replay_timing((string_address)(buf + page - 1),
+                                                                address_of adv, address_of stream,
+                                                                address_of delay, address_of cnt, address_of txt);
+                                system_call_1(syscall(exit), got == PROCESS_REPLAY_NOT_TIMING ? 0 : 1);
+                        }
+                        b32 status = -1;
+                        if (child > 0 && system_wait4_retry(child, address_of status, 0, null) >= 0)
+                                ok = (status == 0);
+                        munmap(buf, page * 2);
+                }
+                check("scriptreplay: process_replay_timing does not read past NUL on empty line", ok);
+        }
+}
+
 b32 main(void)
 {
         settings_format();
@@ -6938,6 +7138,7 @@ b32 main(void)
         device_open_rows();
         disc_folder_rows();
         disc_folder_kernel();
+        tools_security_regressions();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);

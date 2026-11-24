@@ -26625,23 +26625,40 @@ static bool grep_set_distribute(const regex_program address_to program, rx_ref n
         none or a single byte gives the set up, and the machine or the graph
         asks about the lines the strings land in.
 */
-static bool grep_set_gather(const regex_program address_to program, rx_ref node,
-                            bool icase, bool exact)
+static bool grep_set_gather_at(const regex_program address_to program, rx_ref node,
+                               bool icase, bool exact, positive depth)
 {
         const rx_node address_to nodes = program->nodes;
         grep_set address_to set = address_of grep_literals;
 
-        // An empty branch matches every line, and no string finds that.
-        if (!node)
+        if (depth > 64)
                 return false;
 
-        if (nodes[node].kind == RX_ALT && !nodes[node].next)
-                return grep_set_gather(program, nodes[node].left, icase, exact) &&
-                       grep_set_gather(program, nodes[node].right, icase, exact);
+        for (;;)
+        {
+                // An empty branch matches every line, and no string finds that.
+                if (!node)
+                        return false;
 
-        // Nothing reads what a group captured when there are no references.
-        if (nodes[node].kind == RX_CAPTURE && !nodes[node].next)
-                return grep_set_gather(program, nodes[node].left, icase, exact);
+                // Nothing reads what a group captured when there are no references.
+                if (nodes[node].kind == RX_CAPTURE && !nodes[node].next)
+                {
+                        node = nodes[node].left;
+                        continue;
+                }
+
+                // rx_alternation builds a left-leaning spine of RX_ALT nodes; walk
+                // left iteratively so large alternations do not overflow the stack.
+                if (nodes[node].kind == RX_ALT && !nodes[node].next)
+                {
+                        if (!grep_set_gather_at(program, nodes[node].right, icase, exact, depth + 1))
+                                return false;
+                        node = nodes[node].left;
+                        continue;
+                }
+
+                break;
+        }
 
         positive start = set->used;
         positive grown = 0;
@@ -26701,6 +26718,12 @@ static bool grep_set_gather(const regex_program address_to program, rx_ref node,
             set->bytes + start, set->used - start, icase);
         set->count++;
         return true;
+}
+
+static bool grep_set_gather(const regex_program address_to program, rx_ref node,
+                            bool icase, bool exact)
+{
+        return grep_set_gather_at(program, node, icase, exact, 0);
 }
 
 /*

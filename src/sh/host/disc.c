@@ -74,7 +74,12 @@ static b32 disc_toc_read(bipolar handle, struct disc_toc address_to toc)
                 else
                         toc->start[toc->count] = entry.lba, toc->data[toc->count] = (entry.adr_ctrl >> 4 & DISC_DATA_TRACK) != 0, toc->count++;
         }
-        return toc->count > 0 && toc->lead_out > toc->start[0];
+        if (toc->count <= 0 || toc->lead_out <= toc->start[0])
+                return false;
+        for (int at = 0; at < toc->count; at++)
+                if (toc->start[at] < 0 || (at > 0 && toc->start[at] < toc->start[at - 1]))
+                        return false;
+        return toc->lead_out >= toc->start[toc->count - 1];
 }
 
 static int disc_track_frames(const struct disc_toc address_to toc, int at) { return (at + 1 < toc->count ? toc->start[at + 1] : toc->lead_out) - toc->start[at]; }
@@ -386,7 +391,12 @@ static b32 disc_fs_take(struct disc_fs address_to fs, const struct disc_toc addr
         fs->count = 0, fs->cache_frames = 0;
         for (int at = 0; at < toc->count; at++)
                 if (!toc->data[at])
-                        fs->number[fs->count] = toc->first + at, fs->start[fs->count] = toc->start[at], fs->frames[fs->count++] = disc_music_frames(toc, at);
+                {
+                        int frames = disc_music_frames(toc, at);
+                        if (frames <= 0)
+                                continue;
+                        fs->number[fs->count] = toc->first + at, fs->start[fs->count] = toc->start[at], fs->frames[fs->count++] = frames;
+                }
         return fs->count > 0;
 }
 

@@ -97,7 +97,7 @@ typedef struct
         // node of the set, or none; and whether the end of the text is all
         // that follows the run.
         rx_ref lead_run, lead_next, shape_node;
-        b16 lead_minimum, shape_minimum;
+        b32 lead_minimum, shape_minimum;
         p8 lead_tail, shape;
         // Keeps what follows off the address the walk's stores of its slots
         // alias: without it grep -o and awk match ran a fifth slower on the

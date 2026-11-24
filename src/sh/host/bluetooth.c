@@ -730,11 +730,12 @@ static fn bt_keys_load(bt_link address_to link, bt_book address_to book)
                 device[7] = book->pad[at].type == BT_BREDR ? 1 : 2; // let it page us; connect it when it advertises
                 held = bt_say(link, BT_ADD_DEVICE, device, sizeof(device)) == 0 && held;
         }
-        for (bt_text address_to text = &keys; text <= &params; text++)
+        bt_text address_to texts[] = {address_of keys, address_of ltks, address_of irks, address_of params};
+        for (positive at = 0; at < array_count(texts); at++)
         {
-                if (text->bytes)
-                        crypto_forget(text->bytes, text->used);
-                bt_text_free(text);
+                if (texts[at]->bytes)
+                        crypto_forget(texts[at]->bytes, texts[at]->used);
+                bt_text_free(texts[at]);
         }
 }
 
@@ -1624,7 +1625,7 @@ typedef bool (address_to bt_att_each)(bt_hog address_to hog, const p8 address_to
 
 static bool bt_att_walk(bt_hog address_to hog, p8 ask_code, p16 start, p16 stop, p16 type, bt_att_each visit, address_any context)
 {
-        p8 ask[7], got[BT_ATT_MTU + 1];
+        p8 ask[7] = {0}, got[BT_ATT_MTU + 1];
 
         for (p32 from = start; from && from <= stop;)
         {
@@ -1633,8 +1634,10 @@ static bool bt_att_walk(bt_hog address_to hog, p8 ask_code, p16 start, p16 stop,
 
                 ask[0] = ask_code, bt_put16(ask + 1, from), bt_put16(ask + 3, stop);
                 if (ask_code != 0x04)
+                {
                         bt_put16(ask + 5, type);
                         sent = 7;
+                }
                 size = bt_att_ask(hog, ask, sent, (p8)(ask_code + 1), got, sizeof(got));
                 if (size < 0)
                         return false;
@@ -1679,6 +1682,8 @@ static bool bt_trait_visit(bt_hog address_to hog, const p8 address_to entry, pos
         bt_traits address_to traits = (bt_traits address_to)context;
 
         (void)hog;
+        if (each < 5)
+                return true;
         if (!array_store_reserve(traits->trait, traits->room, traits->count, traits->count + 1, 16))
                 return false;
         traits->trait[traits->count].declare = bt_le16(entry);

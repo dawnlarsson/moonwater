@@ -8575,7 +8575,7 @@ static b32 tools_uuidgen()
         return_if(!count, text_done(0));
 
         file_random_state random;
-        text_refuse(!file_random_seed(address_of random), "kernel random source failed");
+        text_refuse(file_random_seed(address_of random) < 0, "kernel random source failed");
 
         bool time_one = (flags & FILE_FLAG('t')) != 0;
         bool time_six = (flags & FILE_FLAG('6')) != 0;
@@ -8820,7 +8820,7 @@ static b32 tools_mcookie()
         }
 
         file_random_state random;
-        text_refuse(!file_random_seed(address_of random), "kernel random source failed");
+        text_refuse(file_random_seed(address_of random) < 0, "kernel random source failed");
 
         /* Upstream draws 128 kernel bytes.  Four uses of the existing
            32-byte seeder preserve that entropy budget without a direct
@@ -8828,7 +8828,7 @@ static b32 tools_mcookie()
         for (positive round = 1; round < 4; round++)
         {
                 file_random_state additional;
-                text_refuse(!file_random_seed(address_of additional), "kernel random source failed");
+                text_refuse(file_random_seed(address_of additional) < 0, "kernel random source failed");
                 for (positive at = 0; at < array_count(random.words); at++)
                         random.words[at] ^= additional.words[at];
                 (void)file_random_word(address_of random);
@@ -23274,9 +23274,21 @@ static b32 ul_namespace_run_mapper(b32 target, bool group,
                                    ul_id_map address_to ranges,
                                    positive range_count)
 {
+        if (range_count > (positive_max - 1) / 2)
+                return 1;
         positive maximum = has_single + range_count * 2;
-        string_address words[3 * maximum + 3];
-        p8 numbers[11 * (3 * maximum + 1)];
+        if (maximum > (positive_max - 3) / 3)
+                return 1;
+        positive word_count = 3 * maximum + 3;
+        positive number_count = 3 * maximum + 1;
+        if (word_count > positive_max / sizeof(string_address) ||
+            number_count > positive_max / 11)
+                return 1;
+        string_address address_to words = (string_address address_to)utility_arena_take(
+            word_count * sizeof(string_address));
+        p8 address_to numbers = (p8 address_to)utility_arena_take(11 * number_count);
+        if (!words || !numbers)
+                return 1;
         p8 address_to number = numbers;
         positive at = 0;
 
@@ -23559,8 +23571,15 @@ static b32 ul_unshare_time(file_taking address_to taking, bool apply)
 static b32 util_linux_unshare()
 {
         positive count = (positive)program_argument_count();
-        ul_id_map uid_ranges[count];
-        ul_id_map gid_ranges[count];
+        utility_arena.used = 0;
+        if (count > positive_max / sizeof(ul_id_map))
+                return string_report(log_error, 1, "%s: %s\n", "unshare", "too many arguments");
+        ul_id_map address_to uid_ranges = count
+            ? (ul_id_map address_to)utility_arena_take(count * sizeof(ul_id_map)) : null;
+        ul_id_map address_to gid_ranges = count
+            ? (ul_id_map address_to)utility_arena_take(count * sizeof(ul_id_map)) : null;
+        if (count && (!uid_ranges || !gid_ranges))
+                return 1;
         ul_unshare_selection ul_unshare_selected = {.uid = 0, .gid = 0};
         ul_user_mapping map = {.uid_ranges = uid_ranges, .gid_ranges = gid_ranges};
 
@@ -26442,7 +26461,7 @@ static b32 ul_wipefs_wipe_one(ul_wipefs_work address_to work,
         }
 
         (void)storage_each_signature_handle(handle, path, ul_wipefs_collect,
-                                            address_of work);
+                                            work);
         if (work->failed)
         {
                 system_close(handle);
@@ -26796,7 +26815,7 @@ static bool ul_swap_uuid(string_address text, tools_uuid address_to uuid,
                 return false;
 
         file_random_state random;
-        if (!file_random_seed(address_of random))
+        if (file_random_seed(address_of random) < 0)
                 return false;
         tools_uuid_random_bytes(address_of random, uuid);
         tools_uuid_version(uuid->bytes, 6, 4);
@@ -30322,7 +30341,7 @@ static b32 util_linux_ipcmk()
                 return string_report(log_error, 1, "%s: %s\n", "ipcmk", "invalid semaphore count");
 
         file_random_state random;
-        tools_refuse(!file_random_seed(address_of random), "ipcmk", "kernel randomness unavailable");
+        tools_refuse(file_random_seed(address_of random) < 0, "ipcmk", "kernel randomness unavailable");
         bipolar ids[UL_IPC_TYPES] = {-1, -1, -1};
         if (shared)
                 ids[UL_IPC_SHARED] = ul_ipc_create_one(
