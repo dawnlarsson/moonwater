@@ -618,21 +618,23 @@ static unsigned int compositor_moon_glow_frame_for(int band, struct compositor_f
         struct taskbar_view view = compositor_taskbar_view_for(band);
         unsigned int at = (unsigned int)band < WINDOWS_OUTPUTS ? (unsigned int)band : 0;
         int square[4];
-        unsigned long bytes;
+        unsigned long bytes, pitch;
         void *p;
 
         if (taskbar_moon_glow_level() <= 0 || !taskbar_moon_glow_square(&view, square))
                 return 0;
-        bytes = (unsigned long)square[2] * (unsigned long)square[3] * 4;
+        // (its rows on whole 64-byte lines, as a card that finds a picture's row only on a line reads it where it is: no copy of it)
+        pitch = ((unsigned long)square[2] + 15) & ~15ul;
+        bytes = pitch * (unsigned long)square[3] * 4;
         p = compositor_glow[at].pixels;
         if (!mem_buf_grow(&p, &compositor_glow[at].bytes, bytes, MEM_BUF_GPU_FORGET))
                 return compositor_glow[at].pixels = 0, 0;
         compositor_glow[at].pixels = (unsigned int *)p;
-        if (!taskbar_moon_glow(&view, compositor_glow[at].pixels, square))
+        if (!taskbar_moon_glow(&view, compositor_glow[at].pixels, pitch, square))
                 return 0;
         memory_zero(frame, sizeof(*frame));
         frame->x = square[0], frame->y = square[1], frame->width = square[2], frame->height = square[3], frame->scale = view.scale;
-        frame->pixels = compositor_glow[at].pixels, frame->pitch = (unsigned long)square[2], frame->blend = 1, frame->slot = -5, frame->square = 15;
+        frame->pixels = compositor_glow[at].pixels, frame->pitch = pitch, frame->blend = 1, frame->slot = -5, frame->square = 15;
         return 1;
 }
 
@@ -644,6 +646,7 @@ static struct
 {
         unsigned int *pixels;
         unsigned long bytes;
+        unsigned long pitch; // its rows' pitch in pixels: the menu's width in whole 64-byte lines
         int band;  // the band whose moon it is from
         int drawn; // the buffer holds the menu's picture
 } compositor_menu;
@@ -652,11 +655,14 @@ static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
 {
         struct taskbar_view view;
         int rect[4];
-        unsigned long bytes;
+        unsigned long bytes, pitch;
 
         if (!taskbar_menu_rect(rect))
                 return 0;
-        bytes = (unsigned long)rect[2] * (unsigned long)rect[3] * 4;
+        pitch = ((unsigned long)rect[2] + 15) & ~15ul;
+        bytes = pitch * (unsigned long)rect[3] * 4;
+        if (pitch != compositor_menu.pitch) // a menu of another width: its rows lie elsewhere in the buffer
+                compositor_menu.pitch = pitch, compositor_menu.drawn = 0;
         if (compositor_menu.bytes < bytes)
         {
                 void *p = compositor_menu.pixels;
@@ -668,14 +674,14 @@ static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
         if (taskbar_menu_redraw() || !compositor_menu.drawn)
         {
                 view = compositor_band_view_for(compositor_menu.band);
-                taskbar_menu_draw(&view, compositor_menu.pixels);
+                taskbar_menu_draw(&view, compositor_menu.pixels, pitch);
                 compositor_menu.drawn = 1;
                 if (taskbar_menu_redraw()) // a ripple still going: the next frame draws it on
                         compositor_damage(rect[0], rect[1], rect[2], rect[3]);
         }
         memory_zero(frame, sizeof(*frame));
         frame->x = rect[0], frame->y = rect[1], frame->width = rect[2], frame->height = rect[3];
-        frame->scale = compositor.scale, frame->pixels = compositor_menu.pixels, frame->pitch = (unsigned long)rect[2];
+        frame->scale = compositor.scale, frame->pixels = compositor_menu.pixels, frame->pitch = pitch;
         frame->radius = 8 * compositor.scale / 100, frame->line = compositor.scale / 100 > 0 ? compositor.scale / 100 : 1;
         frame->edge = window_mix(compositor_tab_target(0) & 0xffffffu, window_contrast(compositor_tab_target(0)) & 0xffffffu, 48), frame->slot = -5;
         return 1;

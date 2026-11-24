@@ -980,7 +980,7 @@ static int taskbar_moon_glow_was(int band, int shown)
         return taskbar_bands[band].glow_shown = shown, was;
 }
 
-HOT static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *restrict pixels, const int square[4])
+HOT static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *restrict pixels, unsigned long pitch, const int square[4])
 {
         struct taskbar_band address_to band = taskbar_band_cur();
         b64 share = taskbar_moon_share(), level = taskbar_moon_glow_level();
@@ -1001,7 +1001,7 @@ HOT static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *
         for (int py = 0; py < side; py++)
         {
                 decimal dy = py + 0.5 - c, dy2 = dy * dy;
-                unsigned int *restrict row = pixels + (long)py * side;
+                unsigned int *restrict row = pixels + (unsigned long)py * pitch;
                 for (int px = 0; px < side; px++)
                 {
                         decimal dx = px + 0.5 - c, d2 = dx * dx + dy2;
@@ -2001,7 +2001,7 @@ static void taskbar_theme_give(const struct taskbar_theme_saved address_to t)
         ui_kit.mode = t->mode, ui_kit.accent = t->accent, ui_kit.motion = t->motion, ui_kit.made = t->made;
 }
 
-static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_to pixels)
+static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_to pixels, unsigned long pitch)
 {
         struct ui address_to ui = &taskbar_menu.ui;
         struct windows address_to table = compositor.table;
@@ -2013,7 +2013,7 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
         memory_zero(ui, sizeof(*ui));
         ui->engine = view->engine, ui->regular = view->face, ui->bold = view->bold ? view->bold : view->face;
         ui->scale = taskbar_scaled(view->scale), ui->opaque = 1;
-        ui->pixels = pixels, ui->pitch = (unsigned long)taskbar_menu.width, ui->width = taskbar_menu.width;
+        ui->pixels = pixels, ui->pitch = pitch, ui->width = taskbar_menu.width;
         ui->height = ui->bottom = taskbar_menu.height;
         ui_inks(ui, compositor_tab_target(0) & 0xffffffu);
         ui->scratch = scratch, ui->scratch_width = sw, ui->scratch_scale = ss;
@@ -2038,7 +2038,7 @@ static int taskbar_menu_build(const struct taskbar_view *view, const int rect[4]
         ui_popmenu_build(&taskbar_menu.menu, specs, count);
         taskbar_menu.width = taskbar_menu.height = 1;
         taskbar_theme_take(&theme);
-        taskbar_menu_ui(view, null);
+        taskbar_menu_ui(view, null, (unsigned long)taskbar_menu.width);
         ui_popmenu_size(&taskbar_menu.ui, &taskbar_menu.menu, view->height / 2);
         taskbar_theme_give(&theme);
         taskbar_menu.width = taskbar_menu.menu.width, taskbar_menu.height = taskbar_menu.menu.height;
@@ -2070,12 +2070,12 @@ static int taskbar_menu_open(const struct taskbar_view *view)
         return taskbar_menu_build(view, rect, specs, (int)(sizeof(specs) / sizeof(specs[0])));
 }
 
-static fn taskbar_menu_draw(const struct taskbar_view *view, unsigned int address_to pixels)
+static fn taskbar_menu_draw(const struct taskbar_view *view, unsigned int address_to pixels, unsigned long pitch)
 {
         struct taskbar_theme_saved theme;
 
         taskbar_theme_take(&theme);
-        taskbar_menu_ui(view, pixels);
+        taskbar_menu_ui(view, pixels, pitch);
         ui_clear(&taskbar_menu.ui);
         ui_kit.now = (b64)ui_kit_clock();
         ui_popmenu_draw(&taskbar_menu.ui, &taskbar_menu.menu);
