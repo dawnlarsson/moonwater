@@ -23,6 +23,22 @@
 #define GPU_MODEL_CARD
 #include "../gpu_model.c"
 /*
+        The chip the section is built for. CHECK_gpu_model is an RDNA2 card's rows. CHECK_gpu_model9 is the same rows with the model a gfx9
+        chip (Vega, Raven to Cezanne) and gpu.c's kernels and packets gfx9's (GPU_MODEL_GFX9, which test/checks.c defines for it): the words
+        are the 9_ arrays the build makes of the same gpu.asm, a kernel's first resource word is gfx9's, and the rows that are of gfx10's own
+        words or of what gpu.c does not do on gfx9 (the stress file, the texture unit's read, the compiler's kernels) say so and are not run.
+        One row is gfx9's alone: the scene kernel's two builds drawn against each other.
+*/
+#ifdef GPU_MODEL_GFX9
+#define MODEL_K(name) gpu_k_9_##name
+#define MODEL_RSRC1 0x00ac0000u
+#define MODEL_RSRC1_MASK (~0x3ffu)
+#else
+#define MODEL_K(name) gpu_k_##name
+#define MODEL_RSRC1 0xe0ac0000u
+#define MODEL_RSRC1_MASK (~63u)
+#endif
+/*
         The model of the card (test/gpu_model.c) held to the card and to itself, on a machine with no card. Its decoder is gpuasm's table
         (the two are compared row by row) and takes every word gpuasm makes and nothing else: every instruction of the six kernels and of
         test/gpu_stress.asm goes there and back unchanged, and words of forms gpuasm does not make are refused with their place. The row that
@@ -67,6 +83,20 @@ static unsigned int model_hash(void)
         gpu_model_card_reset();
         return gpu_test_hash();
 }
+
+#ifdef GPU_MODEL_GFX9
+// The staged kernel drawn as an RDNA2 card draws it: gfx10's packets from gpu.c, and the model reading the words as gfx10's.
+static b32 model_draw_ten(positive ops_at, unsigned int n, positive bins_at, positive pic_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
+                          unsigned int dy0, unsigned int dx1, unsigned int dy1)
+{
+        b32 drawn;
+
+        gpu_model.isa = 0, gpu_amd_gfx_major = 0;
+        drawn = gpu_model_draw_staged(ops_at, n, bins_at, pic_at, pitch, w, h, dx0, dy0, dx1, dy1);
+        gpu_model.isa = 9, gpu_amd_gfx_major = 9;
+        return drawn;
+}
+#endif
 
 // gpu_scene with the cut at binning off (gpu.c's gpu_cut_off): the drawing the cut is held to.
 static b32 model_draw_uncut(positive ops_at, unsigned int n, positive bins_at, positive pic_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
@@ -134,7 +164,7 @@ static b32 model_seen(unsigned int handle)
 }
 
 static unsigned int model_source[64 * 4];
-static unsigned int model_mutant_word, model_mutant[sizeof(gpu_k_scene) / 4];
+static unsigned int model_mutant_word, model_mutant[sizeof(MODEL_K(scene)) / 4];
 
 // gpu.asm assembled here by gpuasm, for its labels: a kernel's label's first and last word in gpuasm_words.
 static b32 model_asm_ready;
@@ -178,8 +208,8 @@ static void model_say_number(char address_to into, unsigned int room, const char
 */
 static void model_coverage(const char address_to name, unsigned int k, unsigned int address_to ran, unsigned int address_to of)
 {
-        const p32 *code = gpu_kernels[k].words + 2;
-        unsigned int words = (unsigned int)(gpu_kernels[k].size / 4 - 2), gaps = 0, from = 0, missed = 0;
+        const p32 *code = gpu_set->kernels[k].words + 2;
+        unsigned int words = (unsigned int)(gpu_set->kernels[k].size / 4 - 2), gaps = 0, from = 0, missed = 0;
         positive first = 0, stop = 0;
         b32 labelled = model_kernel_span(name, &first, &stop), in_gap = false;
         static char said[2048];
@@ -240,17 +270,21 @@ b32 main()
                 const char *name;
                 const unsigned int *words;
                 unsigned int size;
-        } kernels[] = {{"copy", gpu_k_copy, sizeof(gpu_k_copy)}, {"fill", gpu_k_fill, sizeof(gpu_k_fill)},     {"tone", gpu_k_tone, sizeof(gpu_k_tone)},
-                       {"glass", gpu_k_glass, sizeof(gpu_k_glass)}, {"scene", gpu_k_scene, sizeof(gpu_k_scene)}, {"scale", gpu_k_scale, sizeof(gpu_k_scale)},
-                       {"image", gpu_k_image, sizeof(gpu_k_image)}, {"nv12", gpu_k_nv12, sizeof(gpu_k_nv12)}};
+        } kernels[] = {{"copy", MODEL_K(copy), sizeof(MODEL_K(copy))}, {"fill", MODEL_K(fill), sizeof(MODEL_K(fill))},     {"tone", MODEL_K(tone), sizeof(MODEL_K(tone))},
+                       {"glass", MODEL_K(glass), sizeof(MODEL_K(glass))}, {"scene", MODEL_K(scene), sizeof(MODEL_K(scene))}, {"scale", MODEL_K(scale), sizeof(MODEL_K(scale))},
+                       {"image", MODEL_K(image), sizeof(MODEL_K(image))}, {"nv12", MODEL_K(nv12), sizeof(MODEL_K(nv12))}};
         unsigned int hash, instructions = 0, stop = 0, total = 0;
         b32 same, all = true;
 
+#ifdef GPU_MODEL_GFX9
+        gpu_model_card_chip(9); // every row from here is a gfx9 chip's: the decoder's layouts, gpu.c's kernel set and packets
+#endif
         // The decoder's table is gpuasm's own, row for row, and its clamps are gpuasm's.
         same = sizeof(gpuasm_ops) / sizeof(gpuasm_ops[0]) == GM_NAMED && GM_IDS == GM_NAMED + 1 && string_equals((string_address)gpu_model_names[GM_NAMED].name, (string_address) "s_nop");
         for (unsigned int k = 0; same && k < GM_NAMED; k++)
                 same = string_equals((string_address)gpu_model_names[k].name, gpuasm_ops[k].name) && gpu_model_names[k].form == gpuasm_ops[k].form &&
-                       gpu_model_names[k].code == gpuasm_ops[k].code && string_equals((string_address)gpu_model_names[k].shape, gpuasm_ops[k].shape);
+                       gpu_model_names[k].code == gpuasm_ops[k].code && gpu_model_code9[k] == gpuasm_ops[k].code9 &&
+                       string_equals((string_address)gpu_model_names[k].shape, gpuasm_ops[k].shape);
         same = same && sizeof(gpu_model_clamps) / sizeof(gpu_model_clamps[0]) == sizeof(gpuasm_clamps) / sizeof(gpuasm_clamps[0]);
         for (unsigned int k = 0; same && k < sizeof(gpuasm_clamps) / sizeof(gpuasm_clamps[0]); k++)
                 same = string_equals((string_address)gpu_model_clamps[k], gpuasm_clamps[k]);
@@ -263,10 +297,20 @@ b32 main()
 
                 if (!back)
                         string_format(log, "  gpu model: %s stops at word %p: %s\n", kernels[k].name, (positive)stop, gpu_model.fault.text);
-                all = all && back && (kernels[k].words[0] & ~63u) == 0xe0ac0000u && kernels[k].words[1] == 0x18cu, total += instructions;
+                all = all && back && (kernels[k].words[0] & MODEL_RSRC1_MASK) == MODEL_RSRC1 && kernels[k].words[1] == 0x18cu, total += instructions;
         }
         string_format(log, "gpu model: %p instructions of the eight kernels decoded and made again\n", (positive)total);
         check("gpu model: every word of copy, fill, tone, glass, scene, scale, image and nv12 decodes to an instruction of gpuasm's, and goes there and back unchanged", all && total > 1000);
+#ifdef GPU_MODEL_GFX9
+        string_format(log, "gpu model: test/gpu_stress.asm round trip NOT RUN -- the file is every form gfx10 takes (s102 on, null, literals in long encodings), and gfx9 takes fewer\n");
+        // What gfx9 has not is refused: a long encoding with gfx10's top bits, a literal in a long one (v_mad_u32_u24 v5, v5, s21 and a literal), a second scalar
+        // register there (v_mad_u32_u24 v31, v30, s80, s61), a scalar register past s101 (s_mov_b32 s0, s102), null (v_mad_u64_u32's carry), and the forms
+        // gpuasm makes on no chip: a VOP3 with neg, a scalar load with glc, a global load with slc, SOPK.
+        check("gpu model: a word gfx9 does not take (gfx10's long encoding, a literal or a second scalar register in a long one, s102, null) or in a form gpuasm does not make is refused",
+              model_refuses(0xd76f0001u, 0x04010c06u) && model_refuses(0xd1c30005u, 0x03fe2b05u) && model_refuses(0xd1c3001fu, 0x00f4a11eu) && model_refuses(0xbe800066u, 0) &&
+                  model_refuses(0xd1e87d34u, 0x02007f30u) && model_refuses(0xd2000001u, 0x24010c06u) && model_refuses(0xc0030202u, 0) && model_refuses(0xdc528000u, 0x04080002u) &&
+                  model_refuses(0xb0000000u, 0));
+#else
         {
                 static p8 text[1 << 20];
                 bipolar got = file_slurp((string_address) "test/gpu_stress.asm", text, sizeof(text));
@@ -290,8 +334,9 @@ b32 main()
               model_refuses(0xbe800505u, 0) && model_refuses(0x7e0002f9u, 0x06060000u) && model_refuses(0xd76f0001u, 0x24010c06u) && model_refuses(0xf4090202u, 0xfa000000u) &&
                   model_refuses(0xdc328000u, 0x04080002u) && model_refuses(0xcc0d4805u, 0x1a002d05u) && model_refuses(0xb0000000u, 0) &&
                   model_refuses(0xd76f0101u, 0x04010c06u) && model_refuses(0x7e02027cu, 0) && model_refuses(0xdacc0004u, 0x2d003d2cu));
+#endif
         {
-                static const unsigned int bad[] = {0xe0ac0000u, 0x18cu, 0xbf800000u, 0xbe800505u, 0xbf810000u};
+                static const unsigned int bad[] = {MODEL_RSRC1, 0x18cu, 0xbf800000u, 0xbe800505u, 0xbf810000u};
                 static unsigned int out[64];
                 struct gpu_model_region r = {0x10000, sizeof(out), (p8 address_to)out, GPU_MODEL_READ | GPU_MODEL_WRITE};
                 int failed = gpu_model_run(bad, 5, 0x10000, 1, 1, &r, 1);
@@ -314,7 +359,7 @@ b32 main()
                 for (unsigned int i = 0; i < 2 * 128; i++)
                         d[i] = 0x5a5a5a5au;
                 a->d = r.va + 256, a->dp = 128, a->w = 100, a->op = 1, a->v = 0xff102030u, a->rows = 2;
-                failed = gpu_model_run(gpu_k_fill, sizeof(gpu_k_fill) / 4, r.va, 2, 2, &r, 1);
+                failed = gpu_model_run(MODEL_K(fill), sizeof(MODEL_K(fill)) / 4, r.va, 2, 2, &r, 1);
                 for (unsigned int y = 0; y < 2; y++)
                         for (unsigned int x = 0; x < 128; x++)
                                 right = right && d[y * 128 + x] == (x < 100 ? 0xff102030u : 0x5a5a5a5au);
@@ -344,7 +389,7 @@ b32 main()
                         d[i] = 0x5a5a5a5au;
                 a->s = r.va + 256, a->ops = r.va + 256 + YP * SH, a->g = r.va + (positive)((p8 address_to)tab - memory), a->d = r.va + (positive)((p8 address_to)d - memory);
                 a->sp = YP, a->gp = UP, a->dp = DP, a->w = W, a->op = 9, a->rows = H;
-                failed = gpu_model_run(gpu_k_nv12, sizeof(gpu_k_nv12) / 4, r.va, (W + 63) / 64, H, &r, 1);
+                failed = gpu_model_run(MODEL_K(nv12), sizeof(MODEL_K(nv12)) / 4, r.va, (W + 63) / 64, H, &r, 1);
                 for (unsigned int y = 0; y < H; y++)
                         for (unsigned int x = 0; x < DP; x++)
                         {
@@ -418,7 +463,7 @@ b32 main()
         // One bit of one word of the card's copy of the scene kernel flipped (boxpixel's linear-light v_lshrrev_b32 v47, 12, v47 made 13): the model runs it to its end and the hash is another.
         {
                 p32 address_to code = (p32 address_to)((p8 address_to)gpu.at + gpu_kernel_at[6]);
-                unsigned int words = (unsigned int)(gpu_kernels[6].size - 8) / 4, found = 0;
+                unsigned int words = (unsigned int)(gpu_set->kernels[6].size - 8) / 4, found = 0;
 
                 gpu_model.code_va = 0;
                 for (unsigned int at = 0; at < words && !found;)
@@ -427,7 +472,8 @@ b32 main()
 
                         if (gpu_model_decode(code + at, words - at, 4ull * at, &in))
                                 break;
-                        if (in.id == gpu_model_find(GM_VOP2, 0x16) && !in.e64 && in.op[0] == 256 + 47 && in.op[1] == 128 + 12 && in.op[2] == 256 + 47)
+                        if (string_equals((string_address)gpu_model_names[in.id].name, (string_address) "v_lshrrev_b32") && !in.e64 && in.op[0] == 256 + 47 &&
+                            in.op[1] == 128 + 12 && in.op[2] == 256 + 47)
                                 found = at + 1;
                         at += in.words;
                 }
@@ -447,7 +493,7 @@ b32 main()
                 b32 staged;
 
                 gpu_model_card_reset();
-                staged = gpu_model_stage(gpu_k_scene, sizeof(gpu_k_scene) / 4);
+                staged = gpu_model_stage(MODEL_K(scene), sizeof(MODEL_K(scene)) / 4);
                 wrong = gpu_model_card_differential(gpu_model_draw_shipped, gpu_model_draw_staged, 0x2545f491u, 200, &d);
                 string_format(log, "gpu model differential: the scene kernel against a staged copy of it, %p scenes from the seed 0x2545f491, %p records, %p pixels: %p differ, %p failed%s%s\n",
                               (positive)d.scenes, d.records, d.pixels, wrong, (positive)d.failed, d.failed ? ": " : "", gpu_model.fault.text);
@@ -458,7 +504,7 @@ b32 main()
 
                         model_coverage("scene", 6, &ran, &of); // what the differential's scenes run
                 }
-                memory_copy(model_mutant, gpu_k_scene, sizeof(gpu_k_scene));
+                memory_copy(model_mutant, MODEL_K(scene), sizeof(MODEL_K(scene)));
                 model_mutant[2 + model_mutant_word] ^= 1;
                 staged = model_mutant_word && gpu_model_stage(model_mutant, sizeof(model_mutant) / 4);
                 wrong = gpu_model_card_differential(gpu_model_draw_shipped, gpu_model_draw_staged, 0x2545f491u, 200, &d);
@@ -466,6 +512,18 @@ b32 main()
                               (positive)d.x, (positive)d.y, (positive)d.one, (positive)d.two);
                 check("gpu model: and with the mutant staged in its place, pixels differ and the first is named", staged && wrong > 0 && !d.failed);
                 gpu_model_card.staged_words = 0;
+#ifdef GPU_MODEL_GFX9
+                // The two builds of the scene kernel against each other: the same scenes drawn by the gfx9 words on the gfx9 card and by the gfx10.3 words staged,
+                // which are read and dispatched as an RDNA2 card's (model_draw_ten). The gfx10.3 words are the ones a card's hash holds.
+                gpu_model_card_reset();
+                staged = gpu_model_stage(gpu_k_scene, sizeof(gpu_k_scene) / 4);
+                wrong = gpu_model_card_differential(gpu_model_draw_shipped, model_draw_ten, 0x2545f491u, 200, &d);
+                string_format(log, "gpu model differential: gfx9's scene kernel against gfx10.3's staged, %p scenes from the seed 0x2545f491, %p records, %p pixels: %p differ, %p failed%s%s\n",
+                              (positive)d.scenes, d.records, d.pixels, wrong, (positive)d.failed, d.failed ? ": " : "", gpu_model.fault.text);
+                check("gpu model: the scene kernel as built for gfx9 draws 200 random scenes of every kind of record as the gfx10.3 words do, pixel for pixel",
+                      staged && !wrong && !d.failed && d.records > 1000);
+                gpu_model_card.staged_words = 0;
+#endif
                 // The cut at binning (gpu.c's gpu_record_holds and bins_skip): the same scenes binned without it and with it draw the same, and what the waves
                 // ran with each (the model's cost) says what it saved; then over scenes of a desktop's stack, windows whole over one another, where it is meant to.
                 {
@@ -551,15 +609,20 @@ b32 main()
                 if (got > 0 && (positive)got + 1 < sizeof(text))
                 {
                         text[got] = 0;
+#ifdef GPU_MODEL_GFX9
+                        model_asm_ready = gpuasm_assemble_isa((string_address) "src/canvas/gpu.asm", text, GPUASM_GFX9, (string_address) "9_") &&
+                                          string_find((string_address)gpuasm_output, (string_address) "gpu_k_9_scene") != 0;
+#else
                         model_asm_ready = gpuasm_assemble((string_address) "src/canvas/gpu.asm", text) &&
                                           string_find((string_address)gpuasm_output, (string_address)"gpu_k_scene") != 0;
+#endif
                 }
                 if (model_asm_ready)
                 {
                         positive first = 0, stop = 0;
 
-                        same = model_kernel_span("scene", &first, &stop) && stop - first == sizeof(gpu_k_scene) / 4 - 2 &&
-                               !memory_compare(gpuasm_words + first, gpu_k_scene + 2, sizeof(gpu_k_scene) - 8);
+                        same = model_kernel_span("scene", &first, &stop) && stop - first == sizeof(MODEL_K(scene)) / 4 - 2 &&
+                               !memory_compare(gpuasm_words + first, MODEL_K(scene) + 2, sizeof(MODEL_K(scene)) - 8);
                         check("gpu model: gpu.asm as gpuasm makes it here is the scene kernel the build wrote (artifacts/gpu_kernels.inc is the source's)", same);
                 }
                 else
@@ -672,6 +735,14 @@ b32 main()
                 model_coverage("scale", 7, &ran, &of);
         }
 
+#ifdef GPU_MODEL_GFX9
+        // gpu.c reads no picture through the texture unit on gfx9 (its resource words are another generation's: gpu_image_ok stays off), so those rows are not
+        // gfx9's. The NV12 kernel is, and its test at a card's start is held here.
+        string_format(log, "gpu model: the texture unit's rows (op 8) NOT RUN -- gpu.c makes no image resource for gfx9, and the pictures go by the kernels' own loads\n");
+        gpu_model_card_reset();
+        check("gpu model: gpu_nv12_test (the NV12 kernel held at the card's start to the processor's colour, exactly) passes on the model card", gpu_nv12_test() && !gpu_model.fault.code);
+        gpu_model_card_reset();
+#else
         // The texture unit's read (op 8): gpu.c's own test of it (the one a card is held to at its start) passes on the model, every pixel of a picture read
         // through a linear resource is the picture's, straight and with red and blue the other way; a tiled or compressed resource is not the model's to read.
         {
@@ -830,6 +901,8 @@ b32 main()
                 gpu_model_card_reset();
         }
 
+#endif
+#ifndef GPU_MODEL_GFX9
         // The scene kernels a compiler made (gpu_cp and gpu_bx, ops 4 and 5, for widths that are not a multiple of 4) are in forms gpuasm does not make: the model does not run them.
         {
                 const struct
@@ -858,6 +931,7 @@ b32 main()
                                       (positive)refused, (positive)words, gpu_model.fault.text);
                 }
         }
+#endif
         gpu_model_card_stop();
         return test_report(null);
 }
@@ -1531,8 +1605,8 @@ b32 main()
 
         // The coverage of CHECK_gpu_kit's scenes: the scene kernel's instructions they ran, and the bytes in its code where each run of the ones they did not begins.
         {
-                const p32 *code = gpu_kernels[6].words + 2;
-                unsigned int words = (unsigned int)(gpu_kernels[6].size / 4 - 2), ran = 0, of = 0;
+                const p32 *code = gpu_set->kernels[6].words + 2;
+                unsigned int words = (unsigned int)(gpu_set->kernels[6].size / 4 - 2), ran = 0, of = 0;
                 b32 gap = false;
 
                 string_format(log, "gpu model kit coverage: the scene kernel's instructions not run by these blocks begin at the bytes:");

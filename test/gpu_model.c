@@ -26,6 +26,11 @@
         a scalar load's address with its low two bits dropped, s_bfe_u32's fields (offset bits 0 to 4, width 16 to 22), the shift counts
         of the 32-bit shifts as their low five bits, s_and_saveexec_b64's SCC (the new exec is not zero).
 
+        gfx9. The same model runs a gfx9 kernel's words (gpu_model.isa 9): the decoder reads gfx9's encodings to the same instructions, and
+        what they do is taken to be what gfx10's do (the instructions the kernels use are in both, under the names LLVM gives each). What
+        is gfx9's own and not modelled: how many scalar registers the first resource word's count gives a wave (the decoder holds the
+        registers to s0 to s101 and the count is the assembler's), and the registers a gfx9 chip keeps for itself past them.
+
         Not modelled: timing, the ring, the caches, packets other than the ones gpu_amd_submit sends, LDS, a workgroup of more than one wave,
         wave32, scratch. Use (what P2 and the workers after call):
 
@@ -95,6 +100,9 @@ static struct
         // the model takes from the documentation, each of which a row turns the other way to ask whether GPU_TEST_HASH decides it
         p32 poison;
         unsigned int nudge, doubt;
+        // and the chip whose words these are: 0 gfx10 (RDNA2), 9 gfx9 (Vega, Raven to Cezanne), whose encodings the decoder reads to the same
+        // instructions (gpu_model/decode.c) and whose first resource word is its own (gpu_model_dispatch)
+        unsigned int isa;
         // what was run, each code word's count (an instruction's first word), and the failure
         struct gpu_model_cost cost;
         p32 hits[GPU_MODEL_CODE];

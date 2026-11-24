@@ -74,6 +74,19 @@ static const struct gpu_model_name
     {"s_nop", GM_SOPP, 0x00, ""},
 };
 #define GM_IDS (sizeof(gpu_model_names) / sizeof(gpu_model_names[0]))
+
+// The same rows' opcodes on gfx9 (gpuasm's third column, in the table's order; s_nop last): the model decodes a gfx9 kernel's words to the same
+// rows, and what differs in the encodings themselves is in gpu_model_decode.
+static const p16 gpu_model_code9[] = {
+    0x00, 0x01, 0x20, 0x00, 0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x0c, 0x0e, 0x1c, 0x1e, 0x24, 0x25,
+    0x0d, 0x0f, 0x13, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x00, 0x02, 0x03, 0x04, 0x05, 0x0c, 0x0d,
+    0x01, 0x0c, 0x02, 0x04, 0x05, 0x08, 0x00, 0x01, 0x02, 0x03, 0x01, 0x06, 0x07, 0x22, 0x27, 0x34,
+    0x35, 0x36, 0x13, 0x15, 0x10, 0x12, 0x0d, 0x0c, 0x08, 0x05, 0x11, 0x0f, 0x0e, 0xca, 0xcd, 0xcc,
+    0xcb, 0xc9, 0xce, 0xc4, 0xc3, 0xc1, 0xc6, 0xec, 0xeb, 0x100, 0x1c2, 0x1c3, 0x1d7, 0x1ff, 0x200, 0x1fd,
+    0x1ce, 0x1ed, 0x1c8, 0x285, 0x1e8, 0x119, 0x1c, 0x0d, 0x0b, 0x3f, 0x10, 0x12, 0x14, 0x17, 0x1c, 0x1f,
+    0x00, 0x00,
+};
+typedef char gpu_model_code9_rows[sizeof(gpu_model_code9) / sizeof(gpu_model_code9[0]) == sizeof(gpu_model_names) / sizeof(gpu_model_names[0]) ? 1 : -1];
 #define GM_NAMED 97 // the rows of gpuasm's table (the last row, s_nop, is the padding's)
 
 // gpuasm_clamps: the rows that take clamp.
@@ -91,10 +104,16 @@ struct gpu_model_insn
         b32 imm;
 };
 
+// A row's opcode on the chip the model is (gpu_model.isa: 9 gfx9, else gfx10).
+static p16 gpu_model_code_of(unsigned int id)
+{
+        return gpu_model.isa == 9 ? gpu_model_code9[id] : gpu_model_names[id].code;
+}
+
 static int gpu_model_find(p8 form, p16 code)
 {
         for (unsigned int at = 0; at < GM_IDS; at++)
-                if (gpu_model_names[at].form == form && gpu_model_names[at].code == code)
+                if (gpu_model_names[at].form == form && gpu_model_code_of(at) == code)
                         return (int)at;
         return -1;
 }
@@ -154,6 +173,14 @@ static p32 gpu_model_field(p32 word, unsigned int at, unsigned int bits)
 /*
         The instruction at the words (room of them readable) at pc: its decoding in out, 0, or the failure. The layouts are gfx10's (the RDNA2
         ISA's encodings); the fixed bits are the ones gpuasm_instruction writes.
+
+        gfx9 (gpu_model.isa 9), where it is another layout, as gpuasm writes it there: the long vector encodings' top bits (0x34, the packed
+        ones among them from opcode 0x380), a short encoding's opcodes in the long one from 0x100 and a VOP1's from 0x140, a source the
+        instruction does not have 0, a scalar load's own top bits with the offset an immediate, the lane permute's opcode a bit lower, a
+        global's offset thirteen bits and its base of off 127, an image with no dim, lgkmcnt four bits. A carry's add (v_add_co_u32) has a
+        short encoding there. What comes out is the same instruction in the same numbering (a base of off 125, a wait's counters as gfx10
+        packs them), so the wave runs it as it runs gfx10's. And what gfx9 has not is refused: a scalar register past s101, null, a literal
+        in a long encoding, a second scalar register there.
 */
 static int gpu_model_decode(const p32 address_to at, unsigned int room, positive pc, struct gpu_model_insn address_to out)
 {
@@ -164,6 +191,8 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
         const char *shape;
         unsigned int literals = 0, scalars = 0, first = 1;
         p32 keys[5];
+        const b32 nine = gpu_model.isa == 9;
+        const p16 unused = nine ? 0 : 128; // what a source the instruction does not have holds
 
         memory_zero(out, sizeof(*out));
         out->words = 1;
@@ -180,6 +209,9 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                 else if ((id = gpu_model_find(GM_VOP2C, (p16)top)) >= 0)
                         out->op[0] = (p16)(256 + gpu_model_field(w0, 17, 8)), out->op[1] = 106, out->op[2] = (p16)(w0 & 0x1ff), out->op[3] = (p16)(256 + gpu_model_field(w0, 9, 8)),
                         out->op[4] = 106;
+                else if (nine && (id = gpu_model_find(GM_VOP3B, (p16)(0x100 + top))) >= 0) // gfx9's short carry add: the carry in vcc
+                        out->op[0] = (p16)(256 + gpu_model_field(w0, 17, 8)), out->op[1] = 106, out->op[2] = (p16)(w0 & 0x1ff), out->op[3] = (p16)(256 + gpu_model_field(w0, 9, 8)),
+                        out->op[4] = unused;
                 if (id < 0)
                         return gpu_model_unknown(w0, pc, "a vector opcode not in gpuasm's table");
         }
@@ -192,7 +224,16 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                 else if (head == 0x17e)
                         id = gpu_model_find(GM_SOPC, (p16)gpu_model_field(w0, 16, 7)), out->op[0] = (p16)(w0 & 0xff), out->op[1] = (p16)gpu_model_field(w0, 8, 8);
                 else if (head == 0x17f)
+                {
                         id = gpu_model_find(GM_SOPP, (p16)gpu_model_field(w0, 16, 7)), out->imm = (b32)(b16)(w0 & 0xffff);
+                        if (nine && id >= 0 && gpu_model_names[id].shape[0] == 'w')
+                        {
+                                // gfx9's lgkmcnt is bits 8 to 11, and 15 there is no wait for it: the counters as gfx10 packs them
+                                if (w0 & 0x3000)
+                                        return gpu_model_unknown(w0, pc, "a wait with bits gfx9's has not");
+                                out->imm = (b32)((w0 & 0xc0ff) | (gpu_model_field(w0, 8, 4) == 15 ? 63u : gpu_model_field(w0, 8, 4)) << 8);
+                        }
+                }
                 else if ((w0 >> 28) == 0xb)
                         return gpu_model_unknown(w0, pc, "SOPK, which gpuasm does not make");
                 else
@@ -208,21 +249,29 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                 if (room < 2)
                         return gpu_model_unknown(w0, pc, "a long encoding with no second word");
                 out->words = 2;
-                if (head == 0x3d)
+                if (head == (nine ? 0x30u : 0x3du))
                 {
                         id = gpu_model_find(GM_SMEM, (p16)gpu_model_field(w0, 18, 8));
                         out->op[0] = (p16)gpu_model_field(w0, 6, 7), out->op[1] = (p16)((w0 & 0x3f) << 1), out->imm = (b32)(w1 << 11) >> 11;
                         fixed = (w0 & 0x3e000u) | (p64)(w1 & 0xffe00000u) << 32, want = 0xfa000000ull << 32; // glc, dlc and the bits between clear; no offset register
+                        if (nine)
+                                want = 0x20000u; // the offset an immediate (bit 17), no glc, nv or offset register, and nothing above the offset
                 }
-                else if (head == 0x35)
+                else if (nine && head == 0x34 && gpu_model_field(w0, 16, 10) >= 0x380)
                 {
-                        p32 code = gpu_model_field(w0, 16, 10);
+                        id = gpu_model_find(GM_VOP3P, (p16)gpu_model_field(w0, 16, 7));
+                        out->clamp = (p8)gpu_model_field(w0, 15, 1), out->op[0] = (p16)(256 + (w0 & 0xff)), out->op[1] = (p16)(w1 & 0x1ff), out->op[2] = (p16)gpu_model_field(w1, 9, 9);
+                        fixed = (w0 & 0x7f00u) | (p64)(w1 & 0xfffc0000u) << 32, want = 0x4000u | (p64)(3u << 27) << 32; // op_sel_hi set, the third source 0
+                }
+                else if (head == (nine ? 0x34u : 0x35u))
+                {
+                        p32 code = gpu_model_field(w0, 16, 10), one = nine ? 0x140 : 0x180; // where a VOP1's opcodes begin in the long encoding
 
                         if ((id = gpu_model_find(GM_VOP3, (p16)code)) < 0 && (id = gpu_model_find(GM_VOP3B, (p16)code)) < 0)
                                 id = code < 0x100                   ? gpu_model_find(GM_VOPC, (p16)code)
                                      : code < 0x140                 ? (gpu_model_find(GM_VOP2, (p16)(code - 0x100)) >= 0 ? gpu_model_find(GM_VOP2, (p16)(code - 0x100))
                                                                                                                        : gpu_model_find(GM_VOP2C, (p16)(code - 0x100)))
-                                     : code >= 0x180 && code < 0x200 ? gpu_model_find(GM_VOP1, (p16)(code - 0x180))
+                                     : code >= one && code < one + 0x80 ? gpu_model_find(GM_VOP1, (p16)(code - one))
                                                                      : -1;
                         if (id < 0)
                                 return gpu_model_unknown(w0, pc, "a VOP3 opcode not in gpuasm's table");
@@ -236,7 +285,7 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                                 out->op[1] = (p16)(w1 & 0x1ff), out->op[2] = (p16)gpu_model_field(w1, 9, 9), out->op[3] = (p16)gpu_model_field(w1, 18, 9);
                         fixed = (form == GM_VOP3B || form == GM_VOP2C ? 0 : w0 & 0x7f00u) | (p64)(w1 & 0xf8000000u) << 32; // abs and op_sel, omod and neg
                 }
-                else if ((w0 >> 23) == 0x198)
+                else if (!nine && (w0 >> 23) == 0x198)
                 {
                         id = gpu_model_find(GM_VOP3P, (p16)gpu_model_field(w0, 16, 7));
                         out->clamp = (p8)gpu_model_field(w0, 15, 1), out->op[0] = (p16)(256 + (w0 & 0xff)), out->op[1] = (p16)(w1 & 0x1ff), out->op[2] = (p16)gpu_model_field(w1, 9, 9);
@@ -244,9 +293,9 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                 }
                 else if (head == 0x36)
                 {
-                        id = gpu_model_find(GM_DS, (p16)gpu_model_field(w0, 18, 8));
+                        id = gpu_model_find(GM_DS, (p16)gpu_model_field(w0, nine ? 17 : 18, 8));
                         out->op[0] = (p16)(256 + (w1 >> 24)), out->op[1] = (p16)(256 + (w1 & 0xff)), out->op[2] = (p16)(256 + gpu_model_field(w1, 8, 8));
-                        fixed = (w0 & 0x3ffffu) | (p64)(w1 & 0xff0000u) << 32; // no offsets, no gds, no second datum
+                        fixed = (w0 & (nine ? 0x1ffffu : 0x3ffffu)) | (p64)(w1 & 0xff0000u) << 32; // no offsets, no gds, no second datum
                 }
                 else if (head == 0x37)
                 {
@@ -259,6 +308,15 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                         out->op[0] = (p16)(256 + (store ? w1 & 0xff : w1 >> 24)), out->op[1] = (p16)(256 + (store ? gpu_model_field(w1, 8, 8) : w1 & 0xff));
                         out->op[2] = (p16)gpu_model_field(w1, 16, 7), out->imm = (b32)(w0 << 20) >> 20;
                         fixed = (w0 & 0x0203f000u) | (p64)((w1 & 0x800000u) | (store ? w1 & 0xff000000u : w1 & 0xff00u)) << 32, want = 0x8000u; // global; no dlc, lds, glc, slc or nv
+                        if (nine) // the offset is thirteen bits, and a base of off is 127: 125 here, as everywhere after
+                        {
+                                out->imm = (b32)(w0 << 19) >> 19;
+                                fixed = (w0 & 0x0203e000u) | (p64)((w1 & 0x800000u) | (store ? w1 & 0xff000000u : w1 & 0xff00u)) << 32;
+                                if (out->op[2] == 125)
+                                        return gpu_model_unknown(w0, pc, "a base gfx9 does not have");
+                                if (out->op[2] == 127)
+                                        out->op[2] = 125;
+                        }
                 }
                 else if (head == 0x3c)
                 {
@@ -266,7 +324,7 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                         // the address, the data and the resource's first register over four in the second word, no sampler.
                         id = gpu_model_find(GM_MIMG, (p16)gpu_model_field(w0, 18, 7));
                         out->op[0] = (p16)(256 + gpu_model_field(w1, 8, 8)), out->op[1] = (p16)(256 + (w1 & 0xff)), out->op[2] = (p16)(gpu_model_field(w1, 16, 5) * 4);
-                        fixed = (w0 & ~(0x7fu << 18 | 0xfu << 8)) | (p64)(w1 & 0xffe00000u) << 32, want = 0xf0001008u;
+                        fixed = (w0 & ~(0x7fu << 18 | 0xfu << 8)) | (p64)(w1 & 0xffe00000u) << 32, want = nine ? 0xf0001000u : 0xf0001008u;
                         if (gpu_model_field(w0, 8, 4) != 0xf && gpu_model_field(w0, 8, 4) != 1)
                                 return gpu_model_unknown(w0, pc, "an image dmask gpuasm does not write (0xf or 0x1)");
                         out->imm = (b32)gpu_model_field(w0, 8, 4);
@@ -292,8 +350,8 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                 return 0;
         }
         // The long form's unused third source is 128, as gpuasm writes it; the short forms and the long one of a VOP1 the same for the second.
-        if ((form == GM_VOP1 && out->e64 && (out->op[2] != 128 || out->op[3] != 128)) || ((form == GM_VOP2 || form == GM_VOPC) && out->e64 && out->op[3] != 128) ||
-            ((form == GM_VOP3 || form == GM_VOP3B) && out->count < 4 + (form == GM_VOP3B) && out->op[out->count] != 128))
+        if ((form == GM_VOP1 && out->e64 && (out->op[2] != unused || out->op[3] != unused)) || ((form == GM_VOP2 || form == GM_VOPC) && out->e64 && out->op[3] != unused) ||
+            ((form == GM_VOP3 || form == GM_VOP3B) && out->count < 4 + (form == GM_VOP3B) && out->op[out->count] != unused))
                 return gpu_model_unknown(w0, pc, "a source gpuasm leaves unused that is not 0");
         for (unsigned int k = 0; k < out->count; k++)
         {
@@ -308,6 +366,8 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                         letter = 's'; // the long form takes any source where the short takes a vector register
                 if (!gpu_model_class(letter, size, out->op[k], form == GM_VOP3P, form == GM_GLD || form == GM_GST))
                         return gpu_model_unknown(w0, pc, "an operand gpuasm does not write there");
+                if (nine && ((out->op[k] >= 102 && out->op[k] <= 105) || (out->op[k] == 125 && letter == 'n')))
+                        return gpu_model_unknown(w0, pc, "a register gfx9 does not have (a scalar past s101, or null)");
                 if (out->op[k] == 255 && letter != 'p' && letter != 'm' && letter != 'n' && letter != 'b')
                         literals++;
                 // The long encodings read two scalar values at most (gpuasm counts a pair and a single of one register as two).
@@ -326,6 +386,8 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
         }
         if (scalars > 2)
                 return gpu_model_unknown(w0, pc, "more than two scalar values to an instruction");
+        if (nine && out->words == 2 && (form == GM_VOP3 || form == GM_VOP3B || form == GM_VOP3P || out->e64) && (literals || scalars > 1))
+                return gpu_model_unknown(w0, pc, "a literal or a second scalar register in a long encoding, which gfx9 does not take");
         if (literals)
         {
                 if (room < out->words + 1u)
@@ -340,7 +402,9 @@ static unsigned int gpu_model_encode(const struct gpu_model_insn address_to in, 
 {
         const struct gpu_model_name *row = gpu_model_names + in->id;
         const p16 *o = in->op;
-        p32 code = row->code, clamp = (p32)in->clamp << 15;
+        const b32 nine = gpu_model.isa == 9;
+        p32 code = gpu_model_code_of(in->id), clamp = (p32)in->clamp << 15;
+        p32 head = nine ? 0xd0000000u : 0xd4000000u, unused = nine ? 0 : 128; // a long vector encoding's top bits, and a source it has not
         unsigned int words = 1;
         b32 literal = false;
 
@@ -351,17 +415,25 @@ static unsigned int gpu_model_encode(const struct gpu_model_insn address_to in, 
         case GM_SOP1: out[0] = 0xbe800000u | (p32)o[0] << 16 | code << 8 | o[1]; break;
         case GM_SOP2: out[0] = 0x80000000u | code << 23 | (p32)o[0] << 16 | (p32)o[2] << 8 | o[1]; break;
         case GM_SOPC: out[0] = 0xbf000000u | code << 16 | (p32)o[1] << 8 | o[0]; break;
-        case GM_SOPP: out[0] = 0xbf800000u | code << 16 | ((p32)in->imm & 0xffff); break;
-        case GM_SMEM: out[0] = 0xf4000000u | code << 18 | (p32)o[0] << 6 | (p32)o[1] >> 1, out[1] = 0xfa000000u | ((p32)in->imm & 0x1fffff), words = 2; break;
+        case GM_SOPP:
+                out[0] = 0xbf800000u | code << 16 | ((p32)in->imm & 0xffff);
+                if (nine && row->shape[0] == 'w') // lgkmcnt in four bits, 15 for no wait
+                        out[0] = 0xbf800000u | code << 16 | ((p32)in->imm & 0xc0ff) | (((p32)in->imm >> 8 & 63) == 63 ? 15u : (p32)in->imm >> 8 & 15) << 8;
+                break;
+        case GM_SMEM:
+                out[0] = 0xf4000000u | code << 18 | (p32)o[0] << 6 | (p32)o[1] >> 1, out[1] = 0xfa000000u | ((p32)in->imm & 0x1fffff), words = 2;
+                if (nine)
+                        out[0] = 0xc0020000u | code << 18 | (p32)o[0] << 6 | (p32)o[1] >> 1, out[1] = (p32)in->imm & 0x1fffff;
+                break;
         case GM_VOP1:
         case GM_VOP2:
         case GM_VOPC:
                 if (in->e64)
                 {
-                        p32 base = row->form == GM_VOP1 ? 0x180 : row->form == GM_VOP2 ? 0x100 : 0;
+                        p32 base = row->form == GM_VOP1 ? (nine ? 0x140 : 0x180) : row->form == GM_VOP2 ? 0x100 : 0;
 
-                        out[0] = 0xd4000000u | (base + code) << 16 | clamp | (row->form == GM_VOPC ? o[0] : (p32)o[0] - 256);
-                        out[1] = o[1] | (p32)(row->form == GM_VOP1 ? 128 : o[2]) << 9 | 128u << 18, words = 2;
+                        out[0] = head | (base + code) << 16 | clamp | (row->form == GM_VOPC ? o[0] : (p32)o[0] - 256);
+                        out[1] = o[1] | (p32)(row->form == GM_VOP1 ? unused : o[2]) << 9 | unused << 18, words = 2;
                 }
                 else if (row->form == GM_VOP1)
                         out[0] = 0x7e000000u | ((p32)o[0] - 256) << 17 | code << 9 | o[1];
@@ -372,21 +444,34 @@ static unsigned int gpu_model_encode(const struct gpu_model_insn address_to in, 
                 break;
         case GM_VOP2C:
                 if (in->e64)
-                        out[0] = 0xd4000000u | (0x100u + code) << 16 | (p32)o[1] << 8 | ((p32)o[0] - 256), out[1] = o[2] | (p32)o[3] << 9 | (p32)o[4] << 18, words = 2;
+                        out[0] = head | (0x100u + code) << 16 | (p32)o[1] << 8 | ((p32)o[0] - 256), out[1] = o[2] | (p32)o[3] << 9 | (p32)o[4] << 18, words = 2;
                 else
                         out[0] = code << 25 | ((p32)o[0] - 256) << 17 | ((p32)o[3] - 256) << 9 | o[2];
                 break;
-        case GM_VOP3: out[0] = 0xd4000000u | code << 16 | clamp | ((p32)o[0] - 256), out[1] = o[1] | (p32)o[2] << 9 | (p32)(in->count > 3 ? o[3] : 128) << 18, words = 2; break;
+        case GM_VOP3: out[0] = head | code << 16 | clamp | ((p32)o[0] - 256), out[1] = o[1] | (p32)o[2] << 9 | (p32)(in->count > 3 ? o[3] : unused) << 18, words = 2; break;
         case GM_VOP3B:
-                out[0] = 0xd4000000u | code << 16 | clamp | (p32)o[1] << 8 | ((p32)o[0] - 256), out[1] = o[2] | (p32)o[3] << 9 | (p32)(in->count > 4 ? o[4] : 128) << 18, words = 2;
+                if (nine && in->words == 1) // gfx9's short carry add
+                {
+                        out[0] = (code - 0x100u) << 25 | ((p32)o[0] - 256) << 17 | ((p32)o[3] - 256) << 9 | o[2];
+                        break;
+                }
+                out[0] = head | code << 16 | clamp | (p32)o[1] << 8 | ((p32)o[0] - 256), out[1] = o[2] | (p32)o[3] << 9 | (p32)(in->count > 4 ? o[4] : unused) << 18, words = 2;
                 break;
-        case GM_VOP3P: out[0] = 0xcc000000u | code << 16 | clamp | 1u << 14 | ((p32)o[0] - 256), out[1] = o[1] | (p32)o[2] << 9 | 128u << 18 | 3u << 27, words = 2; break;
-        case GM_DS: out[0] = 0xd8000000u | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[2] - 256) << 8 | ((p32)o[0] - 256) << 24, words = 2; break;
-        case GM_MIMG: out[0] = 0xf0001008u | (p32)in->imm << 8 | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[0] - 256) << 8 | ((p32)o[2] >> 2) << 16, words = 2; break;
+        case GM_VOP3P:
+                out[0] = (nine ? 0xd3800000u : 0xcc000000u) | code << 16 | clamp | 1u << 14 | ((p32)o[0] - 256), out[1] = o[1] | (p32)o[2] << 9 | unused << 18 | 3u << 27, words = 2;
+                break;
+        case GM_DS: out[0] = 0xd8000000u | code << (nine ? 17 : 18), out[1] = ((p32)o[1] - 256) | ((p32)o[2] - 256) << 8 | ((p32)o[0] - 256) << 24, words = 2; break;
+        case GM_MIMG:
+                out[0] = (nine ? 0xf0001000u : 0xf0001008u) | (p32)in->imm << 8 | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[0] - 256) << 8 | ((p32)o[2] >> 2) << 16, words = 2;
+                break;
         case GM_GLD:
-                out[0] = 0xdc008000u | code << 18 | ((p32)in->imm & 0xfff), out[1] = ((p32)o[1] - 256) | (p32)o[2] << 16 | ((p32)o[0] - 256) << 24, words = 2;
+                out[0] = 0xdc008000u | code << 18 | ((p32)in->imm & (nine ? 0x1fffu : 0xfffu)),
+                out[1] = ((p32)o[1] - 256) | (p32)(nine && o[2] == 125 ? 127 : o[2]) << 16 | ((p32)o[0] - 256) << 24, words = 2;
                 break;
-        default: out[0] = 0xdc008000u | code << 18 | ((p32)in->imm & 0xfff), out[1] = ((p32)o[0] - 256) | ((p32)o[1] - 256) << 8 | (p32)o[2] << 16, words = 2; break;
+        default:
+                out[0] = 0xdc008000u | code << 18 | ((p32)in->imm & (nine ? 0x1fffu : 0xfffu)),
+                out[1] = ((p32)o[0] - 256) | ((p32)o[1] - 256) << 8 | (p32)(nine && o[2] == 125 ? 127 : o[2]) << 16, words = 2;
+                break;
         }
         if (literal)
                 out[words++] = in->literal;

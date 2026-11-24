@@ -336,7 +336,7 @@ describe()
         audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
         issues) echo "the window table's issue board (window.c): a set, an update in place, a clear by code or by key, a full board, and a hostile copy (CHECK_issues)" ;;
         osk) echo "the on-screen keyboard: the headless compositor, a terminal with the keys and the keyboard, typed on by the pointer (a capital, the numbers page, a held Back), the shell's files are the proof (test/osk_e2e.sh)" ;;
-        gpumodel) echo "the model of the card, test/gpu_model.c: gpu.c's self-test drawn by it against GPU_TEST_HASH, the decoder against gpuasm, a mutant kernel, records past their buffers, coverage and cost (CHECK_gpu_model), and CHECK_gpu_kit's card rows on it against the processor (CHECK_gpu_model_kit); both gate rows" ;;
+        gpumodel) echo "the model of the card, test/gpu_model.c: gpu.c's self-test drawn by it against GPU_TEST_HASH, the decoder against gpuasm, a mutant kernel, records past their buffers, coverage and cost (CHECK_gpu_model), and CHECK_gpu_kit's card rows on it against the processor (CHECK_gpu_model_kit), and both again with the model a gfx9 chip (CHECK_gpu_model9, CHECK_gpu_model_kit9); all gate rows" ;;
         band) echo "the band's launcher button end to end: the headless compositor says launcher_button down the machine script's FIFO, the answer starts the launcher beside the button, a second press puts it away (test/desktop_e2e.sh)" ;;
         gpulists) echo "the apps' draw lists on the card: the headless compositor with the settings and the mixer, the card's screen against canvas gpu off, the table's list state, a toggle and a kill (test/gpu_lists_e2e.sh)" ;;
         gpuanim)  echo "the animations sampled as the scan image is written: the headless card's screen in three sessions (lists on, lists off, the processor), each animation step counted for torn, foreign and flipflop frames (test/gpu_anim_flicker.sh)" ;;
@@ -1301,7 +1301,7 @@ gpu_kernels_ready()
 gpu_kernels_wanted()
 {
         case " $* " in
-        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DCHECK_gpu_scene "* | *" -DCHECK_gpu_model "* | *" -DCHECK_gpu_model_kit "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
+        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DCHECK_gpu_scene "* | *" -DCHECK_gpu_model "* | *" -DCHECK_gpu_model_kit "* | *" -DCHECK_gpu_model9 "* | *" -DCHECK_gpu_model_kit9 "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
         esac
         case $source_file in
         programs/*)
@@ -8003,10 +8003,28 @@ gate_gpu_model_kit()
                 fonts/inter/Inter-Bold.ttf
 }
 
+#       The same two sections with the model a gfx9 chip (CHECK_gpu_model9, CHECK_gpu_model_kit9: the words gpuasm makes of the kernels for
+#       gfx9, decoded as gfx9, under the gfx9 set and its packets), the proof the Vega set has where no such card is.
+gate_gpu_model9()
+{
+        freestanding_check gpu_model9 "$work/gpu-model9-check" || return 1
+        "$work/gpu-model9-check"
+}
+
+gate_gpu_model_kit9()
+{
+        freestanding_check gpu_model_kit9 "$work/gpu-model-kit9-check" || return 1
+        "$work/gpu-model-kit9-check" fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf \
+                fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf \
+                fonts/inter/Inter-Bold.ttf
+}
+
 lane_gpumodel()
 {
         gate_row gpu-model gate_gpu_model
         gpumodel_light=$?
+        gate_row gpu-model9 gate_gpu_model9 || gpumodel_light=$?
+        gate_row gpu-model-kit9 gate_gpu_model_kit9 || gpumodel_light=$?
         gate_row gpu-model-kit gate_gpu_model_kit || return $?
         return "$gpumodel_light"
 }
@@ -8152,6 +8170,8 @@ lane_gate()
         job hard gate_row gpu-kit gate_gpu_kit
         job hard gate_row gpu-model gate_gpu_model
         job hard gate_row gpu-model-kit gate_gpu_model_kit
+        job hard gate_row gpu-model9 gate_gpu_model9
+        job hard gate_row gpu-model-kit9 gate_gpu_model_kit9
         job hard gate_row issues gate_issues
         job hard gate_row seal python3 test/function_audit.py --check
         # The source lints of lane_kit that take seconds: in no gate, dropped_results rose from 66 to 79 sites and

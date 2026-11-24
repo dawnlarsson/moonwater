@@ -155,21 +155,36 @@ static void gpu_model_card_submit(positive ib_va, unsigned int ib_bytes, const p
         }
 }
 
+// The chip the model card is: an RDNA2 one (0), or a gfx9 one (9). gpu.c's kernel set and the generation its packets are made for, as
+// gpu_start leaves them for such a card, and the model's decoding (gpu_model.isa). A card started after is that chip.
+static void gpu_model_card_chip(unsigned int chip)
+{
+        gpu_model.isa = chip, gpu_backend = &gpu_amd, gpu_set = chip == 9 ? &gpu_amd_gfx9 : &gpu_amd_rdna2;
+        gpu_amd_gfx_major = chip == 9 ? 9 : 0, gpu_amd_gfx_minor = gpu_amd_gfx_rev = 0, gpu_gfx103 = 0;
+}
+
 // The card's buffer as gpu_start makes it for bytes of the caller's (and the self-test's megabyte), with the kernels copied in.
 static b32 gpu_model_card_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + GPU_MODEL_STAGE + (1 << 20) + 4095) & ~4095ull;
         long at = system_call_6(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
 
+#ifdef GPU_MODEL_GFX9
+        if (gpu_model.isa != 9) // a section built for the gfx9 card (CHECK_gpu_model_kit9): every card it starts is one
+                gpu_model_card_chip(9);
+#endif
         if (at < 0 && at > -4096)
                 return false;
         gpu_model_card.buffer = (p8 address_to)at, gpu_model_card.bytes = size, gpu_model_card.staged_at = size - (1 << 20) - GPU_MODEL_STAGE, gpu_model_card.staged_words = 0;
         gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)at, gpu.size = size, gpu.pending = 0, gpu.imports = 0, gpu.broken = 0, gpu_map_count = 0;
-        for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
+        for (unsigned int i = 0, here = 1024; i < gpu_set->count; i++)
         {
+                unsigned int bytes_k = gpu_set->kernels[i].size > 8 ? gpu_set->kernels[i].size - 8 : 0; // (a set has no kernel for an op it does not draw)
+
                 gpu_kernel_at[i] = here;
-                memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
-                here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
+                if (bytes_k)
+                        memory_copy((p8 address_to)gpu.at + here, gpu_set->kernels[i].words + 2, bytes_k);
+                here = (here + bytes_k + 255) & ~255u;
         }
         gpu_srgb_upload();
         gpu_model_card_reset();

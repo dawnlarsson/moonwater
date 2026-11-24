@@ -45,6 +45,22 @@
 */
 
 /*
+        CHECK_gpu_model9 and CHECK_gpu_model_kit9 are CHECK_gpu_model and
+        CHECK_gpu_model_kit with GPU_MODEL_GFX9 set: the model of the card a
+        gfx9 chip, and gpu.c's kernels and packets gfx9's (test/checks/gpu_model.c,
+        test/gpu_model/card.c). They stand ahead of the chain, since every
+        piece that asks for one of the two sections is theirs too.
+*/
+#if defined(CHECK_gpu_model9) && !defined(CHECK_gpu_model)
+#define CHECK_gpu_model
+#define GPU_MODEL_GFX9
+#endif
+#if defined(CHECK_gpu_model_kit9) && !defined(CHECK_gpu_model_kit)
+#define CHECK_gpu_model_kit
+#define GPU_MODEL_GFX9
+#endif
+
+/*
         The one macro every section may use, so it stands ahead of the chain:
         BENCH_ALTERNATE times two runs in the order a trial asks for. An even
         trial takes first then second, an odd one second then first, so

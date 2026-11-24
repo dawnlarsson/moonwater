@@ -311,7 +311,8 @@ static int gpu_model_dispatch(const p32 address_to code, unsigned int words, pos
 
         gpu_model.code = code, gpu_model.code_words = words < GPU_MODEL_CODE ? words : GPU_MODEL_CODE, gpu_model.code_va = code_va, gpu_model.pc = code_va;
         gpu_model.vgprs = ((rsrc1 & 63) + 1) * 4;
-        if ((rsrc1 & ~63u) != 0xe0ac0000u || rsrc2 != 0x18cu)
+        // gfx9's first word has no forward progress, memory ordering or workgroup mode (the top three bits), and has the scalar registers' count in eights
+        if ((gpu_model.isa == 9 ? (rsrc1 & ~0x3ffu) != 0x00ac0000u : (rsrc1 & ~63u) != 0xe0ac0000u) || rsrc2 != 0x18cu)
         {
                 if (gpu_model_fail(GPU_MODEL_DISPATCH, "resource words the model does not take: "))
                         return gpu_model.fault.code;
