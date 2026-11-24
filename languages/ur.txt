@@ -26,6 +26,7 @@
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
+# machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 @language ur
 @name اردو
 @translated machine
@@ -233,6 +234,7 @@ menu_bin_open	8797	ردی کی ٹوکری کھولیں
 menu_bin_restore	4799	واپس رکھیں
 menu_close_others	26f3	دوسرے ٹیب بند کریں
 menu_close_tab	eb40	ٹیب بند کریں
+menu_columns	6fdc	کالم
 menu_copy	43e0	کاپی
 menu_copy_named	fb68	%s کاپی کریں
 menu_copy_row	f3c8	قطار نقل کریں

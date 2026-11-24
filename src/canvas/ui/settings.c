@@ -3170,10 +3170,12 @@ static struct ui_columns address_to settings_columns_for(int list)
         struct ui_columns address_to c;
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
                 return null;
+        // Each table's name, which the columns a person hid in it are kept by (ui_columns.key).
+        static const char address_to const keys[SETTINGS_LISTS] = {"settings.wifi", "settings.bluetooth", "settings.devices", "settings.waterlink", "settings.startup"};
         c = &settings_large->columns[list];
         if (!c->count)
         {
-                c->sorted = c->hover = c->held = -1, c->count = specs[list].count;
+                c->sorted = c->hover = c->held = -1, c->count = specs[list].count, c->key = keys[list];
                 for (int k = 1; k < specs[list].count; k++)
                         c->width[k] = specs[list].w[k];
                 if (specs[list].at_end)

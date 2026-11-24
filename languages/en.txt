@@ -205,6 +205,7 @@ menu_bin_open	8797	Open the bin
 menu_bin_restore	4799	Put back
 menu_close_others	26f3	Close Other Tabs
 menu_close_tab	eb40	Close Tab
+menu_columns	6fdc	Columns
 menu_copy	43e0	&Copy
 menu_copy_named	fb68	Copy %s
 menu_copy_row	f3c8	Copy row

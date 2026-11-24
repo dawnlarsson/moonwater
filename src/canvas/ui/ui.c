@@ -6678,6 +6678,7 @@ LANGUAGE_ID(menu_bin_open, "Open the bin") \
 LANGUAGE_ID(menu_bin_restore, "Put back") \
 LANGUAGE_ID(menu_close_others, "Close Other Tabs") \
 LANGUAGE_ID(menu_close_tab, "Close Tab") \
+LANGUAGE_ID(menu_columns, "Columns") \
 LANGUAGE_ID(menu_copy, "&Copy") \
 LANGUAGE_ID(menu_copy_named, "Copy %s") \
 LANGUAGE_ID(menu_copy_row, "Copy row") \
@@ -16762,6 +16763,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
 
 // A popup an app opens:
 struct ui_list;
+struct ui_columns;
 
 struct ui_popup
 {
@@ -16775,6 +16777,7 @@ struct ui_popup
         int list_row;                    // the row id that list menu was opened for (-1 none)
         int list_cell;                   // the column of that row the hand was on (ui_list_cell_at), -1 none: its words are Copy <title>'s
         char list_cell_label[96];        // that item's words, Copy and the column's title
+        struct ui_columns address_to columns; // the table whose column checks the menu has (ui_columns_menu_add), or none
 };
 
 // A picture of the menu, into the buffer the compositor is not reading.
@@ -16865,8 +16868,10 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
 static b32 ui_popmenu_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                          int x, int y, int width, int height, unsigned int flags, b32 touch)
 {
-        // A popup takes the pointer from its parent: no parent button stays seen as held once the menu is up.
+        // A popup takes the pointer from its parent: no parent button stays seen as held once the menu is up. A menu is no table's columns'
+        // until the one that has them says so after it is open (ui_columns_menu_open, ui_list_menu_open).
         ui_kit.buttons = 0;
+        p->columns = null;
         if (p->open)
                 windows_leave(&p->own);
         p->open = false;
@@ -23122,6 +23127,7 @@ _Static_assert(UI_COLUMNS_MOST <= 32, "a row's cell checks are bits of an unsign
 #define UI_COLUMNS_SORTED 1u // ui_columns_event: the order asked for changed (sorted, descending)
 #define UI_COLUMNS_DRAW 2u   // something of the header is to be drawn again (a width, a hover)
 #define UI_COLUMNS_TAKEN 4u  // the event was the header's
+#define UI_COLUMNS_MENU 8u   // the right button went down on the header: its menu of the columns is asked for (ui_columns_menu_open)
 
 struct ui_columns
 {
@@ -23140,6 +23146,10 @@ struct ui_columns
         int need[UI_COLUMNS_MOST];  // logical pixels each column needs not to cut its widest words, padding included (ui_columns_need), 0 none known
         unsigned int square;        // the kit's (ui_list_columns_fit): columns whose every cell is a check or one glyph no wider than one, and which
                                     // so are as wide as their row is high, their check, their glyph and their title in the middle (ui_columns_pad)
+        unsigned int hidden;        // the columns the person hid (bit k, column k; never the first, the label's), from the menu of the header or of a
+                                    // row's first cell (ui_columns_menu_add): laid out none wide, and kept under key (ui_columns_keep)
+        const char address_to key;  // the app's name for the table, which the columns hidden are kept by (UI_COLUMNS_PATH), or none: not kept
+        b32 kept;                   // the kit's: what was kept for key has been read
         struct ui_splitter split;
 };
 
@@ -23220,6 +23230,8 @@ struct ui_row
 #define UI_LIST_MENU_EXTRA 0x103 // the first id an app gives its own menu item (ui_list_menu.extra); the base items are below it
 #define UI_LIST_MENU_REMOVE_ROW 0xfe // Remove of a row the app marks removable (ui_row.remove) and gives no Remove of its own: ui_list.removed
 #define UI_LIST_MENU_COPY_CELL 0xff // Copy <column>: the words of the cell the hand was on (ui_popup.list_cell), named by its column's title
+#define UI_LIST_MENU_COLUMN 0xe0 // a table's column k shown or hidden (ui_columns_menu_add): this and k, the ids below the base items'
+_Static_assert(UI_LIST_MENU_COLUMN + UI_COLUMNS_MOST <= UI_LIST_MENU_REMOVE_ROW, "a table's column checks have ids of their own");
 
 #define UI_LIST_MENU_HAS_COPY 1u      // row has copyable text (else Copy / Copy row are disabled)
 #define UI_LIST_MENU_HAS_COPY_ROW 2u  // include the second copy item (Copy row / Copy label and value)
@@ -25069,8 +25081,17 @@ static int ui_list_cell_at(const struct ui_list address_to l, int id, int x)
 #define UI_CELL_CHECK 18
 #define UI_CELL_CHECK_REACH 8
 
-// The last column, the one whose end is the header's.
-static inline int ui_columns_last(const struct ui_columns address_to c) { return c->count - 1; }
+// Whether column k is hidden (ui_columns.hidden): never the first.
+static inline b32 ui_columns_hidden(const struct ui_columns address_to c, int k) { return c && k > 0 && k < UI_COLUMNS_MOST && (c->hidden >> k & 1u); }
+
+// The last column shown, the one whose end is the header's.
+static inline int ui_columns_last(const struct ui_columns address_to c)
+{
+        int k = c->count - 1;
+        while (k > 0 && ui_columns_hidden(c, k))
+                k--;
+        return k > 0 ? k : 0;
+}
 
 /*
         What a column keeps between its edge and its words, its check or its title (device pixels; after, at its end as read): the inset at the
@@ -25375,6 +25396,178 @@ static inline fn ui_columns_forget(struct ui_columns address_to c)
 }
 
 /*
+        The columns a person hid, kept across runs: UI_COLUMNS_PATH has a line a table, its key (ui_columns.key), a tab, how many columns it
+        had, a tab, and the hidden ones' bits, in decimal. A table with no column hidden has no line. A line of another count of columns is
+        another table's, an older one, and is not taken. The file is the kit's, beside the canvas's other files in /root, and ui_app_run
+        names it: a check's kit, which runs no app, reads and writes none.
+*/
+#define UI_COLUMNS_PATH "/root/canvas.columns"
+static const char address_to ui_columns_path;
+
+struct ui_columns_file
+{
+        p8 address_to text;
+        positive used, room;
+};
+
+// The whole file, its bytes and a 0 after them; text null when it is not there or is no regular file.
+static struct ui_columns_file ui_columns_file_read(void)
+{
+        struct ui_columns_file f = {null, 0, 0};
+        struct ui_apps_facts facts;
+        bipolar handle, got;
+        if (!ui_columns_path || (handle = system_open_at(AT_FDCWD, (string_address)ui_columns_path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)) < 0)
+                return f;
+        memory_zero(&facts, sizeof(facts));
+        if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) == 0 && (facts.mode & 0170000u) == 0100000u &&
+            (f.text = (p8 address_to)memory_checked(f.room = (positive)facts.size + 1)))
+        {
+                got = system_read_retry((positive)handle, f.text, (positive)facts.size);
+                f.used = got > 0 ? (positive)got : 0, f.text[f.used] = 0;
+        }
+        system_close(handle);
+        return f;
+}
+
+static fn ui_columns_file_free(struct ui_columns_file address_to f)
+{
+        if (f->text)
+                memory_free(f->text, f->room);
+        f->text = null;
+}
+
+// Where a line of the file starts (at) whose key is key: its length to its newline, or 0 for none.
+static positive ui_columns_line(const struct ui_columns_file address_to f, const char address_to key, positive address_to at)
+{
+        positive length = string_length((string_address)key);
+        for (positive from = 0; f->text && from < f->used;)
+        {
+                positive stop = from;
+                while (stop < f->used && f->text[stop] != '\n')
+                        stop++;
+                if (stop - from > length && f->text[from + length] == '\t' && !memory_compare(f->text + from, key, length))
+                        return *at = from, stop - from;
+                from = stop + 1;
+        }
+        return 0;
+}
+
+// What was kept for a table, read once, when it is first laid out: its hidden columns, where its count is the one kept.
+static fn ui_columns_kept(struct ui_columns address_to c)
+{
+        struct ui_columns_file f;
+        positive at = 0, length;
+        if (c->kept || !c->key || !c->key[0])
+                return;
+        c->kept = true, f = ui_columns_file_read();
+        if ((length = ui_columns_line(&f, c->key, &at)) > 0)
+        {
+                const p8 address_to p = f.text + at + string_length((string_address)c->key) + 1, address_to stop = f.text + at + length;
+                positive count = 0, bits = 0;
+                for (; p < stop && *p >= '0' && *p <= '9'; p++)
+                        count = count * 10 + (positive)(*p - '0');
+                if (p < stop && *p == '\t')
+                        for (p++; p < stop && *p >= '0' && *p <= '9'; p++)
+                                bits = bits * 10 + (positive)(*p - '0');
+                if (count == (positive)c->count && count <= UI_COLUMNS_MOST)
+                        c->hidden = (unsigned int)bits & ((1u << count) - 1u) & ~1u;
+        }
+        ui_columns_file_free(&f);
+}
+
+// A table's hidden columns kept: its line put in the place of the one it had (none when nothing is hidden), the file written whole and
+// put in the place of the old one, so a reader sees one or the other.
+static fn ui_columns_keep(const struct ui_columns address_to c)
+{
+        struct ui_columns_file f;
+        positive key = c->key ? string_length((string_address)c->key) : 0, path, at = 0, length, used = 0, room, made;
+        p8 address_to text, address_to temp;
+        bipolar handle;
+        b32 whole = false;
+        if (!key || !ui_columns_path)
+                return;
+        f = ui_columns_file_read(), length = ui_columns_line(&f, c->key, &at);
+        room = f.used + key + 48, path = string_length((string_address)ui_columns_path);
+        text = (p8 address_to)memory_checked(room), temp = (p8 address_to)memory_checked(path + 48);
+        if (text && temp)
+        {
+                // The other tables' lines as they were, then this one's.
+                if (length)
+                        memory_copy(text, f.text, at), used = at, at += length + (at + length < f.used);
+                else
+                        at = 0;
+                memory_copy(text + used, f.text ? f.text + at : text, f.used - at), used += f.used - at;
+                if (used && text[used - 1] != '\n')
+                        text[used++] = '\n';
+                if (c->hidden)
+                {
+                        memory_copy(text + used, c->key, key), used += key, text[used++] = '\t';
+                        used += positive_into_string(text + used, (positive)c->count), text[used++] = '\t';
+                        used += positive_into_string(text + used, (positive)c->hidden), text[used++] = '\n';
+                }
+                memory_copy(temp, ui_columns_path, path), made = path;
+                memory_copy(temp + made, ".new.", 5), made += 5;
+                made += positive_into_string(temp + made, (positive)system_call(syscall(getpid))), temp[made] = 0;
+                if ((handle = system_open_at_mode(AT_FDCWD, (string_address)temp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644)) >= 0)
+                {
+                        whole = system_write_all((positive)handle, text, used) == used;
+                        system_close(handle);
+                        if (!whole || system_rename_at(AT_FDCWD, (string_address)temp, AT_FDCWD, (string_address)ui_columns_path, 0) != 0)
+                                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temp, 0);
+                }
+        }
+        if (text)
+                memory_free(text, room);
+        if (temp)
+                memory_free(temp, path + 48);
+        ui_columns_file_free(&f);
+}
+
+/*
+        A table's menu of its columns, the kit's for every table: a check for each, by its title, on where it is shown. The right button on
+        the header opens it alone (ui_columns_menu_open); on a row's first cell it follows the row's own items (ui_list_menu_populate). The
+        first column is the rows' labels, and is shown always: its check is on and cannot be turned. A check turned hides its column or shows
+        it again (ui_columns_menu_do), and the choice is kept for the table (ui_columns_keep).
+*/
+static fn ui_columns_menu_add(struct ui_popup address_to p, struct ui_columns address_to c)
+{
+        for (int k = 0; c && k < c->count && k < UI_COLUMNS_MOST; k++)
+                ui_popmenu_add(&p->menu, c->title[k] ? c->title[k] : "", null,
+                               UI_MENU_CHECK | UI_MENU_LITERAL | (ui_columns_hidden(c, k) ? 0 : UI_MENU_ON) | (k ? 0 : UI_MENU_DISABLED), UI_LIST_MENU_COLUMN + k);
+        p->columns = c;
+}
+
+static b32 ui_columns_menu_open(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup, const struct window_row address_to own,
+                                struct ui_columns address_to c, int x, int y)
+{
+        struct ui_popmenu address_to m;
+        if (!ui || !popup || !own || !c || c->count < 2 || ui->scale <= 0)
+                return false;
+        m = &popup->menu;
+        m->count = 0, m->typed_length = 0;
+        memory_zero(&m->press, sizeof(m->press));
+        popup->field = null, popup->list_cell = -1;
+        ui_columns_menu_add(popup, c);
+        if (!ui_popmenu_open(popup, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
+                return popup->list = null, popup->list_row = -1, false;
+        popup->list = l, popup->list_row = -1, popup->columns = c;
+        return true;
+}
+
+// A column's check chosen: the column hidden or shown, and kept. False when the choice is no column's of the menu's table.
+static b32 ui_columns_menu_do(struct ui_popup address_to p, int id)
+{
+        struct ui_columns address_to c = p ? p->columns : null;
+        int k = id - UI_LIST_MENU_COLUMN;
+        if (!c || k < 0 || k >= UI_COLUMNS_MOST)
+                return false;
+        p->columns = null;
+        if (k > 0 && k < c->count)
+                c->hidden ^= 1u << k, ui_columns_keep(c);
+        return true;
+}
+
+/*
         What column k needs (device pixels): its title with its padding (and the order's arrow after it, where the rows are in its order), or its
         widest cell (ui_columns.need), whichever is the wider, and no more: a short column's words or check with its padding and no room to
         spare at its end. Where neither is known (a list whose rows are not read, a font not loaded), the app's width for it, at least least.
@@ -25402,9 +25595,11 @@ static int ui_columns_room(const struct ui address_to ui, const struct ui_column
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
 {
         int count = c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
-        int mins[UI_COLUMNS_MOST], rooms[UI_COLUMNS_MOST], at = x, last = ui_columns_last(c);
+        int mins[UI_COLUMNS_MOST], rooms[UI_COLUMNS_MOST], at = x, last;
+        ui_columns_kept(c);
+        last = ui_columns_last(c);
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
-        if (count == 1 || w <= 0)
+        if (last == 0 || w <= 0)
         {
                 for (int k = 0; k < count; k++)
                         c->at[k] = x, c->wide[k] = !k && w > 0 ? w : 0;
@@ -25412,8 +25607,14 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
         }
         for (int k = 0; k < count; k++)
         {
-                // A column is squeezed to its least, and one whose words need less is never wider than they are (a check's square).
+                // A column is squeezed to its least, and one whose words need less is never wider than they are (a check's square). A hidden
+                // one is none wide, and keeps the width it had for when it is shown again.
                 int ml = UI_COLUMNS_MIN_L(c, k);
+                if (ui_columns_hidden(c, k))
+                {
+                        rooms[k] = mins[k] = c->wide[k] = 0;
+                        continue;
+                }
                 rooms[k] = ui_columns_room(ui, c, k, ui_dev(ui, ml));
                 mins[k] = k > 0 && rooms[k] < ui_dev(ui, ml) ? rooms[k] : ui_dev(ui, ml);
                 ml = k > 0 && rooms[k] < ui_dev(ui, ml) && ui->scale > 0 ? (rooms[k] * 100 + ui->scale - 1) / ui->scale : ml;
@@ -25449,6 +25650,8 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
                 for (int k = 0; k < last; k++)
                 {
                         int want = ui_dev(ui, c->width[k]);
+                        if (ui_columns_hidden(c, k))
+                                continue;
                         if (ref > 0 && ref != w)
                                 want = (int)((b64)want * w / ref);
                         c->wide[k] = want < mins[k] ? mins[k] : want, pre_sum += c->wide[k], pre_min += mins[k];
@@ -25488,7 +25691,7 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
                 }
         }
         for (int k = 0; k < count; k++)
-                c->at[k] = at, at += c->wide[k];
+                c->wide[k] = k > last || ui_columns_hidden(c, k) ? 0 : c->wide[k], c->at[k] = at, at += c->wide[k];
         c->wide[last] = x + w - c->at[last];
 }
 
@@ -25498,9 +25701,11 @@ static int ui_columns_edge(const struct ui address_to ui, const struct ui_column
         int x = ui_point(px, c->x, c->w), reach = ui_dev(ui, UI_COLUMN_EDGE), found = -1, best = reach;
         if (py < c->y || py >= c->y + c->h)
                 return -1;
-        for (int k = 0; k < c->count - 1; k++)
+        for (int k = 0; k < ui_columns_last(c); k++)
         {
                 int edge = c->at[k] + c->wide[k], off = x - edge;
+                if (ui_columns_hidden(c, k))
+                        continue;
                 off = off < 0 ? -off - 1 : off;
                 if (edge > c->x + c->w + reach || edge <= c->x)
                         continue;
@@ -25526,11 +25731,13 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
 {
         unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), rule = ui_role(UI_OUTLINE_VARIANT) | 0xff000000u;
         int baseline = ui_kit_baseline(ui, c->y + (c->h - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM);
-        int line = ui_dev(ui, 1) > 0 ? ui_dev(ui, 1) : 1;
+        int line = ui_dev(ui, 1) > 0 ? ui_dev(ui, 1) : 1, last = ui_columns_last(c);
         char cut[UI_CUT_TEXT], titled[UI_CUT_TEXT];
         for (int k = 0; k < c->count; k++)
         {
                 int start = ui_columns_pad(ui, c, k, false), x = c->at[k] + start, w = ui_columns_end(c, k) - start - ui_columns_pad(ui, c, k, true), width;
+                if (ui_columns_hidden(c, k))
+                        continue;
                 b32 sorted = k == c->sorted;
                 string_address shown;
                 // The column the rows are ordered by has its arrow after its title: up rising, down falling.
@@ -25548,7 +25755,7 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
                                 x += w - width;
                         ui_kit_text(ui, ui_mirror(x, width, c->x, c->w), baseline, shown, UI_LABEL_MEDIUM, sorted || k == c->hover ? strong : quiet, 0);
                 }
-                if (k + 1 < c->count && c->at[k] + c->wide[k] < c->x + c->w)
+                if (k < last && c->at[k] + c->wide[k] < c->x + c->w)
                 {
                         struct ui_box sep = ui_box_px(ui_mirror(c->at[k] + c->wide[k], line, c->x, c->w), c->y + c->h / 3, line, c->h / 3, 0);
                         ui_kit_fill(ui, &sep, c->held == k ? strong : rule, null);
@@ -25570,9 +25777,9 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
         {
                 // A column narrower than the least (a check's square) is not made the least by the hand that takes its edge: its least is
                 // what it was.
-                int used = UI_COLUMNS_MIN_L(c, c->count - 1), least = c->split.start_w > 0 && c->split.start_w < UI_COLUMNS_LEAST ? c->split.start_w : UI_COLUMNS_LEAST;
-                for (int k = 0; k < c->count - 1; k++)
-                        if (k != c->held)
+                int used = UI_COLUMNS_MIN_L(c, ui_columns_last(c)), least = c->split.start_w > 0 && c->split.start_w < UI_COLUMNS_LEAST ? c->split.start_w : UI_COLUMNS_LEAST;
+                for (int k = 0; k < ui_columns_last(c); k++)
+                        if (k != c->held && !ui_columns_hidden(c, k))
                                 used += c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
                 p32 r = ui_splitter_event(ui, &c->split, event, x, false, least, total_l > used ? total_l - used : UI_COLUMNS_LEAST, 0, 0,
                                           &c->width[c->held]);
@@ -25591,17 +25798,20 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                         ui_kit_shape = WINDOW_POINTER_HAND;
                 return c->hover != was ? UI_COLUMNS_DRAW : 0;
         }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && down && x >= c->x && x < c->x + c->w && y >= c->y && y < c->y + c->h)
+                return UI_COLUMNS_MENU | UI_COLUMNS_TAKEN;
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !down ||
             x < c->x || x >= c->x + c->w || y < c->y || y >= c->y + c->h)
                 return 0;
         if ((edge = ui_columns_edge(ui, c, x, y)) >= 0)
         {
-                int used = UI_COLUMNS_MIN_L(c, c->count - 1);
+                int used = UI_COLUMNS_MIN_L(c, ui_columns_last(c));
                 for (int k = 0; k < c->count; k++)
-                        c->width[k] = (c->wide[k] * 100 + scale / 2) / scale;
+                        if (!ui_columns_hidden(c, k))
+                                c->width[k] = (c->wide[k] * 100 + scale / 2) / scale;
                 c->ref_w = (c->w * 100 + scale / 2) / scale;
-                for (int k = 0; k < c->count - 1; k++)
-                        if (k != edge)
+                for (int k = 0; k < ui_columns_last(c); k++)
+                        if (k != edge && !ui_columns_hidden(c, k))
                                 used += c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
                 ui_splitter_event(ui, &c->split, event, x, true, UI_COLUMNS_LEAST, total_l > used ? total_l - used : UI_COLUMNS_LEAST, 0, c->width[edge],
                                   &c->width[edge]);
@@ -26795,12 +27005,15 @@ static fn ui_list_row_text(const struct ui_list address_to l, int id, char addre
                         string_append_bounded((string_address)into, (string_address)said, room);
                 return;
         }
+        // The columns shown, as the table is seen: a column hidden is not pasted.
         for (int k = 0; k < row.columns->count && k < UI_COLUMNS_MOST; k++)
-                if (ui_row_said(&row, k))
+                if (ui_row_said(&row, k) && !ui_columns_hidden(row.columns, k))
                         last = k;
         for (int k = 0; k <= last; k++)
         {
                 const char address_to words = ui_row_said(&row, k);
+                if (ui_columns_hidden(row.columns, k))
+                        continue;
                 if (k)
                         string_append_bounded((string_address)into, (string_address) "\t", room);
                 if (words)
@@ -26857,6 +27070,14 @@ static fn ui_list_menu_populate(struct ui_popup address_to p, const struct ui_li
                         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(m, row.remove_icon == UI_ICON_EJECT + 1 ? WORDS(files_device_eject) : WORDS(menu_remove), "Delete", 0, UI_LIST_MENU_REMOVE_ROW);
         }
+        // On a row's first cell, its table's columns after its own items, under their heading (ui_columns_menu_add).
+        if (p->list_cell == 0 && ui_row_columned(&row))
+        {
+                if (m->count)
+                        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(m, WORDS(menu_columns), null, UI_MENU_HEADER, 0);
+                ui_columns_menu_add(p, row.columns);
+        }
 }
 
 static b32 ui_list_menu_ready(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_popup address_to popup,
@@ -26869,19 +27090,20 @@ static b32 ui_list_menu_open(struct ui address_to ui, struct ui_list address_to 
                              struct window_row address_to own, int id, int x, int y, b32 keys)
 {
         struct ui_popmenu address_to m;
+        struct ui_columns address_to columns;
         if (!ui_list_menu_ready(ui, l, popup, own, id))
                 return false;
         m = &popup->menu;
         m->count = 0, m->typed_length = 0;
         memory_zero(&m->press, sizeof(m->press));
-        popup->list_cell = keys ? -1 : ui_list_cell_at(l, id, x);
+        popup->list_cell = keys ? -1 : ui_list_cell_at(l, id, x), popup->columns = null;
         ui_list_menu_populate(popup, l, id);
         if (!m->count)
                 return false;
-        popup->field = null;
+        popup->field = null, columns = popup->columns;
         if (!ui_popmenu_open(popup, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
                 return popup->list = null, popup->list_row = -1, false;
-        popup->list = l, popup->list_row = id;
+        popup->list = l, popup->list_row = id, popup->columns = columns;
         if (keys)
                 m->hot = 0, ui_popmenu_present(popup);
         return true;
@@ -26909,7 +27131,7 @@ static fn ui_list_menu_attach(struct ui_popup address_to popup, struct ui_list a
         int had;
         if (!popup || !l || !l->menu)
                 return;
-        had = popup->menu.count, popup->list_cell = -1;
+        had = popup->menu.count, popup->list_cell = -1, popup->columns = null;
         ui_popmenu_add(&popup->menu, null, null, UI_MENU_SEPARATOR, 0);
         ui_list_menu_populate(popup, l, id);
         if (popup->menu.count == had + 1)
@@ -26922,10 +27144,13 @@ static b32 ui_list_menu_do(struct ui_popup address_to p, struct window_row addre
 {
         struct ui_list address_to l;
         int row, cell;
+        // A column's check (a header's menu, or the columns after a row's items): the kit's, whatever the list's menu is.
+        if (ui_columns_menu_do(p, id))
+                return p->list = null, p->list_row = -1, p->list_cell = -1, true;
         if (!p || !p->list || !p->list->menu)
                 return false;
         l = p->list, row = p->list_row, cell = p->list_cell;
-        p->list = null, p->list_row = -1, p->list_cell = -1;
+        p->list = null, p->list_row = -1, p->list_cell = -1, p->columns = null;
         if (id == UI_LIST_MENU_COPY || id == UI_LIST_MENU_COPY_ROW || id == UI_LIST_MENU_COPY_CELL)
         {
                 char line[1024];
@@ -27709,6 +27934,18 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                         ui_page_redraw(p);
                 if (side & UI_VIEW_TAKEN)
                         return;
+        }
+        // The right button on a table's header: its menu of the columns, whether its rows have a menu or not.
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && down && !p->card && p->menu_row < 0 && p->popup && p->own)
+        {
+                struct ui_columns address_to head = null;
+                if ((ui_list_columns_event(ui, l, event, x, y, &head) & UI_COLUMNS_MENU) && head)
+                {
+                        ui_page_let_go(ui, p, l);
+                        ui_columns_menu_open(ui, l, p->popup, p->own, head, x, y);
+                        ui_page_redraw(p);
+                        return;
+                }
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && !p->card && p->menu_row < 0 && p->popup && p->own && l->menu)
         {
@@ -29240,6 +29477,7 @@ static int ui_app_run(struct ui_app address_to app)
         int status;
         b32 running = true;
         claim_standard_descriptors();
+        ui_columns_path = UI_COLUMNS_PATH; // an app's tables keep the columns hidden in them
         if (windows_take(app->own) < 0)
         {
                 log_direct((address_any)app->missing, string_length((const_string)app->missing));

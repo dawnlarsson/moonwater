@@ -657,10 +657,12 @@ static fn files_layout(void)
         m->seat = l->scroll.scroll;
         for (int k = 0; k < 4; k++)
                 files.columns.title[k] = cols[k];
-        // What the columns need, from every row of the listing, read again when the listing is another or more of it was read: each column is
+        files.columns.key = "files";
+        // What the columns need, from every row of the listing, read again when the listing is another, more of it was read or a column was hidden
+        // or shown (the last one shown keeps the inset at its end): each column is
         // as wide as its widest words however far down they are, and a folder left leaves no width behind (ui_columns_layout).
         {
-                p32 key = m->listed * 2654435761u ^ m->reads * 40503u ^ files_model_count(m) * 69069u ^ (p32)files.view;
+                p32 key = m->listed * 2654435761u ^ m->reads * 40503u ^ files_model_count(m) * 69069u ^ (p32)files.view ^ files.columns.hidden * 2246822519u;
                 if (key != files.columns_key)
                 {
                         files.columns_key = key;
@@ -3031,6 +3033,8 @@ static b32 files_event(const struct window_event address_to event)
         {
                 p32 took = ui_columns_event(ui, &files.columns, event, event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x,
                                             event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y);
+                if (took & UI_COLUMNS_MENU)
+                        ui_columns_menu_open(ui, null, &files.menu, &files.own, &files.columns, ui_kit.pointer_x, ui_kit.pointer_y);
                 if (took & UI_COLUMNS_SORTED)
                         files_model_sort(m, files_sort_cols[files.columns.sorted], files.columns.descending), files_show_cursor();
                 files.dirty |= (took & UI_COLUMNS_DRAW) != 0;
@@ -3554,7 +3558,9 @@ static int files_open_window(void)
 
 static fn files_chose(int id)
 {
-        if (id >= UI_TOKENS_ITEM && id < UI_TOKENS_ITEM + UI_TOKENS_MOST)
+        if (ui_columns_menu_do(&files.menu, id))
+                files.dirty = true;
+        else if (id >= UI_TOKENS_ITEM && id < UI_TOKENS_ITEM + UI_TOKENS_MOST)
         {
                 if (ui_tokens_menu_do(&files.ui, &files.big->path, id) & UI_TOKENS_PRESSED)
                         files_path_pressed();
