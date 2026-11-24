@@ -6424,6 +6424,7 @@ static void fullscreen_rows(void)
                 long fd = (long)system_call_2(syscall(memfd_create), (positive) "fullscreen-keep", 1);
                 unsigned int kept;
 
+                compositor_wl_lent_drop_fb(0); // the framebuffer the rows above made (of descriptor 9) let go of, and the keep begun empty
                 canvas_fb_kept_count = 0;
                 compositor_wl.lent[0].fd = fd;
                 graves = compositor_wl_grave_count;
