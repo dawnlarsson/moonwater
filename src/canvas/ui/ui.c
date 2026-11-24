@@ -25303,7 +25303,7 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
              ? UI_SWITCH_W + UI_INSET + 8                                                                                                  \
              : (tr) && (tr)->w > 0 &&                                                                                                      \
                        ((row)->kind == UI_ROW_TABS || (row)->kind == UI_ROW_BUTTON || (row)->kind == UI_ROW_SWATCHES ||                    \
-                        (row)->kind == UI_ROW_SLIDER)                                                                                      \
+                        (row)->kind == UI_ROW_SLIDER || (row)->badge)                                                                      \
                    ? (tr)->w + UI_INSET + 8                                                                                                \
                    : 0)
 
@@ -25359,11 +25359,21 @@ static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to
                 }
                 for (int k = 1; k < c->count && ui->regular; k++)
                 {
-                        int extra = k == last ? ui_dev(ui, one) + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0;
+                        int ctrl_w = k == last ? (row.kind == UI_ROW_SWITCH ? ui_dev(ui, UI_SWITCH_W)
+                                                  : trailing && trailing->w > 0 &&
+                                                    (row.kind == UI_ROW_TABS || row.kind == UI_ROW_BUTTON || row.kind == UI_ROW_SWATCHES ||
+                                                     row.kind == UI_ROW_SLIDER || row.badge)
+                                                        ? ui_dev(ui, trailing->w)
+                                                        : 0)
+                                               : 0;
+                        int extra = k == last ? ctrl_w + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0;
+                        b32 has_text = row.cells[k] && row.cells[k][0];
                         if (row.cell_check >> k & 1u)
                                 px = side;
-                        else if (row.cells[k] && (row.cells[k][0] || extra > 0))
-                                px = row.cells[k][0] ? ui_kit_measure(ui, (string_address)row.cells[k], UI_BODY_MEDIUM) : 0;
+                        else if (has_text)
+                                px = ui_kit_measure(ui, (string_address)row.cells[k], UI_BODY_MEDIUM) + (ctrl_w > 0 ? ui_dev(ui, 6) : 0);
+                        else if (extra > 0)
+                                px = 0;
                         else
                                 continue;
                         // A check, or one glyph (a letter, a mark): the cell is a square round it.
@@ -25645,16 +25655,21 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
         for (int k = 0; k < count; k++)
         {
                 // A column is squeezed to its least, and one whose words need less is never wider than they are (a check's square). A hidden
-                // one is none wide, and keeps the width it had for when it is shown again.
-                int ml = UI_COLUMNS_MIN_L(c, k);
+                // one is none wide, and keeps the width it had for when it is shown again. A trailing control's floor (trailing_min) is hard:
+                // the last column never shrinks below it, so switches, tabs and buttons cannot overlap the column to their left.
+                int ml = UI_COLUMNS_MIN_L(c, k), trailing_floor = k == last ? ui_dev(ui, c->trailing_min) : 0;
                 if (ui_columns_hidden(c, k))
                 {
                         rooms[k] = mins[k] = c->wide[k] = 0;
                         continue;
                 }
                 rooms[k] = ui_columns_room(ui, c, k, ui_dev(ui, ml));
+                if (trailing_floor > rooms[k])
+                        rooms[k] = trailing_floor;
                 mins[k] = k > 0 && rooms[k] < ui_dev(ui, ml) ? rooms[k] : ui_dev(ui, ml);
-                ml = k > 0 && rooms[k] < ui_dev(ui, ml) && ui->scale > 0 ? (rooms[k] * 100 + ui->scale - 1) / ui->scale : ml;
+                if (trailing_floor > mins[k])
+                        mins[k] = trailing_floor;
+                ml = k > 0 && mins[k] < ui_dev(ui, ml) && ui->scale > 0 ? (mins[k] * 100 + ui->scale - 1) / ui->scale : ml;
                 if ((k > 0 || c->width[0] > 0) && c->width[k] < ml)
                         c->width[k] = ml;
         }

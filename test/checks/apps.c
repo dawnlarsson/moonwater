@@ -1438,6 +1438,15 @@ static fn columns_drag(struct ui address_to wui, struct ui_columns address_to c,
         short columns stay whole; an edge the person dragged is a share that follows the window, and a column the shares leave short of its
         words takes room from the ones with more than theirs once no hand holds the edge.
 */
+static struct ui_columns address_to columns_fit_tabs_cols;
+static fn columns_fit_tabs_describe(int id, struct ui_row address_to row)
+{
+        (void)id;
+        row->label = "USB Device", row->columns = columns_fit_tabs_cols;
+        row->kind = UI_ROW_TABS, row->words = "Allow\nDeny", row->at = 0;
+        row->cells[1] = "USB 1-1", row->cells[2] = "Waiting", row->cells[3] = null;
+}
+
 static fn columns_fit_check(struct ui address_to wui)
 {
         static struct ui_columns c;
@@ -1471,6 +1480,44 @@ static fn columns_fit_check(struct ui address_to wui)
         c.held = 0;
         ui_columns_layout(wui, &c, 0, 0, 1000);
         check("columns fit: while the hand holds an edge, the shares are the hand's alone", c.wide[2] == 137);
+
+        // A trailing control (e.g. Devices' Allow/Deny UI_ROW_TABS with null cell text in column 3) must never
+        // shrink narrower than its control width or overlap into the preceding Status column.
+        {
+                static struct ui_columns dev_c;
+                static struct ui_list dev_l;
+                static int dev_ids[1] = {0};
+                static unsigned char dev_starts[1] = {UI_LIST_STARTS | UI_LIST_COLUMNS};
+                struct ui_row r;
+                struct ui_control address_to tr;
+                int ctrl_left;
+
+                memory_zero(&dev_c, sizeof(dev_c));
+                memory_zero(&dev_l, sizeof(dev_l));
+                dev_c.count = 4, dev_c.hover = dev_c.held = -1;
+                dev_c.title[0] = "Name", dev_c.title[1] = "Port", dev_c.title[2] = "Status", dev_c.title[3] = "Access";
+                dev_c.width[1] = 108, dev_c.width[2] = 84, dev_c.width[3] = 128, dev_c.at_end[3] = true;
+                columns_fit_tabs_cols = &dev_c;
+                dev_l.describe = columns_fit_tabs_describe, dev_l.count = 1, dev_l.ids = 1, dev_l.id = dev_ids, dev_l.starts = dev_starts;
+                ui_list_columns_fit(wui, &dev_l, 0, &dev_c);
+                ui_columns_layout(wui, &dev_c, 0, 0, 800);
+                ui_list_describe(&dev_l, 0, &r);
+                tr = ui_list_trailing(wui, &dev_l, 0, &r);
+                ctrl_left = dev_c.at[3] + dev_c.wide[3] - ui_dev(wui, UI_INSET) - (tr ? ui_dev(wui, tr->w) : 0);
+                check("columns fit: trailing UI_ROW_TABS with null cell text keeps last column wide enough and never overlaps Status",
+                      tr != null && tr->w > 0 && dev_c.trailing_min > 0 && dev_c.wide[3] >= ui_dev(wui, dev_c.trailing_min) &&
+                          ctrl_left >= dev_c.at[3]);
+
+                // Even at narrow widths or after hiding the last column, the new last column protects the trailing control.
+                ui_columns_layout(wui, &dev_c, 0, 0, 420);
+                check("columns fit: trailing control floor holds at narrow table widths",
+                      dev_c.wide[3] >= ui_dev(wui, dev_c.trailing_min));
+                dev_c.hidden = 1u << 3;
+                ui_list_columns_fit(wui, &dev_l, 0, &dev_c);
+                ui_columns_layout(wui, &dev_c, 0, 0, 800);
+                check("columns fit: hiding last column transfers trailing control protection to the new last visible column",
+                      dev_c.wide[2] >= ui_dev(wui, dev_c.trailing_min));
+        }
 }
 
 static fn columns_check(struct ui address_to wui)
