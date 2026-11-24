@@ -24,6 +24,12 @@ static const char *compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_P
 static const char *compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH;
 static const char *compositor_walls_ask_dir = SETTING_WALLPAPER_ASK_DIR;
 
+// A curated wallpaper's credit, as the list the command verified says it: its author, its licence and its source page ("" for none).
+struct compositor_wall_credit
+{
+        char author[SETTING_WALLPAPER_CREDIT], licence[SETTING_WALLPAPER_CREDIT], source[SETTING_WALLPAPER_SOURCE];
+};
+
 struct compositor_wall_line
 {
         char screen[WINDOWS_OUTPUT_NAME];
@@ -41,6 +47,8 @@ static struct
         unsigned int names;
         char (*curated)[SETTING_WALLPAPER_WORD]; // the feed's the command verified (curated:HEX), in the feed's order
         unsigned long curated_bytes;
+        struct compositor_wall_credit *credit;   // and each one's credit, in the same order
+        unsigned long credit_bytes;
         unsigned int curateds;
         unsigned int gen;   // one more at every change of a word or the list, which the wallpaper is made again for
         unsigned int listed; // and of the list alone, which a picture's miniature is read again for
@@ -269,10 +277,41 @@ static unsigned int compositor_walls_sum(int list)
         unsigned int sum = 2166136261u;
 
         if (list)
-                return hash_fnv1a(hash_fnv1a(sum ^ compositor_walls.names, compositor_walls.name, (positive)compositor_walls.names * SETTING_WALLPAPER_NAME) ^
-                                      compositor_walls.curateds,
-                                  compositor_walls.curated, (positive)compositor_walls.curateds * SETTING_WALLPAPER_WORD);
+                return hash_fnv1a(hash_fnv1a(hash_fnv1a(sum ^ compositor_walls.names, compositor_walls.name, (positive)compositor_walls.names * SETTING_WALLPAPER_NAME) ^
+                                                 compositor_walls.curateds,
+                                             compositor_walls.curated, (positive)compositor_walls.curateds * SETTING_WALLPAPER_WORD),
+                                  compositor_walls.credit, (positive)compositor_walls.curateds * sizeof(compositor_walls.credit[0]));
         return hash_fnv1a(sum ^ compositor_walls.lines, compositor_walls.line, (positive)compositor_walls.lines * sizeof(compositor_walls.line[0]));
+}
+
+/*
+        A curated line's credit (after its digest and the blank: the id, then a tab and the author, a tab and the licence, a tab and the
+        source), held to what the command writes as it is read: a credit's control bytes are blanks and it is cut to its room at a
+        character's start, and a source that is no page by setting_wallpaper_source_ok's rules is none.
+*/
+static void compositor_wall_credit_read(struct compositor_wall_credit *credit, const char *text, positive length)
+{
+        char *field[3] = {credit->author, credit->licence, credit->source};
+        positive room[3] = {SETTING_WALLPAPER_CREDIT, SETTING_WALLPAPER_CREDIT, SETTING_WALLPAPER_SOURCE}, at = 0;
+
+        memory_zero(credit, sizeof(*credit));
+        while (at < length && text[at] != '\t')
+                at++;
+        for (int f = 0; f < 3 && at < length; f++)
+        {
+                positive from = ++at, cut;
+
+                while (at < length && text[at] != '\t')
+                        at++;
+                cut = at - from < room[f] ? at - from : room[f] - 1;
+                while (cut && cut < at - from && ((unsigned char)text[from + cut] & 0xc0) == 0x80)
+                        cut--;
+                for (positive k = 0; k < cut; k++)
+                        field[f][k] = (unsigned char)text[from + k] < 0x20 || text[from + k] == 0x7f ? ' ' : text[from + k];
+                field[f][cut] = 0;
+        }
+        if (!setting_wallpaper_source_ok(credit->source, string_length((string_address)credit->source)))
+                credit->source[0] = 0;
 }
 
 // The pictures remembered, read again: a name a line, each once.
@@ -321,7 +360,14 @@ static void compositor_walls_pictures_read(void)
                     mem_buf_grow(&p, &compositor_walls.curated_bytes, (unsigned long)(compositor_walls.curateds + 1) * SETTING_WALLPAPER_WORD,
                                  MEM_BUF_KEEP | MEM_BUF_GROW_2X))
                 {
+                        void *c = compositor_walls.credit;
+
                         compositor_walls.curated = (char (*)[SETTING_WALLPAPER_WORD])p;
+                        if (!mem_buf_grow(&c, &compositor_walls.credit_bytes, (unsigned long)(compositor_walls.curateds + 1) * sizeof(compositor_walls.credit[0]),
+                                          MEM_BUF_KEEP | MEM_BUF_GROW_2X))
+                                break;
+                        compositor_walls.credit = (struct compositor_wall_credit *)c;
+                        compositor_wall_credit_read(&compositor_walls.credit[compositor_walls.curateds], text + at + 65, stop - at - 65);
                         memory_copy(compositor_walls.curated[compositor_walls.curateds++], word, SETTING_WALLPAPER_WORD);
                 }
                 at = stop + 1;
@@ -647,6 +693,16 @@ static const unsigned int *compositor_wall_card(const struct compositor_space *s
 */
 #define COMPOSITOR_WALL_VEIL 245
 #define COMPOSITOR_WALL_VEIL_STEPS 4
+// A curated card's credit as it was drawn: its picture, what it was drawn for, and its Source button's box in it (w 0: none).
+struct compositor_wall_band
+{
+        unsigned int *pixels;
+        unsigned long bytes;
+        int w, h, scale, hover, keyed;
+        unsigned int look, listed;
+        int button[4];
+};
+
 static struct
 {
         int open, screen;
@@ -672,7 +728,11 @@ static struct
         int wheel_w, wheel_h, wheel_scale, wheel_x, wheel_y; // the picture's size and scale, and the hand's place last told the wheel
         unsigned int wheel_look; // the theme and the accent it was drawn in
         b32 wheel_opened, wheel_drawn, wheel_busy, wheel_held; // made; its picture as it is; the kit's motion asks for frames; a press is its
-} compositor_wall_editor = {.hover = -1, .hover_seg = -1, .press_card = -1, .press_seg = -1};
+        struct compositor_wall_band *band; // each curated card's credit across its foot (its author, its licence, its Source button), as drawn
+        unsigned long band_bytes;
+        unsigned int bands;
+        int hover_source, press_source, key_card; // the card whose Source is under the hand, was pressed, has the keys (-1 none: the wheel has them)
+} compositor_wall_editor = {.hover = -1, .hover_seg = -1, .press_card = -1, .press_seg = -1, .hover_source = -1, .press_source = -1, .key_card = -1};
 
 #define COMPOSITOR_WALL_COLOUR_CARD 0 // the cards' places: Solid colour, then the Moonwater moon
 #define COMPOSITOR_WALL_MOON_CARD 1
@@ -856,6 +916,102 @@ static int compositor_wall_editor_on_close(int card, int px, int py)
         return compositor_wall_editor_close(card, &x, &y, &side) && px >= x && px < x + side && py >= y && py < y + side;
 }
 
+// The credit of card i, a curated wallpaper's, or none.
+static const struct compositor_wall_credit *compositor_wall_editor_credit(int card)
+{
+        int at = card - 2 - (int)compositor_walls.names;
+
+        if (card < 0 || (unsigned int)card >= compositor_wall_editor.cards || memory_compare(compositor_wall_editor.word[card], "curated:", 8) || at < 0 ||
+            (unsigned int)at >= compositor_walls.curateds || !compositor_walls.credit)
+                return 0;
+        return &compositor_walls.credit[at];
+}
+
+// The card whose Source button a point is on (the button's box as drawn, grown to the kit's least target, UI_TARGET), or -1.
+static int compositor_wall_editor_source_at(int x, int y)
+{
+        int screen = compositor_wall_editor.screen, scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
+        int card = compositor_wall_editor_card_at(x, y), at = card - 2 - (int)compositor_walls.names, pill[4];
+        const struct compositor_wall_credit *credit = compositor_wall_editor_credit(card);
+        const struct compositor_wall_band *band;
+
+        if (!credit || !credit->source[0] || at < 0 || (unsigned int)at >= compositor_wall_editor.bands ||
+            !compositor_wall_editor_pill(compositor_wall_editor.card[card], scale, pill))
+                return -1;
+        band = &compositor_wall_editor.band[at];
+        if (band->button[2] <= 0 || band->w != pill[2] || band->h != pill[3])
+                return -1;
+        return ui_reach_hit(1, UI_TARGET * scale / 100, x, y, pill[0] + band->button[0], pill[1] + band->button[1], band->button[2], band->button[3]) ? card : -1;
+}
+
+// A curated card's Source pressed (or Enter on it): its page opened by the open tool in the person's browser; the wallpaper not chosen.
+static void compositor_wall_start_program(string_address *argv);
+static const char *compositor_wall_opened; // the page last asked of the open tool (what the checks read: they start no program)
+static void compositor_wall_editor_source(int card)
+{
+        const struct compositor_wall_credit *credit = compositor_wall_editor_credit(card);
+        string_address argv[4] = {(string_address) "/open", (string_address) "--", 0, null};
+
+        if (!credit || !credit->source[0] || !setting_wallpaper_source_ok(credit->source, string_length((string_address)credit->source)))
+                return;
+        argv[2] = (string_address)credit->source, compositor_wall_opened = credit->source;
+        compositor_wall_start_program(argv);
+}
+
+// Curated card i's credit drawn across its foot, w by h (its rows on whole 64-byte lines); 0 with no memory.
+static const unsigned int *compositor_wall_editor_band_pixels(int card, int w, int h, int scale)
+{
+        struct windows *table = compositor.table;
+        unsigned int themed = table && table->themed, look = themed ? (table->theme * 16777619u) ^ (table->accent & 0xffffffu) : 0;
+        const struct compositor_wall_credit *credit = compositor_wall_editor_credit(card);
+        unsigned int at = (unsigned int)(card - 2 - (int)compositor_walls.names);
+        int hover = compositor_wall_editor.open && compositor_wall_editor.hover_source == card, keyed = compositor_wall_editor.key_card == card;
+        struct compositor_wall_band *band;
+        void *p;
+
+        if (!credit || w <= 0 || h <= 0)
+                return 0;
+        if (at >= compositor_wall_editor.bands)
+        {
+                p = compositor_wall_editor.band;
+                if (!mem_buf_grow(&p, &compositor_wall_editor.band_bytes, (unsigned long)compositor_walls.curateds * sizeof(*band), MEM_BUF_KEEP))
+                        return 0;
+                compositor_wall_editor.band = (struct compositor_wall_band *)p;
+                memory_zero(compositor_wall_editor.band + compositor_wall_editor.bands, (positive)(compositor_walls.curateds - compositor_wall_editor.bands) * sizeof(*band));
+                compositor_wall_editor.bands = compositor_walls.curateds;
+        }
+        band = &compositor_wall_editor.band[at];
+        if (band->pixels && band->w == w && band->h == h && band->scale == scale && band->hover == hover && band->keyed == keyed && band->look == look &&
+            band->listed == compositor_walls.listed)
+                return band->pixels;
+        if (compositor_card_holds())
+                return band->pixels && band->w == w && band->h == h ? band->pixels : 0;
+        p = band->pixels;
+        if (!mem_buf_grow(&p, &band->bytes, compositor_whole_lines(w) * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
+                return band->pixels = 0, band->bytes = 0, (const unsigned int *)0;
+        band->pixels = (unsigned int *)p, band->w = w, band->h = h, band->scale = scale, band->hover = hover, band->keyed = keyed, band->look = look;
+        band->listed = compositor_walls.listed;
+        memory_fill_u32_rect(band->pixels, (positive)compositor_whole_lines(w), (positive)w, (positive)h, compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u);
+        ui_credit_card_draw(band->pixels, compositor_whole_lines(w), w, h, scale, compositor.engine, &compositor.face, themed ? table->theme : UI_THEME_LIGHT,
+                            themed ? table->accent : UI_ACCENT_STANDARD, credit->author, credit->licence, credit->source[0] != 0, hover, keyed, band->button);
+        memory_or_u32(band->pixels, band->pixels, (positive)compositor_whole_lines(w) * (positive)h, 0xff000000u);
+        return band->pixels;
+}
+
+// The bands let go of (the editor shut, or the list made again).
+static void compositor_wall_editor_bands_free(void)
+{
+        for (unsigned int at = 0; at < compositor_wall_editor.bands; at++)
+        {
+                void *p = compositor_wall_editor.band[at].pixels;
+
+                if (p)
+                        mem_buf_free(&p, &compositor_wall_editor.band[at].bytes, MEM_BUF_GPU_FORGET);
+                compositor_wall_editor.band[at].pixels = 0;
+        }
+        compositor_wall_editor.bands = 0;
+}
+
 static void compositor_wall_start_program(string_address *argv);
 static void compositor_wall_editor_wheel_asks(p32 asks);
 static void compositor_wall_editor_wheel_sync(int opening);
@@ -873,6 +1029,7 @@ static void compositor_wall_edit(int screen, int how)
                 if (compositor_wall_editor.wheel_opened)
                         compositor_wall_editor_wheel_asks(ui_colour_card_rest());
                 compositor_wall_editor.wheel_held = 0, compositor_wall_editor.wheel_drawn = 0;
+                compositor_wall_editor.hover_source = compositor_wall_editor.press_source = compositor_wall_editor.key_card = -1;
                 compositor_walls_flush();
                 compositor_wall_editor.open = compositor_wall_editor.pressed = compositor_wall_editor.hover_close = 0;
                 compositor_wall_editor.hover = compositor_wall_editor.hover_seg = compositor_wall_editor.press_card = compositor_wall_editor.press_seg = -1;
@@ -895,6 +1052,7 @@ static void compositor_wall_edit(int screen, int how)
                 compositor_wall_start_program(argv);
         }
         compositor_wall_editor.open = 1, compositor_wall_editor.screen = screen;
+        compositor_wall_editor.hover_source = compositor_wall_editor.press_source = compositor_wall_editor.key_card = -1;
         compositor_wall_editor_wheel_sync(1);
         compositor_wall_editor.pressed = 0, compositor_wall_editor.hover_close = 0;
         compositor_wall_editor.hover = compositor_wall_editor.hover_seg = compositor_wall_editor.press_card = compositor_wall_editor.press_seg = -1;
@@ -1045,6 +1203,26 @@ static int compositor_wall_editor_key(unsigned int code, int value, unsigned int
                 return 0;
         if (bit)
                 *bit |= mask;
+        // Tab goes from the wheel to each curated card's Source and back (Shift the other way); Enter or Space on a Source opens its page.
+        if (code == 15 && !(ui_colour_card_state() & UI_COLOUR_FIELD))
+        {
+                int way = modifiers & WINDOW_KEY_SHIFT ? -1 : 1, at = compositor_wall_editor.key_card, n = (int)compositor_wall_editor.cards;
+                const struct compositor_wall_credit *credit;
+
+                do
+                        at = at < 0 ? (way > 0 ? 0 : n - 1) : at + way;
+                while (at >= 0 && at < n && (!(credit = compositor_wall_editor_credit(at)) || !credit->source[0]));
+                compositor_wall_editor.key_card = at >= 0 && at < n ? at : -1;
+                ui_colour_card_keys(compositor_wall_editor.key_card < 0);
+                compositor_wall_editor.wheel_drawn = 0, compositor_wall_editor_damage();
+                return 1;
+        }
+        if (compositor_wall_editor.key_card >= 0)
+        {
+                if (value == 1 && (code == 28 || code == 96 || code == 57))
+                        compositor_wall_editor_source(compositor_wall_editor.key_card);
+                return 1;
+        }
         for (int each = 0; each < (count ? count : 1); each++)
                 compositor_wall_editor_wheel_send(WINDOW_EVENT_KEY, modifiers | WINDOW_KEY_DOWN | (value == 2 ? WINDOW_KEY_REPEAT : 0), (int)code,
                                                   count ? (int)characters[each] : 0);
@@ -1149,6 +1327,8 @@ static void compositor_wall_editor_button(unsigned int code, int down)
                                 return;
                         }
                 compositor_wall_editor.pressed = 1, compositor_wall_editor.at_x = compositor.pointer_x, compositor_wall_editor.at_y = compositor.pointer_y;
+                compositor_wall_editor.press_source = compositor_wall_editor_source_at(compositor.pointer_x, compositor.pointer_y);
+                compositor_wall_editor.key_card = -1; // the hand's press: the keys are the wheel's again
                 compositor_wall_editor.press_card = compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y);
                 compositor_wall_editor.press_seg = compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y);
                 return;
@@ -1162,6 +1342,14 @@ static void compositor_wall_editor_button(unsigned int code, int down)
         if (!compositor_wall_editor.pressed)
                 return;
         compositor_wall_editor.pressed = 0;
+        // A press on a curated card's Source is its page opened when it is let go there, and never the wallpaper chosen.
+        if (compositor_wall_editor.press_source >= 0)
+        {
+                if (compositor_wall_editor_source_at(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_source)
+                        compositor_wall_editor_source(compositor_wall_editor.press_source);
+                compositor_wall_editor.press_source = -1;
+                return;
+        }
         if (compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_card &&
             compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y) == compositor_wall_editor.press_seg)
                 compositor_wall_editor_click(compositor.pointer_x, compositor.pointer_y);
@@ -1199,6 +1387,8 @@ static void compositor_wall_veil_keep(void)
                 if (compositor_wall_editor.pill && !compositor_wall_editor_shown() && !compositor_card_holds())
                         p = compositor_wall_editor.pill, mem_buf_free(&p, &compositor_wall_editor.pill_bytes, MEM_BUF_GPU_FORGET),
                         compositor_wall_editor.pill = 0, compositor_wall_editor.pill_w = compositor_wall_editor.pill_h = 0;
+                if (compositor_wall_editor.bands && !compositor_wall_editor_shown() && !compositor_card_holds())
+                        compositor_wall_editor_bands_free();
                 if (compositor_wall_editor.wheel_px && !compositor_wall_editor_shown() && !compositor_card_holds())
                         p = compositor_wall_editor.wheel_px, mem_buf_free(&p, &compositor_wall_editor.wheel_bytes, MEM_BUF_GPU_FORGET),
                         compositor_wall_editor.wheel_px = 0, compositor_wall_editor.wheel_w = compositor_wall_editor.wheel_h = 0,
@@ -1447,6 +1637,24 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                                 at++;
                         }
                 }
+                if (compositor_wall_editor_credit((int)card))
+                {
+                        // A curated wallpaper's credit across its foot: its author and its licence, and its Source button.
+                        int band[4];
+
+                        if (compositor_wall_editor_pill(c, scale, band) && compositor_scenes_plain(frames, rows, at, room, filler, band, clip, scale))
+                        {
+                                const unsigned int *px = compositor_wall_editor_band_pixels((int)card, band[2], band[3], scale);
+
+                                if (px)
+                                        frames[at].pixels = px + (unsigned long)(frames[at].y - band[1]) * compositor_whole_lines(band[2]) + (frames[at].x - band[0]),
+                                        frames[at].pitch = compositor_whole_lines(band[2]);
+                                else
+                                        frames[at].fill = compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+                                frames[at].radius = band[3] / 2, frames[at].line = line, frames[at].edge = compositor_line_unlit();
+                                at++;
+                        }
+                }
                 if (!word[0])
                 {
                         // A folder: its tab, and its body under it, in the quiet ink.
@@ -1514,9 +1722,13 @@ static void compositor_wall_editor_hover(void)
              y - compositor_wall_editor.card[COMPOSITOR_WALL_COLOUR_CARD][1] != compositor_wall_editor.wheel_y))
                 compositor_wall_editor_wheel_send(WINDOW_EVENT_MOTION, 0, 0, 0);
 
-        if (card != compositor_wall_editor.hover || close != compositor_wall_editor.hover_close || seg != compositor_wall_editor.hover_seg)
+        int source = compositor_wall_editor_source_at(x, y);
+
+        if (card != compositor_wall_editor.hover || close != compositor_wall_editor.hover_close || seg != compositor_wall_editor.hover_seg ||
+            source != compositor_wall_editor.hover_source)
                 compositor_wall_editor_damage();
         compositor_wall_editor.hover = card, compositor_wall_editor.hover_close = close, compositor_wall_editor.hover_seg = seg;
+        compositor_wall_editor.hover_source = source;
 }
 
 // When the loop is owed its next pass for the spring: a frame after the last present while it is on its way, 0 at rest.

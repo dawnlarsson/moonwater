@@ -151,6 +151,12 @@
 #define SETTING_WALLPAPER_WORD 96  // the bytes of a word, its end with them: auto, dark, white, picture:NAME or curated:HEX
 #define SETTING_WALLPAPER_NAME 48  // and of a picture's name, letters, digits and dashes
 #define SETTING_WALLPAPER_MINI 512 // a miniature's longer side, at the most
+// A curated wallpaper's credit, as the list says it after its digest and id (a tab before each): its author and its licence, each at most
+// SETTING_WALLPAPER_CREDIT bytes less one (the command cuts a longer one at a character), and its source page, the address of the page that
+// carries its licence and history (setting_wallpaper_source), at most SETTING_WALLPAPER_SOURCE less one: a Commons title is 255 bytes at
+// the most, 765 percent-encoded, and the page's address 40 more.
+#define SETTING_WALLPAPER_CREDIT 128
+#define SETTING_WALLPAPER_SOURCE 1024
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
 #define SETTING_TOUCH_LEFT_PATH "/root/canvas.touch.left"
@@ -1912,6 +1918,69 @@ static bool setting_wallpaper_file(const char address_to word, const char addres
         string_append_bounded((string_address)path, (string_address)word + 8, room);
         string_append_bounded((string_address)path, (string_address)suffix, room);
         return true;
+}
+
+/*
+        A curated wallpaper's source page. The page is known for a picture of Wikimedia Commons alone: its original's address,
+        https://upload.wikimedia.org/wikipedia/commons/X/XY/NAME, is the page https://commons.wikimedia.org/wiki/File:NAME, NAME the last
+        segment kept byte for byte (it is escaped as Commons escapes it). Any other address has no page: the card says the author and the
+        licence with no button. A page is held to the feed's rules for an address wherever it is read: https, a host of letters, digits, dots
+        and dashes, a path that starts with a slash and has no segment of dots alone, its bytes printable ASCII with no blank, double quote,
+        angle bracket, backslash, backquote or fragment, and shorter than SETTING_WALLPAPER_SOURCE.
+*/
+#define SETTING_WALLPAPER_COMMONS_FILE "https://upload.wikimedia.org/wikipedia/commons/"
+#define SETTING_WALLPAPER_COMMONS_PAGE "https://commons.wikimedia.org/wiki/File:"
+static bool setting_wallpaper_source_ok(const char address_to text, positive length)
+{
+        positive at = 8, host;
+
+        if (length <= 8 || length >= SETTING_WALLPAPER_SOURCE || memory_compare(text, "https://", 8))
+                return false;
+        for (host = at; at < length && text[at] != '/'; at++)
+                if (!((text[at] >= 'a' && text[at] <= 'z') || (text[at] >= '0' && text[at] <= '9') || text[at] == '.' || text[at] == '-'))
+                        return false;
+        if (at == host || at >= length || text[host] == '.' || text[at - 1] == '.')
+                return false;
+        for (positive segment = at; at < length; at++)
+        {
+                char c = text[at];
+
+                if (c <= ' ' || c >= 0x7f || c == '"' || c == '<' || c == '>' || c == '\\' || c == '#' || c == '`')
+                        return false;
+                if (c == '/' || at + 1 == length)
+                {
+                        positive stop = c == '/' ? at : at + 1, from = segment + 1;
+                        bool dots = stop > from;
+
+                        for (positive k = from; k < stop; k++)
+                                dots &= text[k] == '.';
+                        if (dots && stop - from <= 2)
+                                return false;
+                        segment = at;
+                }
+        }
+        return true;
+}
+
+// The source page of a picture's original address (length bytes, not ended) into page, room bytes: false when it has none or it is no page.
+static bool setting_wallpaper_source(const char address_to url, positive length, char address_to page, positive room)
+{
+        positive prefix = sizeof(SETTING_WALLPAPER_COMMONS_FILE) - 1, name = length, made = sizeof(SETTING_WALLPAPER_COMMONS_PAGE) - 1;
+
+        page[0] = 0;
+        if (length <= prefix || memory_compare(url, SETTING_WALLPAPER_COMMONS_FILE, prefix))
+                return false;
+        while (name > prefix && url[name - 1] != '/')
+                name--;
+        if (name >= length || made + length - name >= room || made + length - name >= SETTING_WALLPAPER_SOURCE)
+                return false;
+        memory_copy(page, SETTING_WALLPAPER_COMMONS_PAGE, made);
+        memory_copy(page + made, url + name, length - name);
+        page[made + length - name] = 0;
+        if (setting_wallpaper_source_ok(page, made + length - name))
+                return true;
+        page[0] = 0;
+        return false;
 }
 
 // Whether a word's moon is the dark one: dark, or auto in a dark theme (white and auto in a light one are the ink on paper).

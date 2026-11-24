@@ -4054,6 +4054,110 @@ static void check_wallpaper_colour(void)
 }
 
 /*
+        A curated wallpaper's credit (setting.c's list, wallpaper.c's card): its source page is Commons's page of the original's file (the last
+        segment kept byte for byte), none for any other address, and an address is held to the feed's rules where it is read (https, a host
+        of lower case letters, digits, dots and dashes, a path with no dots segment, printable ASCII with no blank or quote). The list's
+        credit is read with its controls blanked and a source that is no page dropped; the card has its author and licence across its foot
+        and a Source button where the page is; pressed, and Enter on it after Tab, it asks the open tool for the page and the Scene's
+        wallpaper stays as it was.
+*/
+static void check_wallpaper_source(void)
+{
+    static struct windows *table_scratch;
+    static char scenes_path[64], pictures_path[64], curated_path[64], page[SETTING_WALLPAPER_SOURCE];
+    static struct compositor_frame frames[24];
+    static unsigned int rows[24];
+    static const char list[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef dusk\tA. Painter\x01\tCC BY-SA 4.0\t"
+                               "https://commons.wikimedia.org/wiki/File:Sunset_%28dusk%29.jpg\n"
+                               "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 dawn\tB. Painter\tCC BY 4.0\tjavascript:alert(1)\n";
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
+    const char *before;
+    positive length;
+    b32 derived, refused, read, drawn = 0, pressed = 0, keyed = 0;
+    int card = -1, pill[4];
+    const struct compositor_wall_band *band;
+
+    derived = setting_wallpaper_source("https://upload.wikimedia.org/wikipedia/commons/a/ab/Some_File%2C_x.jpg", 70, page, sizeof(page)) &&
+              string_equals((string_address)page, "https://commons.wikimedia.org/wiki/File:Some_File%2C_x.jpg") &&
+              !setting_wallpaper_source("https://example.org/wikipedia/commons/a/ab/x.jpg", 48, page, sizeof(page)) && !page[0] &&
+              !setting_wallpaper_source("http://upload.wikimedia.org/wikipedia/commons/a/ab/x.jpg", 56, page, sizeof(page)) &&
+              !setting_wallpaper_source("https://upload.wikimedia.org/wikipedia/commons/", 47, page, sizeof(page)) &&
+              !setting_wallpaper_source("https://upload.wikimedia.org/wikipedia/commons/a/ab/x y.jpg", 59, page, sizeof(page));
+    check("curated source: an original on Commons is its file's page there, its name kept as it is escaped, and any other address has none", derived);
+    refused = setting_wallpaper_source_ok("https://commons.wikimedia.org/wiki/File:A.jpg", 45) && !setting_wallpaper_source_ok("javascript:alert(1)", 19) &&
+              !setting_wallpaper_source_ok("https://a.org/b\x01", 16) && !setting_wallpaper_source_ok("https://a.org/b c", 17) &&
+              !setting_wallpaper_source_ok("https://a.org/x/../y", 20) && !setting_wallpaper_source_ok("https://a.org", 13) &&
+              !setting_wallpaper_source_ok("https://A.org/x", 15) && !setting_wallpaper_source_ok("https://a.org/x\"y", 17) &&
+              !setting_wallpaper_source_ok("https://a.org/x#y", 17) && !setting_wallpaper_source_ok("https://.org/x", 14);
+    check("curated source: a page is https, a host of lower case letters, digits, dots and dashes, a path with no dots segment, printable with no blank, quote or fragment",
+          refused);
+
+    length = positive_into_string((p8 address_to)scenes_path + 23, (positive)system_call(syscall(getpid)));
+    memory_copy(scenes_path, "/tmp/moonwater-walls-r.", 23), scenes_path[23 + length] = 0;
+    memory_copy(pictures_path, scenes_path, 24 + length), pictures_path[21] = 'p';
+    memory_copy(curated_path, scenes_path, 24 + length), curated_path[21] = 'c';
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path, compositor_walls_curated_path = curated_path;
+    compositor_wall_starts = 0, compositor_wall_opened = 0;
+    compositor_zero();
+    compositor.face = band_face, compositor.engine = &band_engine;
+    windows_scratch_zero(table_at);
+    table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u, table_at->motion = 1;
+    compositor.table = table_at, compositor.width = 1280, compositor.height = 800, compositor.scale = 100, compositor.direct_row = -1;
+    compositor_wall_rows.ready = 1;
+    (void)file_write_atomic_at(AT_FDCWD, (string_address)curated_path, list, sizeof(list) - 1, 0644);
+    compositor_walls_read();
+    read = compositor_walls.curateds == 2 && string_equals((string_address)compositor_walls.credit[0].author, "A. Painter ") &&
+           string_equals((string_address)compositor_walls.credit[0].licence, "CC BY-SA 4.0") &&
+           string_equals((string_address)compositor_walls.credit[0].source, "https://commons.wikimedia.org/wiki/File:Sunset_%28dusk%29.jpg") &&
+           string_equals((string_address)compositor_walls.credit[1].author, "B. Painter") && !compositor_walls.credit[1].source[0];
+    check("curated source: the list's credit is read with its controls blanked, and a source that is no page is none", read);
+    compositor_spaces_ensure();
+    compositor_wall_put(0, 1, "auto");
+    before = compositor_wall_word(0, 1);
+    compositor_wall_edit(0, 1);
+    compositor_wall_editor_frames(frames, rows, 0, 24);
+    for (unsigned int at = 0; at < compositor_wall_editor.cards; at++)
+        if (compositor_wall_editor_credit((int)at) && compositor_wall_editor_credit((int)at)->source[0])
+            card = (int)at;
+    if (card >= 0 && font_metrics_at(&band_face, 16 << 6).cell_height > 0 && compositor_wall_editor_pill(compositor_wall_editor.card[card], 100, pill))
+    {
+        band = &compositor_wall_editor.band[card - 2 - (int)compositor_walls.names];
+        drawn = band->pixels && band->button[2] > 0 && band->w == pill[2] &&
+                compositor_wall_editor.band[card - 1 - (int)compositor_walls.names].button[2] == 0; // the next one has no page: no button
+        compositor.pointer_x = pill[0] + band->button[0] + band->button[2] / 2, compositor.pointer_y = pill[1] + band->button[1] + band->button[3] / 2;
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        pressed = compositor_wall_opened && string_equals((string_address)compositor_wall_opened, (string_address)compositor_walls.credit[0].source) &&
+                  string_equals((string_address)compositor_wall_word(0, 1), (string_address)before) && compositor_wall_editing();
+        compositor_wall_opened = 0;
+        keyed = compositor_wall_editor_key(15, 1, 0, (unsigned int[2]){0, 0}, 0) && compositor_wall_editor.key_card == card;
+        compositor_wall_editor_key(15, 0, 0, (unsigned int[2]){0, 0}, 0);
+        keyed = keyed && compositor_wall_editor_key(28, 1, 0, (unsigned int[2]){'\r', 0}, 1) && compositor_wall_opened &&
+                string_equals((string_address)compositor_wall_word(0, 1), (string_address)before);
+        compositor_wall_editor_key(28, 0, 0, (unsigned int[2]){0, 0}, 0);
+        keyed = keyed && compositor_wall_editor_key(15, 1, 0, (unsigned int[2]){0, 0}, 0) && compositor_wall_editor.key_card == -1 &&
+                (ui_colour_card_state() & UI_COLOUR_KEYS);
+        compositor_wall_editor_key(15, 0, 0, (unsigned int[2]){0, 0}, 0);
+        check("curated source: the card has its credit across its foot and a Source button where the page is known, none where it is not", drawn);
+        check("curated source: Source pressed asks the open tool for its page, and the Scene's wallpaper is as it was", pressed);
+        check("curated source: Tab takes the keys to the Source and Enter opens it (the wallpaper as it was), Tab again gives them to the wheel", keyed);
+    }
+    else
+        string_format(log, "  curated source: the card's button NOT RUN -- no face for the band (argument 1)\n");
+    compositor_wall_edit(0, 0);
+    compositor_wall_editor.shown = 0, compositor_wall_editor.open = 0;
+    compositor_wall_veil_keep();
+    compositor_walls.lines = compositor_walls.names = compositor_walls.curateds = 0;
+    compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+    compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH, compositor_wall_starts = 1, compositor_wall_opened = 0;
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    system_remove_at(AT_FDCWD, (string_address)curated_path, 0);
+    compositor_wall_drop();
+    compositor_wall_rows.ready = 0;
+    compositor_zero();
+}
+
+/*
         The moon's motion. It grows about its middle while the pointer is over it, over the kit's ease, its plate with it, and back when the
         pointer leaves; what a press finds stays the disc at rest. With reduced motion it is grown at once. It turns a step at a time on the
         real clock while a hand has been about, the loop woken for the next step and no sooner, and rests two minutes after the last. And the

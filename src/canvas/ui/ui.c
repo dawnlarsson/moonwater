@@ -1116,6 +1116,12 @@ static unsigned int ui_colour_card_rest(void);
 static unsigned int ui_colour_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
                                         unsigned int theme, unsigned int accent);
 static unsigned int ui_colour_card_event(unsigned int type, unsigned int flags, int a, int b, int x, int y);
+static void ui_colour_card_keys(int on);
+// And the credit of a curated wallpaper on its card: the author and the licence, and a Source button where the page is known (its box
+// answered in button, w 0 for none). hover and keyed say the button is under the hand or has the editor's keys.
+static void ui_credit_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int hover,
+                                int keyed, int button[4]);
 
 
 // The panel's cells and what a press on one does:
@@ -7133,7 +7139,8 @@ LANGUAGE_ID(tray_settings, "Settings") \
 LANGUAGE_ID(ui_colour_hex, "a colour is six hex digits, rrggbb") \
 LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
 LANGUAGE_ID(ui_field_digits, "a number is digits") \
-LANGUAGE_ID(ui_field_full, "that is as much as it holds")
+LANGUAGE_ID(ui_field_full, "that is as much as it holds") \
+LANGUAGE_ID(wallpaper_source, "Source")
 
 enum
 {
@@ -36264,33 +36271,122 @@ static unsigned int ui_colour_card_rest(void)
         return asks;
 }
 
-// The wheel drawn over what is in the picture, in its middle inset by 8 logical pixels. Answers whether its motion asks for a next frame.
-static unsigned int ui_colour_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
-                                        unsigned int theme, unsigned int accent)
+// The keys on the wheel or taken off it (the editor's Tab between its wheel and the cards' Source buttons): its focus ring with them.
+static void ui_colour_card_keys(int on)
 {
-        struct ui address_to ui = &ui_colour_card.ui;
+        ui_colour_card.wheel.focused = ui_colour_card.wheel.keyed = on != 0;
+}
+
+// What the kit draws in for a picture of the compositor's: the theme of the windows taken for the drawing, the kit's own given back after.
+struct ui_card_theme
+{
+        struct ui_theme shown, from, to;
+        struct ui_tween turn;
+        unsigned int mode, accent, motion;
+        b32 made, busy;
+};
+
+static fn ui_card_theme_take(struct ui_card_theme address_to t, unsigned int theme, unsigned int accent)
+{
+        t->shown = ui_kit.shown, t->from = ui_kit.from, t->to = ui_kit.to, t->turn = ui_kit.turn;
+        t->mode = ui_kit.mode, t->accent = ui_kit.accent, t->motion = ui_kit.motion, t->made = ui_kit.made, t->busy = ui_kit.busy;
+        ui_kit_theme(theme, accent, 1);
+        ui_kit.now = (b64)ui_kit_clock(), ui_kit.busy = 0;
+}
+
+static fn ui_card_theme_give(const struct ui_card_theme address_to t)
+{
+        ui_kit.shown = t->shown, ui_kit.from = t->from, ui_kit.to = t->to, ui_kit.turn = t->turn;
+        ui_kit.mode = t->mode, ui_kit.accent = t->accent, ui_kit.motion = t->motion, ui_kit.made = t->made, ui_kit.busy = t->busy;
+}
+
+// A ui over a picture of the compositor's, its scratch the one it kept.
+static fn ui_card_ui(struct ui address_to ui, unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face)
+{
         unsigned int address_to scratch = ui->scratch;
-        int sw = ui->scratch_width, ss = ui->scratch_scale, pad;
-        struct ui_theme shown = ui_kit.shown, from = ui_kit.from, to = ui_kit.to;
-        struct ui_tween turn = ui_kit.turn;
-        unsigned int mode = ui_kit.mode, was_accent = ui_kit.accent, motion = ui_kit.motion;
-        b32 made = ui_kit.made, busy = ui_kit.busy;
-        if (!ui_colour_card.open || !pixels || w <= 0 || h <= 0)
-                return 0;
+        int sw = ui->scratch_width, ss = ui->scratch_scale;
         memory_zero(ui, sizeof(*ui));
         ui->engine = engine, ui->regular = ui->bold = face;
         ui->scale = scale > 0 ? scale : 100, ui->opaque = 1, ui->pixels = pixels, ui->pitch = pitch, ui->width = w, ui->height = ui->bottom = h;
         ui->scratch = scratch, ui->scratch_width = sw, ui->scratch_scale = ss;
         if (engine)
                 ui_scratch_fit(ui, (unsigned int)w);
-        ui_kit_theme(theme, accent, 1);
         ui_inks(ui, ui_role(UI_SURFACE) & 0xffffffu);
-        ui_kit.now = (b64)ui_kit_clock(), ui_kit.busy = 0;
+}
+
+/*
+        A curated wallpaper's credit on its card: a plate of the kit's surface across the picture (w by h, its rows pitch apart), the author
+        and the licence at its start, "author · licence" in the label's type cut to what fits, and at its end the Source button, the kit's
+        text button in the accent, where the page is known; the button's ring while it has the editor's keys. Answers the button's box in
+        button, its w 0 for none. Words are the language's (WORDS); the window reading from the right has the button at the start.
+*/
+static struct ui ui_credit_ui;
+static void ui_credit_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int hover,
+                                int keyed, int button[4])
+{
+        struct ui address_to ui = &ui_credit_ui;
+        struct ui_card_theme kept;
+        char line[2 * SETTING_WALLPAPER_CREDIT + 8], fitted[2 * SETTING_WALLPAPER_CREDIT + 16];
+        int pad, room, label_w = 0, button_w = 0;
+        button[0] = button[1] = button[2] = button[3] = 0;
+        if (!pixels || w <= 0 || h <= 0)
+                return;
+        ui_card_theme_take(&kept, theme, accent);
+        ui_card_ui(ui, pixels, pitch, w, h, scale, engine, face);
+        pad = ui_px(ui, 8);
+        ui_kit_fill(ui, &(struct ui_box){0, 0, w * 256, h * 256, h * 128, h * 128}, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, null);
+        if (engine && face)
+        {
+                if (source)
+                {
+                        struct ui_control c;
+                        memory_zero(&c, sizeof(c));
+                        c.kind = UI_BUTTON, c.variant = UI_BUTTON_TEXT, c.label = WORDS(wallpaper_source), c.hover = hover;
+                        label_w = ui_kit_measure(ui, (string_address)c.label, UI_LABEL_LARGE);
+                        button_w = label_w + 2 * ui_px(ui, 12);
+                        button_w = button_w > w ? w : button_w;
+                        button[0] = ui_mirror(w - button_w, button_w, 0, w), button[1] = 0, button[2] = button_w, button[3] = h;
+                        c.x = button[0] * 100 / ui->scale, c.y = 0, c.w = button_w * 100 / ui->scale, c.h = h * 100 / ui->scale;
+                        ui_control_place(&c);
+                        ui_control_draw_one(ui, &c);
+                        if (keyed)
+                        {
+                                struct ui_box ring = {button[0] * 256, 0, (button[0] + button_w) * 256, h * 256, h * 128, h * 128};
+                                ui_kit_focus_ring(ui, &ring);
+                        }
+                }
+                string_copy_bounded((p8 address_to)line, (string_address)(author && author[0] ? author : ""), sizeof(line));
+                if (author && author[0] && licence && licence[0])
+                        string_append_bounded((p8 address_to)line, (string_address) " \xc2\xb7 ", sizeof(line));
+                string_append_bounded((p8 address_to)line, (string_address)(licence ? licence : ""), sizeof(line));
+                room = w - 2 * pad - button_w;
+                if (line[0] && room > 0)
+                {
+                        string_address said = ui_fit(ui, (string_address)line, UI_LABEL_MEDIUM, room, fitted, sizeof(fitted));
+                        int width = ui_kit_measure(ui, said, UI_LABEL_MEDIUM), x = ui_mirror(pad, width, 0, w);
+                        ui_kit_text(ui, x, ui_kit_baseline(ui, (h - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), said, UI_LABEL_MEDIUM,
+                                    ui_role(UI_ON_SURFACE_VARIANT), 0);
+                }
+        }
+        ui_card_theme_give(&kept);
+}
+
+// The wheel drawn over what is in the picture, in its middle inset by 8 logical pixels. Answers whether its motion asks for a next frame.
+static unsigned int ui_colour_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                        unsigned int theme, unsigned int accent)
+{
+        struct ui address_to ui = &ui_colour_card.ui;
+        struct ui_card_theme kept;
+        int pad;
+        if (!ui_colour_card.open || !pixels || w <= 0 || h <= 0)
+                return 0;
+        ui_card_theme_take(&kept, theme, accent);
+        ui_card_ui(ui, pixels, pitch, w, h, scale, engine, face);
         pad = ui_px(ui, 8);
         ui_colour_draw(ui, &ui_colour_card.wheel, pad, pad, w - 2 * pad, h - 2 * pad);
         ui_colour_card.moving = ui_kit.busy && ui_colour_card.wheel.text.focused;
-        ui_kit.shown = shown, ui_kit.from = from, ui_kit.to = to, ui_kit.turn = turn;
-        ui_kit.mode = mode, ui_kit.accent = was_accent, ui_kit.motion = motion, ui_kit.made = made, ui_kit.busy = busy;
+        ui_card_theme_give(&kept);
         return ui_colour_card.moving;
 }
 

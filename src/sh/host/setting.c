@@ -858,10 +858,31 @@ static bipolar locale_curated_mini(string_address path, const p8 address_to byte
         return failed;
 }
 
-// The list the compositor shows: a line a wallpaper of the feed whose miniature is made, or none.
+// A credit of the feed's (an author, a licence) as the list keeps it, at to: no control, tab or line in it (a blank each), cut to fit
+// SETTING_WALLPAPER_CREDIT at a character's start. Answers how many bytes it took.
+static positive locale_curated_credit(mwfd_slice slice, p8 address_to to)
+{
+        positive length = slice.bytes ? slice.length : 0;
+
+        if (length >= SETTING_WALLPAPER_CREDIT)
+        {
+                length = SETTING_WALLPAPER_CREDIT - 1;
+                while (length && (slice.bytes[length] & 0xc0) == 0x80)
+                        length--;
+        }
+        for (positive at = 0; at < length; at++)
+                to[at] = slice.bytes[at] < 0x20 || slice.bytes[at] == 0x7f ? (p8)' ' : slice.bytes[at];
+        return length;
+}
+
+/*
+        The list the compositor shows: a line a wallpaper of the feed whose miniature is made, or none. A line is the picture's digest in hex
+        and its id, then a tab and its author, a tab and its licence, and a tab and its source page (setting_wallpaper_source: Commons's
+        page of the file, or nothing where there is none), which the card says and opens.
+*/
 static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive count)
 {
-        positive room = count * (64 + SETTING_WALLPAPER_NAME + 2) + 1, at = 0;
+        positive room = count * (64 + SETTING_WALLPAPER_NAME + 2 * SETTING_WALLPAPER_CREDIT + SETTING_WALLPAPER_SOURCE + 6) + 1, at = 0;
         p8 address_to text = (p8 address_to)memory_checked(room);
         p8 path[sizeof(LOCALE_CURATED_DIR "/") + 64 + 8];
         file_facts facts;
@@ -880,6 +901,12 @@ static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive c
                         continue;
                 at += 64, text[at++] = ' ';
                 memory_copy(text + at, items[k].id.bytes, items[k].id.length), at += items[k].id.length;
+                text[at++] = '\t', at += locale_curated_credit(items[k].author, text + at);
+                text[at++] = '\t', at += locale_curated_credit(items[k].license, text + at);
+                text[at++] = '\t';
+                if (items[k].url.bytes && setting_wallpaper_source((const char address_to)items[k].url.bytes, items[k].url.length, (char address_to)text + at,
+                                                                   SETTING_WALLPAPER_SOURCE))
+                        at += string_length(text + at);
                 text[at++] = '\n';
         }
         failed = host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, text, at, 0644, true);
