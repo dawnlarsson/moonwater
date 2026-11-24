@@ -2634,13 +2634,13 @@ static void check_taskbar_pins(void)
     positive_into_string((p8 *)root + string_length((string_address)root), (positive)system_call(syscall(getpid)));
     tab_remove_tree(root);
     tab_make_dir(root);
-    for (int each = 0; each < 20; each++)
+    for (int each = 0; each < 21; each++)
     {
-        static const char *const names[20] = {"/proc", "/root", "/root/.local", "/root/.local/share", "/root/.local/share/applications",
+        static const char *const names[21] = {"/proc", "/root", "/root/.local", "/root/.local/share", "/root/.local/share/applications",
                                               "/root/.local/share/icons", "/root/.local/share/icons/hicolor", "/root/.local/share/icons/hicolor/16x16",
                                               "/root/.local/share/icons/hicolor/16x16/apps", "/run", "/bowls", "/bowls/bin", "/bowls/alpine",
                                               "/bowls/alpine/usr", "/bowls/alpine/usr/share", "/bowls/alpine/usr/share/applications", "/bowls/arch",
-                                              "/bowls/arch/usr", "/bowls/arch/usr/share", "/bowls/arch/usr/share/applications"};
+                                              "/bowls/arch/usr", "/bowls/arch/usr/share", "/bowls/arch/usr/share/applications", "/root/Applications"};
 
         string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)names[each], sizeof(path));
         tab_make_dir(path);
@@ -2748,7 +2748,19 @@ static void check_taskbar_pins(void)
               named >= 0 && memory_has_suffix((string_address)ui_apps.app[named].source, string_length((string_address)ui_apps.app[named].source),
                                               "/applications/appimage-Hello-World-x64.desktop") &&
                   ui_apps_uninstallable(named));
-        if (tool < 0 || tools != 1)
+        if (named < 0)
+        {
+                char launch[UI_APP_PATH], profile[48];
+                struct ui_apps_facts facts;
+                b32 launcher = ui_apps_launcher("", "appimage", launch, sizeof(launch), profile, sizeof(profile));
+                long stat = system_stat_at(AT_FDCWD, (string_address)want, AT_SYMLINK_NOFOLLOW, 0x7ff, &facts);
+                profile[launcher ? sizeof(profile) - 1 : 0] = 0;
+                string_format(log, "  apps appimage: launcher %p profile [%s], file %s stat %p mode %p owner %p (want %p), count %p\n", (positive)launcher,
+                              (string_address)profile, (string_address)want, (positive)(stat < 0 ? -stat : stat), (positive)facts.mode, (positive)facts.owner,
+                              (positive)ui_apps_owner, (positive)ui_apps.count);
+                log_flush();
+        }
+        if (tool < 0 || tools != 1 || named < 0)
                 for (int at = 0; at < ui_apps.count; at++)
                         if (!ui_apps.app[at].kit)
                         {
