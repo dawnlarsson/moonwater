@@ -1074,13 +1074,15 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
                 cur.x = px, cur.y = py, cur.width = pw, cur.height = ph, cur.pitch = (unsigned long)pw;
                 if (gpu_backend == &gpu_i915_row)
                 {
+                        // (the tile's rows on whole 64-byte lines, as the card reads a picture: compositor_gpu_i915_tile_pitch)
+                        unsigned int tp = compositor_gpu_i915_tile_pitch(pw);
                         positive tile_va = 0;
-                        unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)pw * (unsigned long)ph, &tile_va);
+                        unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)tp * (unsigned long)ph, &tile_va);
 
                         if (!tile)
                                 return compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL, false;
-                        memory_copy_rect_u32(tile, (positive)pw, compositor_picture.premultiplied, CP_PLANE, (positive)pw, (positive)ph);
-                        cur.gpu_base = tile_va;
+                        memory_copy_rect_u32(tile, (positive)tp, compositor_picture.premultiplied, CP_PLANE, (positive)pw, (positive)ph);
+                        cur.gpu_base = tile_va, cur.pitch = tp;
                 }
                 else
                 {

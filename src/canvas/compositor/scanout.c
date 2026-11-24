@@ -307,6 +307,7 @@ static struct
                                     // its mode set, waits for its jobs in place
         b32 on;                     // a present's jobs are on the card, or waiting for their turn
         b32 failed;                 // one was refused after one before it was submitted: the frame is drawn again once those are done
+        b32 again_processor;        // a job was refused (not late): the frame drawn again is the processor's, not the card's to refuse again
         b32 fenced;                 // the flip was committed with the last job's sync_file
         unsigned int steps, next, submitted; // the jobs, the next to submit, and how many were
         struct compositor_card_step step[COMPOSITOR_CARD_STEPS];

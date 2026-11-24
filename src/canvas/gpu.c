@@ -3639,6 +3639,27 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         return 64;
 }
 
+// Whether the started card's set draws a scene of these n records (8 words each, at ops) at all, by what a record is: a set that makes its own
+// command words (i915's) draws a fill, a tone, a picture copied and a picture laid over, the pictures on a pitch of whole 64-byte lines, and refuses
+// the scene for one record of another kind or pitch (gpu_i915_scene_batch); the kernels by hand take every kind. A present asks before it makes
+// its jobs: one made of several (the scaled pictures first, i915's taskbar rows apart) and refused at its second has its first already on the card,
+// and can only be given up and drawn again.
+static b32 gpu_scene_takes(const unsigned int address_to ops, unsigned int n)
+{
+        if (!gpu_set || !gpu_set->batch)
+                return true;
+        for (unsigned int i = 0; i < n; i++)
+        {
+                unsigned int r[8], k;
+
+                memory_copy(r, ops + 8 * i, 32);
+                k = r[0] & ~0x80u;
+                if ((r[0] > 1u && k != 4u && k != 11u) || ((k == 4u || k == 11u) && (!r[7] || r[7] > 65535u || (r[7] & 15u))))
+                        return false;
+        }
+        return true;
+}
+
 // The batch for one job, by op: 0 copy, 1 fill, 2 tone and 3 glass take the byte surface (the whole rows, or refused: the processor draws a
 // refused job), 4 the scene's cp, 6 the scene and 7 the scale have encoders of their own (above). The state region holds the binding table (entry 0
 // the destination's surface state, entry 1 the source's, entry 2 the glass ground's), the surface states, the interface descriptor and at 192 the colour

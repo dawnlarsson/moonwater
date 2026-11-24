@@ -850,7 +850,7 @@ static int compositor_card_go(void)
                 {
                         if (gpu_end == GPU_END_LATE && !gpu_lost)
                                 return 0;
-                        compositor_card.next = compositor_card.steps;
+                        compositor_card.next = compositor_card.steps, compositor_card.again_processor = 1;
                         gpu_handed_hold = 0, gpu_handed_clear();
                         return -1;
                 }
@@ -928,6 +928,12 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return COMPOSITOR_GPU_WHY_ALIGN;
         if (!gpu_idle()) // a job given up on may still read the buffer: no record is written into it until it is done
                 return COMPOSITOR_GPU_WHY_BUSY;
+        // A frame the card gave up for a job it refused is the processor's. Its jobs before the refused one were on the card already, so it was given
+        // up whole and is drawn again whole (compositor_card_abandon): given to the card again it was refused at the same job, given up, drawn again,
+        // without end, and nothing reached the screen (i915 draws the taskbar's rows as a job of their own: with a picture there it refuses, the moon's
+        // glow, the pointer over the taskbar did not move until something else drew).
+        if (compositor_card.again_processor)
+                return compositor_card.again_processor = 0, COMPOSITOR_GPU_WHY_OTHER;
         // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
         // maps of the pictures and let none go, and once all were held the GPU drew nothing again.
         gpu_trim();
@@ -1041,6 +1047,14 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return g->why;
         }
         g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
+        // The card is asked whether it draws these records before any job is made of them: a present of several jobs refused at its second is a frame
+        // given up, where one refused here is the processor's at once.
+        if (!gpu_scene_takes(g->ops, g->count))
+        {
+                if (!gpu.pending)
+                        gpu_handed_clear();
+                return COMPOSITOR_GPU_WHY_OTHER;
+        }
         if (compositor_card.nowait && compositor_card.looped && !gpu_needs_shadow_output())
         {
                 // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.

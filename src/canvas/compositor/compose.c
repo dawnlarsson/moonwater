@@ -1572,6 +1572,15 @@ static positive compositor_gpu_i915_tiles_va(void)
         return base;
 }
 
+// A tile's pitch in pixels: its width in whole 64-byte lines. i915 finds a picture's row only where the row begins as far into a line as the first
+// does (gpu_i915_scene_batch refuses another pitch), and a tile as wide as its piece (a pointer's 21 pixels, a corner's cover) was refused with every
+// present it was in.
+#define COMPOSITOR_I915_COPIED_MOST (256ul * 256ul) // the pixels of a picture's part copied to a tile on whole lines for the card (compositor_gpu_rect)
+static inline unsigned int compositor_gpu_i915_tile_pitch(int w)
+{
+        return ((unsigned int)w + 15u) & ~15u;
+}
+
 static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positive *va_out)
 {
         unsigned long bytes = (words * 4ul + 31ul) & ~31ul;
@@ -1594,7 +1603,7 @@ static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positiv
 
 static unsigned int *compositor_gpu_i915_solid_tile(unsigned int cov_off, unsigned int colour, int w, int h, int r, positive *va_out, int *hit)
 {
-        unsigned long bytes = ((unsigned long)w * (unsigned long)h * 4ul + 31ul) & ~31ul;
+        unsigned long bytes = ((unsigned long)compositor_gpu_i915_tile_pitch(w) * (unsigned long)h * 4ul + 31ul) & ~31ul;
         positive base = compositor_gpu_i915_tiles_va();
 
         *hit = 0;
@@ -1624,7 +1633,7 @@ static unsigned int *compositor_gpu_i915_solid_tile(unsigned int cov_off, unsign
                 *va_out = base + off;
                 return (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + off);
         }
-        return compositor_gpu_i915_tile_alloc((unsigned long)w * (unsigned long)h, va_out);
+        return compositor_gpu_i915_tile_alloc((unsigned long)compositor_gpu_i915_tile_pitch(w) * (unsigned long)h, va_out);
 }
 
 static inline unsigned int compositor_gpu_mul255(unsigned int c, unsigned int a)
@@ -1665,10 +1674,10 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                 if (r > 0 && (!frame || (!frame->tiled_kind && frame->pixels)))
                 {
                         int w = cx1 - cx0, h = cy1 - cy0, hit = 0;
-                        unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0));
+                        unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), tp = compositor_gpu_i915_tile_pitch(w);
                         positive tile_va = 0;
                         unsigned int *tile = !frame ? compositor_gpu_i915_solid_tile(slice_off, colour, w, h, r, &tile_va, &hit)
-                                                    : compositor_gpu_i915_tile_alloc((unsigned long)w * (unsigned long)h, &tile_va);
+                                                    : compositor_gpu_i915_tile_alloc((unsigned long)tp * (unsigned long)h, &tile_va);
 
                         if (tile)
                         {
@@ -1682,7 +1691,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                                         for (int row = 0; row < h; row++)
                                         {
                                                 const unsigned char *crow = cov + row * r;
-                                                unsigned int *drow = tile + row * w;
+                                                unsigned int *drow = tile + (unsigned long)row * tp;
 
                                                 for (int col = 0; col < w; col++)
                                                 {
@@ -1704,7 +1713,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                                         {
                                                 const unsigned char *crow = cov + row * r;
                                                 const unsigned int *srow = src + (unsigned long)row * sp;
-                                                unsigned int *drow = tile + row * w;
+                                                unsigned int *drow = tile + (unsigned long)row * tp;
 
                                                 for (int col = 0; col < w; col++)
                                                 {
@@ -1729,7 +1738,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                                         }
                                 }
                                 op[0] = 11u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
-                                op[5] = (unsigned int)tile_va, op[6] = (unsigned int)(tile_va >> 32), op[7] = (unsigned int)w;
+                                op[5] = (unsigned int)tile_va, op[6] = (unsigned int)(tile_va >> 32), op[7] = tp;
                                 g->count++;
                                 return;
                         }
@@ -1747,6 +1756,35 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                         op[5] = g->frame_desc, op[6] = origin, op[7] = 0;
                 else
                         op[6] = g->frame_desc, op[7] = origin;
+        }
+        else if (frame && gpu_backend == &gpu_i915_row && (kind == 4 || kind == 11) && frame->pixels && (frame->pitch & 15) &&
+                 (unsigned long)(cx1 - cx0) * (unsigned long)(cy1 - cy0) <= COMPOSITOR_I915_COPIED_MOST)
+        {
+                // i915 reads a picture only on a pitch of whole 64-byte lines, and the scene's batch refuses another. A small picture made at its own
+                // width (the moon's glow, a menu, a corner) has its part of the damage copied to a tile on whole lines, which the card reads; a large
+                // one (a client's buffer of an odd stride) is left as it is, and that scene is the processor's.
+                int w = cx1 - cx0, h = cy1 - cy0;
+                unsigned int tp = compositor_gpu_i915_tile_pitch(w);
+                positive tile_va = 0;
+                unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)tp * (unsigned long)h, &tile_va);
+
+                if (tile)
+                {
+                        memory_copy_rect_u32(tile, (positive)tp, frame->pixels + (unsigned long)(cy0 - frame->y) * frame->pitch + (unsigned long)(cx0 - frame->x),
+                                             (positive)frame->pitch, (positive)w, (positive)h);
+                        op[5] = (unsigned int)tile_va, op[6] = (unsigned int)(tile_va >> 32), op[7] = tp;
+                        if (frame->swap)
+                                op[0] |= 0x80u;
+                        g->count++;
+                        return;
+                }
+                {
+                        positive at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
+
+                        op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = (unsigned int)frame->pitch;
+                        if (frame->swap)
+                                op[0] |= 0x80u;
+                }
         }
         else if (frame)
         {
