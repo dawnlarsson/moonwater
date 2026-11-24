@@ -1639,18 +1639,17 @@ static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row
 #define GPU_BACKENDS (sizeof(gpu_backends) / sizeof(gpu_backends[0]))
 static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: the picked node's (amdgpu's until a start picks one: a check's fake card is amdgpu's)
 
-// The generations whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower): every i915 family. The scene is right
-// and fast on them alone (CHECK_gpu_scene: no pixel wrong of 157 million on an Ivy Bridge, a Haswell and an Alder Lake; a 1080p desktop's scene 1.3 to
-// 3.0 ms; headless, the compositor a sixth to a third of its processor time), and it was the default for an afternoon (5150098dc, c544b3a83). On the
-// lab's desktops with a person at them it was not right: i915's pointer is drawn into the scene (no plane of its own there yet), so nine presents in
-// ten held the pointer's pieces, which the scene's batch refuses, and were drawn by the processor after the card had been tried; and with the pointer
-// over the taskbar the card took the presents and the pointer did not move on the screen until something else drew (a virtual mouse swept over the
-// taskbar: 23 of 24 steps changed nothing on an Ivy Bridge, a Haswell and an Alder Lake, none with canvas gpu off). Until a desktop with its pointer is
-// right and measured faster, the processor composes there by default and canvas gpu on is the way to the card.
+// The generations whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower): none. Every card Canvas has a set for
+// composes by default, and canvas gpu off is the way to the processor. i915 was the processor's by default for a day (fcac733e2): its pointer was
+// drawn into the scene, most presents with it were refused, and a frame given up was tried again without end. With those mended (dd15a085f,
+// a4e0bfe02) its desktops were run with the card on, a person's screen and a virtual mouse on each (an Ivy Bridge HD 2500, two Haswells, a Coffee
+// Lake UHD 630, an Alder Lake UHD 710): no step of the pointer's sweeps left the screen as it was, no present refused, no vblank missed, and the
+// compositor's processor time with a terminal scrolling was 26 to 38 percent less than with the card off. A chip whose kernels do not draw the
+// self-test's pictures is not started at all, whatever this says.
 static b32 gpu_slower(const struct gpu_backend *backend, unsigned int family)
 {
-        (void)family;
-        return backend == &gpu_i915_row;
+        (void)backend, (void)family;
+        return false;
 }
 
 static const struct gpu_backend *gpu_backend_of(const char *name)

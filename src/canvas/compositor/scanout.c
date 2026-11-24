@@ -80,7 +80,7 @@ enum
         DRV_APART_VRAM      = 1u << 2,
         DRV_VIRTUAL         = 1u << 3,
         DRV_FIRMWARE        = 1u << 4,
-        DRV_NO_CURSOR_PLANE = 1u << 5,
+        DRV_CURSOR_PROBED   = 1u << 5, // the cursor plane is kept only after its probe (kms.c's compositor_cursor_probed)
         DRV_AMD             = 1u << 6,
         DRV_INTEL           = 1u << 7,
 };
@@ -104,8 +104,8 @@ static unsigned int drm_driver_flags(const char *name)
                 {"amdgpu",      DRV_NO_IMPORT_FB | DRV_APART_VRAM | DRV_AMD},
                 {"radeon",      DRV_APART_VRAM},
                 {"nouveau",     DRV_APART_VRAM},
-                {"i915",        DRV_NO_CURSOR_PLANE | DRV_INTEL},
-                {"xe",          DRV_NO_CURSOR_PLANE | DRV_INTEL},
+                {"i915",        DRV_CURSOR_PROBED | DRV_INTEL},
+                {"xe",          DRV_CURSOR_PROBED | DRV_INTEL},
                 {"bochs-drm",   DRV_APART_VRAM | DRV_VIRTUAL},
                 {"qxl",         DRV_APART_VRAM | DRV_VIRTUAL},
                 {"vmwgfx",      DRV_APART_VRAM | DRV_VIRTUAL},

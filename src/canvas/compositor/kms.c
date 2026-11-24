@@ -2067,14 +2067,16 @@ static void compositor_cursor_damage(void)
 }
 
 /*
-        The cursor plane's probe, made where the machine's owner asks for it (COMPOSITOR_CURSOR_PROBE_FILE there at the pointer's start).
-        i915 and xe are refused the plane by their names, for the reason 23811f25 gives in four words ("stop their pipe on one", a
-        dumb buffer on the plane), with no machine or log behind it, and there is none here to try it on. Asked, the names are not
-        refused: the plane is given its first picture and its crtc asked for one vblank event, waited for COMPOSITOR_CURSOR_PROBE_NS.
-        One that comes is a pipe that runs on with the plane, which is kept; none is the pipe the note means, and the plane is taken
-        off and the pointer drawn, which the log and `moonwater debug`'s pointer line say. A card that cannot be asked for a vblank
-        tells nothing, and the names' refusal stands for it. Without the file all is as it was; the names go only once the probe
-        has been run on such a machine and shown to be enough alone.
+        The cursor plane's probe, made at the pointer's start on a card whose driver is named for it (i915 and xe), and on any card where the
+        machine's owner asks for it (COMPOSITOR_CURSOR_PROBE_FILE there then). i915 and xe were refused the plane by their names, for the
+        reason 23811f25 gives in four words ("stop their pipe on one", a dumb buffer on the plane), with no machine or log behind it, so on
+        every Intel machine the pointer was drawn into the scene and each move of it was a present. Probed, the names are not refused: the
+        plane is given its first picture and its crtc asked for one vblank event, waited for COMPOSITOR_CURSOR_PROBE_NS. One that comes is
+        a pipe that runs on with the plane, which is kept; none is the pipe the note means, and the plane is taken off and the pointer
+        drawn, which the log and `moonwater debug`'s pointer line say. A card of those names that cannot be asked for a vblank tells
+        nothing, and its pointer is drawn. Run on an Ivy Bridge HD 2500, a Haswell HD 4400, a Coffee Lake UHD 630 and an Alder Lake UHD 710
+        (i915, a desktop each): the vblank came on all four, the plane was kept, no underrun or lost flip in the kernel's log, and with a
+        terminal scrolling and the pointer moving the compositor's processor time was a third to all of what it was with the pointer drawn.
 */
 #define COMPOSITOR_CURSOR_PROBE_FILE "/run/moonwater/cursor-plane-probe"
 #define COMPOSITOR_CURSOR_PROBE_NS 100000000ull
@@ -2084,7 +2086,7 @@ static void compositor_cursor_damage(void)
 
 static struct
 {
-        int asked;   // the file was there at the pointer's start
+        int asked;   // the file was there at the pointer's start, or the driver is one named for the probe
         int done;    // the probe has been made
         int stopped; // and the plane was taken off for it
 } compositor_cursor_probe;
@@ -2095,10 +2097,10 @@ static int compositor_cursor_probe_asked(void)
         return (int)canvas_switch_exists(COMPOSITOR_CURSOR_PROBE_FILE, O_NOFOLLOW);
 }
 
-// Whether the card's driver is one refused the plane by name.
+// Whether the card's driver is one whose plane is kept only after the probe, by its name.
 static int compositor_cursor_named(void)
 {
-        return (compositor.driver_flags & DRV_NO_CURSOR_PLANE) != 0;
+        return (compositor.driver_flags & DRV_CURSOR_PROBED) != 0;
 }
 
 /*
@@ -2172,7 +2174,7 @@ static int compositor_cursor_probed(int answer)
         if (answer == 0)
                 log_direct(str("compositor: the cursor plane's probe: no vblank within 100 ms of the plane's first picture; the plane is taken off and the pointer drawn\n"));
         else
-                log_direct(str("compositor: the cursor plane's probe: the card gives no vblank to ask for, and its driver is refused the plane by name; the pointer is drawn\n"));
+                log_direct(str("compositor: the cursor plane's probe: the card gives no vblank to ask for, and its driver's plane is kept only after one; the pointer is drawn\n"));
         return -1;
 }
 
@@ -2182,14 +2184,11 @@ static unsigned int compositor_pointer_plane_word(void)
         return !compositor.cursor.soft ? 1u : compositor_cursor_probe.stopped ? 2u : 0u;
 }
 
-// Whether this card's cursor plane is worth using: the driver's name (unless the probe is asked for) and the setting Canvas was started with.
+// Whether this card's cursor plane is worth using: the setting Canvas was started with (a driver named for the probe is probed, not refused).
 static int compositor_cursor_plane_wanted(void)
 {
         p8 setting[4] = {0};
         bipolar handle;
-
-        if (!compositor_cursor_probe.asked && compositor_cursor_named())
-                return 0;
 
         handle = system_open_at(AT_FDCWD, (string_address) "/sys/module/moonwater/parameters/cursor_plane",
                                 FILE_READ | O_CLOEXEC | O_NOFOLLOW);
@@ -2461,7 +2460,7 @@ static void compositor_cursor_start(void)
         struct drm_dumb d[2];
 
         compositor.cursor.plane_on = 0;
-        compositor_cursor_probe.asked = compositor_cursor_probe_asked();
+        compositor_cursor_probe.asked = compositor_cursor_probe_asked() || compositor_cursor_named();
         compositor_cursor_probe.done = compositor_cursor_probe.stopped = 0;
         if (compositor.card < 0 || !compositor_cursor_plane_wanted())
         {
