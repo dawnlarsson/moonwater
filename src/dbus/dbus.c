@@ -2970,16 +2970,15 @@ static long dbus_choice_response(const struct dbus_client *c, const char *path, 
 /*
         OpenURI's methods, where the host opens (the sessionbus: the open tool, what opens what): OpenURI a page, a link of a program's
         own scheme (a sign-in's way back) or a file: URI; OpenFile the file of a descriptor the caller sent, OpenDirectory the folder it
-        is in. The request ends at once, answered 0 when the host took it and 2 when it could not. A URI is one line of text: no byte
-        under a blank, at most DBUS_OPEN_URI bytes. 1 when the call was one of these and is answered.
+        is in. The request ends at once, answered 0 when the host took it and 2 when it could not. A URI is one line of text with no
+        byte under a blank, as long as the message that brings it (a sign-in's address can be long): given to the host where it is in
+        the message, which ends every string with a null. 1 when the call was one of these and is answered.
 */
-#define DBUS_OPEN_URI 8192
 // The descriptors the call the service answers now came with (dbus_route), none between calls.
 static const int *dbus_call_fds;
 static long dbus_call_nfds;
 static int dbus_portal_open(struct dbus_client *from, const struct dbus_message *m)
 {
-        static char uri[DBUS_OPEN_URI + 1];
         const unsigned char *text;
         long length, code = 2;
         int file = dbus_equal(m->member, "OpenFile"), folder = dbus_equal(m->member, "OpenDirectory");
@@ -2994,11 +2993,8 @@ static int dbus_portal_open(struct dbus_client *from, const struct dbus_message 
                 length = dbus_arg_text(m, 1, &text);
                 while (k < length && text[k] >= 0x20 && text[k] != 0x7f)
                         k++;
-                if (length > 0 && length <= DBUS_OPEN_URI && k == length)
-                {
-                        dbus_copy(uri, text, length), uri[length] = 0;
-                        code = dbus.host->open(dbus.host->context, uri, length, -1, 0) < 0 ? 2 : 0;
-                }
+                if (length > 0 && k == length && !text[length])
+                        code = dbus.host->open(dbus.host->context, (const char *)text, length, -1, 0) < 0 ? 2 : 0;
         }
         else
         {

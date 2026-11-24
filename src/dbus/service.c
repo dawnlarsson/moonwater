@@ -429,6 +429,8 @@ static long sessionbus_open(void *context, const char *target, long length, int 
                 if (quiet >= 0)
                         sessionbus_call(syscall(dup3), (positive)quiet, 0, 0, 0, 0, 0), sessionbus_call(syscall(dup3), (positive)quiet, 1, 0, 0, 0, 0);
                 sessionbus_call(syscall(setsid), 0, 0, 0, 0, 0, 0);
+                // This program's own binary as the open tool (argv[0] names the tool): no link of the image's is needed for it.
+                system_execute((string_address) "/proc/self/exe", argv, environment);
                 system_execute(argv[0], argv, environment);
                 sessionbus_call(syscall(exit_group), 127, 0, 0, 0, 0, 0);
         }

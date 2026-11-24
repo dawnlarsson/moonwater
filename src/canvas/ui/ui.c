@@ -6786,6 +6786,9 @@ LANGUAGE_ID(notices_item_once_now, "%1$s: %2$s (once, just now)") \
 LANGUAGE_ID(notices_item_times, "%1$s: %2$s (%3$d times, %4$d min ago)") \
 LANGUAGE_ID(notices_item_times_now, "%1$s: %2$s (%3$d times, just now)") \
 LANGUAGE_ID(notices_open, "Open System notices") \
+LANGUAGE_ID(open_copied, "It is copied: paste it into a browser. %s") \
+LANGUAGE_ID(open_failed, "The link could not be opened") \
+LANGUAGE_ID(open_nothing, "No app here opens %s") \
 LANGUAGE_ID(settings_about_discord, "Join the community: %s") \
 LANGUAGE_ID(settings_about_github, "Report bugs and issues: %s") \
 LANGUAGE_ID(settings_about_header, "About") \
@@ -29361,22 +29364,26 @@ static int ui_handler_find(const char address_to handle);
 static fn ui_handlers_read(void);
 static b32 ui_open_chosen(const char address_to key, char address_to into, positive room);
 static b32 ui_handler_start(int which, const char address_to target, const char address_to path);
+/*
+        A target opened by the open tool apart from the window that asks (src/canvas/ui/open.c): it tries every way there is and
+        watches what it starts (ui_open), which a window does not wait for. False where the tool could not be started.
+*/
+static b32 ui_open_apart(const char address_to target)
+{
+        string_address words[4] = {(string_address) "/open", (string_address) "--", (string_address)target, null};
+        return target && target[0] && ui_start_apart(words, 3);
+}
+
+// A page's address opened: by the open tool (the person's browser and every way after it), else the registry's browser as before.
 static b32 ui_browser_open(const char address_to target)
 {
         string_address words[UI_APP_START_WORDS + 2];
         int browser;
         positive count;
-        char handle[UI_OPEN_HANDLE];
         if (!target || !target[0])
                 return false;
-        // The browser the person chose (moonwater defaults browser, Settings' Default apps), where they chose one.
-        if (ui_open_chosen("browser", handle, sizeof(handle)))
-        {
-                int chosen;
-                ui_handlers_read();
-                if ((chosen = ui_handler_find(handle)) >= 0)
-                        return ui_handler_start(chosen, target, target[0] == '/' ? target : null);
-        }
+        if (ui_open_apart(target))
+                return true;
         if ((browser = ui_apps_browser()) < 0)
                 return false;
         count = ui_apps_words_of(browser, words, null, null, null);
@@ -29412,6 +29419,7 @@ struct ui_handler
         p32 exec, types;        // into ui_handlers.text: the Exec as the entry says it, and its MimeType (';' apart), each null-ended
         int kit;                // a kit program: its place in ui_kit_programs + 1, 0 none
         b32 shown;              // the launcher lists it (no NoDisplay): a program a person is offered to choose
+        b32 terminal;           // Terminal=true: started in a terminal
 };
 
 static struct
@@ -29554,7 +29562,7 @@ static fn ui_handlers_folder(const char address_to root, const char address_to s
                                 string_copy_bounded((p8 address_to)h->root, (string_address)root, sizeof(h->root));
                                 h->exec = ui_handlers_keep(desktop.exec, string_length((string_address)desktop.exec));
                                 h->types = ui_handlers_keep(desktop.types, desktop.types_length);
-                                h->shown = !desktop.no_display;
+                                h->shown = !desktop.no_display, h->terminal = desktop.terminal;
                                 if (h->exec && h->types)
                                         ui_handlers.count++;
                         }
@@ -29705,28 +29713,133 @@ static b32 ui_open_chosen(const char address_to key, char address_to into, posit
         return found;
 }
 
-// The handler a type is opened with (ui_handlers read): the person's choice for the type, for its kind, else the first that takes it.
-static int ui_open_handler(const char address_to type, b32 address_to chosen)
+// A handler by a desktop entry's id (ID or ID.desktop) in any bowl, the first that takes the type, else the first of the id: -1 none.
+static int ui_handler_of_id(const char address_to id, positive length, const char address_to type)
+{
+        int first = -1;
+        if (length > 8 && !memory_compare(id + length - 8, ".desktop", 8))
+                length -= 8;
+        for (int at = 0; at < ui_handlers.count && length; at++)
+        {
+                const char address_to handle = ui_handlers.handler[at].handle, address_to colon = (const char address_to)string_first_of((string_address)handle, ':');
+                const char address_to name = colon ? colon + 1 : handle;
+                if (string_length((string_address)name) != length || memory_compare(name, id, length))
+                        continue;
+                if (ui_handler_takes(&ui_handlers.handler[at], type))
+                        return at;
+                first = first < 0 ? at : first;
+        }
+        return first;
+}
+
+/*
+        What a program said opens its own links (mimeapps.list's [Default Applications], each entry's ids in order: xdg-mime default,
+        Electron's setAsDefaultProtocolClient), for a scheme of a program's own: discord:, vscode:, an app's sign-in callback. Not for
+        a page, mail or a file's type, which are the person's to choose (UI_OPEN_DEFAULTS) and the kit's before any bowl's; and not a
+        distribution's own list, which says what its desktop would. A handler, or -1.
+*/
+static int ui_open_mimeapps(const char address_to type)
+{
+        static const char address_to const own[] = {"/root/.config/mimeapps.list", "/root/.local/share/applications/mimeapps.list"};
+        positive length = string_length((string_address)type);
+        if (!string_has_prefix((string_address)type, "x-scheme-handler/") || ui_open_kind_of(type))
+                return -1;
+        for (positive file = 0; file < sizeof(own) / sizeof(own[0]); file++)
+        {
+                positive size = 0, bytes;
+                const char address_to text;
+                b32 in = false;
+                int found = -1;
+                if (!(bytes = compositor_map_file((string_address)own[file], &size)))
+                        continue;
+                text = (const char address_to)bytes;
+                for (positive at = 0; at < size && found < 0;)
+                {
+                        positive stop = at;
+                        while (stop < size && text[stop] != '\n')
+                                stop++;
+                        if (text[at] == '[')
+                                in = stop - at >= 22 && !memory_compare(text + at, "[Default Applications]", 22);
+                        else if (in && stop - at > length + 1 && !memory_compare(text + at, type, length) && text[at + length] == '=')
+                                for (positive id = at + length + 1; id < stop && found < 0;)
+                                {
+                                        positive end_at = id;
+                                        while (end_at < stop && text[end_at] != ';')
+                                                end_at++;
+                                        found = end_at > id ? ui_handler_of_id(text + id, end_at - id, type) : -1;
+                                        id = end_at + 1;
+                                }
+                        at = stop + 1;
+                }
+                system_call_2(syscall(munmap), bytes, size);
+                if (found >= 0)
+                        return found;
+        }
+        return -1;
+}
+
+// How well a handler fits a type, as the automatic order ranks it: the kit's before a bowl's, named before grouped, listed before hidden.
+#define UI_OPEN_RANK_MOST (8 + 2 * 2 + 1) // the kit's, naming the type, listed
+static int ui_open_rank(const struct ui_handler address_to h, const char address_to type)
+{
+        int takes = ui_handler_takes(h, type);
+        return takes ? (h->kit ? 8 : 0) + takes * 2 + (h->shown ? 1 : 0) : 0;
+}
+
+/*
+        The handlers a type is tried with, in order, into order (ui_handlers.count of them at most), each once: the person's choice for
+        the type, then for its kind (UI_OPEN_DEFAULTS), then for a program's own scheme what the program said (ui_open_mimeapps), then
+        every handler that takes the type by its rank (ui_open_rank), the bowls' order among equals. Their count; *chosen where the
+        first is a choice.
+*/
+static int ui_open_candidates(const char address_to type, int address_to order, b32 address_to chosen)
 {
         const struct ui_open_kind address_to kind = ui_open_kind_of(type);
         char handle[UI_OPEN_HANDLE];
-        int best = -1, best_rank = 0;
+        int count = 0, first[3];
         if (chosen)
                 *chosen = false;
-        if ((ui_open_chosen(type, handle, sizeof(handle)) || (kind && ui_open_chosen(kind->kind, handle, sizeof(handle)))) &&
-            (best = ui_handler_find(handle)) >= 0)
-                return chosen ? (*chosen = true, best) : best;
-        for (int at = 0; at < ui_handlers.count; at++)
+        first[0] = ui_open_chosen(type, handle, sizeof(handle)) ? ui_handler_find(handle) : -1;
+        first[1] = kind && ui_open_chosen(kind->kind, handle, sizeof(handle)) ? ui_handler_find(handle) : -1;
+        first[2] = ui_open_mimeapps(type);
+        for (int k = 0; k < 3; k++)
         {
-                const struct ui_handler address_to h = &ui_handlers.handler[at];
-                int rank = ui_handler_takes(h, type);
-                // The kit's before a bowl's (the Editor opens text before a program that names text/plain), then named before grouped,
-                // then a listed program before a hidden handler.
-                rank = rank ? (h->kit ? 8 : 0) + rank * 2 + (h->shown ? 1 : 0) : 0;
-                if (rank > best_rank)
-                        best = at, best_rank = rank;
+                b32 seen = false;
+                for (int at = 0; at < count; at++)
+                        seen |= order[at] == first[k];
+                if (first[k] >= 0 && !seen)
+                {
+                        if (chosen && !count && k < 2)
+                                *chosen = true;
+                        order[count++] = first[k];
+                }
         }
-        return best;
+        for (int rank = UI_OPEN_RANK_MOST; rank > 0; rank--)
+                for (int at = 0; at < ui_handlers.count; at++)
+                        if (ui_open_rank(&ui_handlers.handler[at], type) == rank)
+                        {
+                                b32 seen = false;
+                                for (int k = 0; k < count; k++)
+                                        seen |= order[k] == at;
+                                if (!seen)
+                                        order[count++] = at;
+                        }
+        return count;
+}
+
+// The handler a type is opened with first (ui_handlers read), and whether the person chose it: -1 none.
+static int ui_open_handler(const char address_to type, b32 address_to chosen)
+{
+        int which = -1, count;
+        int address_to order = ui_handlers.count ? (int address_to)memory_checked((positive)ui_handlers.count * sizeof(int)) : null;
+        if (chosen)
+                *chosen = false;
+        if (!order)
+                return -1;
+        count = ui_open_candidates(type, order, chosen);
+        which = count ? order[0] : -1;
+        memory_free(order, (positive)ui_handlers.count * sizeof(int));
+        return which;
 }
 
 // A type by the shared MIME globs of a bowl (usr/share/mime/globs2: "weight:type:*.ext"), for an extension the kit's list has not.
@@ -29862,11 +29975,88 @@ static b32 ui_open_type(const char address_to target, char address_to type, posi
 }
 
 /*
+        A start watched: argv started in a session of its own, as the desktop starts what it is asked to (window_asked_environment),
+        and watched for UI_OPEN_WATCH_NS: still running then, it took the target (a browser opened it); ended before, it took it where
+        it ended well (a browser's second start hands the address to the one running and leaves) and did not where it ended failing or
+        could not be started at all. Where MOONWATER_OPEN_DRY names a file, nothing is started: argv is written there, a line of words a
+        tab apart, and taken (a handler MOONWATER_OPEN_DRY_FAIL names is taken as failing), so the whole way is proved with no window.
+*/
+#define UI_OPEN_WATCH_NS 3000000000ll
+#define UI_OPEN_WATCH_STEP_NS 20000000l
+static b32 ui_open_start(const struct ui_handler address_to h, string_address address_to argv, positive count)
+{
+        b32 told[2], failed = 0;
+        bipolar child, got;
+        positive status = 0;
+        string_address dry = getenv("MOONWATER_OPEN_DRY");
+        if (dry && dry[0])
+        {
+                string_address fail = getenv("MOONWATER_OPEN_DRY_FAIL");
+                bipolar out = system_open_at_mode(AT_FDCWD, dry, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+                if (out >= 0)
+                {
+                        (void)system_write_all((positive)out, h->handle, string_length((string_address)h->handle));
+                        for (positive at = 0; at < count; at++)
+                                (void)system_write_all((positive)out, "\t", 1), (void)system_write_all((positive)out, argv[at], string_length(argv[at]));
+                        (void)system_write_all((positive)out, "\n", 1);
+                        system_close(out);
+                }
+                return !(fail && fail[0] && string_equals((string_address)fail, (string_address)h->handle));
+        }
+        if (system_call_2(syscall(pipe2), (positive)told, O_CLOEXEC) < 0)
+                return false;
+        if ((child = system_fork()) < 0)
+                return system_close(told[0]), system_close(told[1]), false;
+        if (child == 0)
+        {
+                bipolar quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+                b32 why;
+                system_close(told[0]);
+                system_call(syscall(setsid));
+                for (positive at = 0; quiet >= 0 && at < 3; at++)
+                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
+                why = (b32)shell_exec_file(argv[0], argv, count, window_asked_environment());
+                if (why >= 0)
+                        why = -2;
+                (void)system_write_once(told[1], &why, sizeof(why));
+                system_call_1(syscall(exit_group), 127);
+        }
+        system_close(told[1]);
+        // An exec that failed says why on the pipe; one that took it closes the pipe (close-on-exec), and the pipe reads nothing.
+        got = system_read_once(told[0], &failed, sizeof(failed));
+        system_close(told[0]);
+        if (got == (bipolar)sizeof(failed))
+                return system_wait4_retry(child, address_of status, 0, null), false;
+        for (b64 waited = 0; waited < UI_OPEN_WATCH_NS; waited += UI_OPEN_WATCH_STEP_NS)
+        {
+                bipolar reaped = system_wait4_retry(child, address_of status, 1, null); // WNOHANG
+                if (reaped == child)
+                        return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
+                if (reaped < 0)
+                        return false;
+                system_call_2(syscall(nanosleep), (positive)(positive[2]){0, UI_OPEN_WATCH_STEP_NS}, 0);
+        }
+        return true;
+}
+
+// Whether a program is one that opens what it is given with the default app (an opener of a bowl's is Moonwater's, bowl.c's bowl_openers).
+static b32 ui_open_is_opener(const char address_to program)
+{
+        static const char address_to const openers[] = {"xdg-open", "x-www-browser", "www-browser", "gnome-www-browser", "sensible-browser",
+                                                        "kde-open", "kde-open5", "kde-open6", "exo-open", "gvfs-open", "gio", "open", "moonwater"};
+        for (positive at = 0; at < sizeof(openers) / sizeof(openers[0]); at++)
+                if (string_equals((string_address)program, (string_address)openers[at]))
+                        return true;
+        return false;
+}
+
+/*
         A handler started with a target: the kit's own as its program and the path (Files' folder, the Editor's file), a bowl's by its
-        Exec, started through its bowl's launcher (/bowls/bin/NAME, ui_apps_launcher) as the launcher starts it. The target stands where
-        the Exec's %u, %U, %f or %F is, whole (an address a sign-in sends is long), and after the words where it has none; Flatpak's
-        forwarding of files through its document portal (--file-forwarding, @@u and @@) is left out: the person's files are where the
-        app's view has them, and a URI is given as it is.
+        Exec, started through its bowl's launcher (/bowls/bin/NAME, ui_apps_launcher) as the launcher starts it, a terminal's in the
+        Terminal. The target stands where the Exec's %u, %U, %f or %F is, whole (an address a sign-in sends is long), inside a word as
+        well (--url=%u), and after the words where it has none; Flatpak's forwarding of files through its document portal
+        (--file-forwarding, @@u and @@) is left out: the person's files are where the app's view has them, and a URI is given as it is.
+        False where it could not be started or ended failing (ui_open_start).
 */
 static b32 ui_handler_start(int which, const char address_to target, const char address_to path)
 {
@@ -29882,17 +30072,19 @@ static b32 ui_handler_start(int which, const char address_to target, const char 
                 if (string_equals(words[0], (string_address) "/editor"))
                         words[count++] = (string_address) "--";
                 words[count++] = (string_address)given, words[count] = null;
-                return ui_start_apart(words, count);
+                return ui_open_start(h, words, count);
         }
         {
                 const char address_to exec = ui_handler_text(h, h->exec);
-                positive length = string_length((string_address)exec), made = 0;
+                positive length = string_length((string_address)exec), made = 0, given_length = string_length((string_address)given), pieces = 0;
                 char marked[512], launch[UI_APP_PATH], profile[48], words[UI_APP_ARGS + 8][UI_APP_PATH];
-                string_address argv[UI_APP_ARGS + 12];
+                string_address argv[UI_APP_ARGS + 14];
+                char address_to joined[UI_APP_ARGS + 8];
+                positive joined_room[UI_APP_ARGS + 8];
                 positive count = 0;
                 int split, first = 0;
-                b32 placed = false;
-                // The file and URI codes marked by a byte no Exec has (\001), which the split keeps as a word of its own.
+                b32 placed = false, started;
+                // The file and URI codes marked by a byte no Exec has (\001), which the split keeps where it stands.
                 for (positive at = 0; at < length && made + 2 < sizeof(marked); at++)
                         if (exec[at] == '%' && at + 1 < length && string_first_of((string_address) "uUfF", exec[at + 1]))
                                 marked[made++] = 1, at++;
@@ -29904,24 +30096,44 @@ static b32 ui_handler_start(int which, const char address_to target, const char 
                 if (string_equals((string_address)ui_apps_base(words[0]), (string_address) "env"))
                         for (first = 1; first < split && string_first_of((string_address)words[first], '=') && words[first][0] != '-'; first++)
                                 ;
-                if (first >= split || !ui_apps_launcher(h->root[0] && !string_equals((string_address)h->root, (string_address)ui_apps_local) ? h->root : "",
-                                                        ui_apps_base(words[first]), launch, sizeof(launch), profile, sizeof(profile)))
+                // An entry that opens by handing the target to an opener (xdg-open %u, sensible-browser %u) would hand it back here: it
+                // is passed over, and the next handler tried.
+                if (first >= split || ui_open_is_opener(ui_apps_base(words[first])) ||
+                    !ui_apps_launcher(h->root[0] && !string_equals((string_address)h->root, (string_address)ui_apps_local) ? h->root : "",
+                                      ui_apps_base(words[first]), launch, sizeof(launch), profile, sizeof(profile)))
                         return false;
+                if (h->terminal)
+                        argv[count++] = (string_address) "/terminal", argv[count++] = (string_address) "-x";
                 argv[count++] = (string_address)launch;
                 for (int at = first + 1; at < split && count + 2 < sizeof(argv) / sizeof(argv[0]); at++)
                 {
-                        if (string_equals((string_address)words[at], (string_address) "--file-forwarding") || string_equals((string_address)words[at], (string_address) "@@") ||
-                            string_equals((string_address)words[at], (string_address) "@@u") || string_equals((string_address)words[at], (string_address) "@@f"))
+                        string_address word = (string_address)words[at], mark;
+                        if (string_equals(word, (string_address) "--file-forwarding") || string_equals(word, (string_address) "@@") ||
+                            string_equals(word, (string_address) "@@u") || string_equals(word, (string_address) "@@f"))
                                 continue;
-                        if (words[at][0] == 1 && !words[at][1])
+                        if (word[0] == 1 && !word[1])
                                 argv[count++] = (string_address)given, placed = true;
+                        else if ((mark = string_first_of(word, 1)))
+                        {
+                                // A code inside a word: the word made again around the target, as long as both need.
+                                positive head = (positive)(mark - word), tail = string_length(mark + 1), room = head + given_length + tail + 1;
+                                char address_to whole = (char address_to)memory_checked(room);
+                                if (!whole)
+                                        continue;
+                                memory_copy(whole, word, head), memory_copy(whole + head, given, given_length), memory_copy(whole + head + given_length, mark + 1, tail + 1);
+                                joined[pieces] = whole, joined_room[pieces++] = room;
+                                argv[count++] = (string_address)whole, placed = true;
+                        }
                         else
-                                argv[count++] = (string_address)words[at];
+                                argv[count++] = word;
                 }
                 if (!placed)
                         argv[count++] = (string_address)given;
                 argv[count] = null;
-                return ui_start_apart(argv, count);
+                started = ui_open_start(h, argv, count);
+                while (pieces--)
+                        memory_free(joined[pieces], joined_room[pieces]);
+                return started;
         }
 }
 
@@ -29934,17 +30146,118 @@ enum
         UI_OPEN_NOT_STARTED,
 };
 
-// A target opened with what opens its type: the handlers read again first, as a list that changes as apps come and go.
+// Whether a name ends in a file's extension the kit knows (notes.txt, report.pdf): a file's name, not a site's (example.com).
+static b32 ui_open_file_named(const char address_to name)
+{
+        positive end_at = 0, dot = 0, length;
+        while (name[end_at] && name[end_at] != '/' && name[end_at] != '?' && name[end_at] != ':')
+                end_at++;
+        for (positive at = 0; at < end_at; at++)
+                dot = name[at] == '.' ? at + 1 : dot;
+        if (!dot || (length = end_at - dot) == 0 || length > 12)
+                return false;
+        for (positive at = 0; ui_open_extensions[at];)
+        {
+                positive stop = at, blank = at;
+                while (ui_open_extensions[stop] != '\n')
+                        stop++;
+                while (ui_open_extensions[blank] != ' ')
+                        blank++;
+                if (blank - at == length)
+                {
+                        b32 same = true;
+                        for (positive k = 0; k < length && same; k++)
+                                same = (name[dot + k] | 32) == ui_open_extensions[at + k];
+                        if (same)
+                                return true;
+                }
+                at = stop + 1;
+        }
+        return false;
+}
+
+/*
+        A target as it is meant: blanks and line ends around it taken off (a link copied with them), and a name of a site with no scheme
+        (www.example.com, example.com/path) an https address, where no file of that name is here. Into into (room bytes); false where
+        nothing is left or it does not fit.
+*/
+static b32 ui_open_normal(const char address_to target, char address_to into, positive room)
+{
+        positive from = 0, to = target ? string_length((string_address)target) : 0, scheme = 0, dots = 0;
+        b32 site = true;
+        while (from < to && (target[from] == ' ' || target[from] == '\t' || target[from] == '\n' || target[from] == '\r'))
+                from++;
+        while (to > from && (target[to - 1] == ' ' || target[to - 1] == '\t' || target[to - 1] == '\n' || target[to - 1] == '\r'))
+                to--;
+        if (to == from || to - from + 9 > room)
+                return false;
+        memory_copy(into, target + from, to - from), into[to - from] = 0;
+        while ((into[scheme] >= 'a' && into[scheme] <= 'z') || (into[scheme] >= 'A' && into[scheme] <= 'Z') ||
+               (scheme && ((into[scheme] >= '0' && into[scheme] <= '9') || into[scheme] == '+' || into[scheme] == '-' || into[scheme] == '.')))
+                scheme++;
+        if ((scheme >= 2 && into[scheme] == ':') || into[0] == '/' || into[0] == '.' || into[0] == '~')
+                return true;
+        for (positive at = 0; into[at] && into[at] != '/'; at++)
+        {
+                char c = into[at];
+                dots += c == '.';
+                site &= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':';
+        }
+        if (site && dots && system_access_at(AT_FDCWD, (string_address)into, 0) < 0 && !ui_open_file_named(into))
+        {
+                memory_copy(into + 8, into, to - from + 1);
+                memory_copy(into, "https://", 8);
+        }
+        return true;
+}
+
+// Whether a type is a page's (what any browser opens): an http or https address, or HTML.
+static b32 ui_open_web(const char address_to type)
+{
+        return string_equals((string_address)type, (string_address) "x-scheme-handler/https") || string_equals((string_address)type, (string_address) "x-scheme-handler/http") ||
+               string_equals((string_address)type, (string_address) "text/html");
+}
+
+/*
+        A target opened, every way there is tried in turn until one takes it: each handler of its type in the order ui_open_candidates
+        gives (the person's choice, the default lists', then by rank), each watched (ui_open_start), so a handler that is gone, a bowl
+        that is broken or a program that fails passes it to the next; a page then to anything that opens a page at all. The handlers are
+        read again first, as a list that changes as apps come and go.
+*/
 static int ui_open(const char address_to target)
 {
         char type[UI_OPEN_TYPE], path[4096];
-        int which;
-        if (!ui_open_type(target, type, sizeof(type), path, sizeof(path)))
-                return UI_OPEN_NOT_THERE;
+        positive length = target ? string_length((string_address)target) : 0, room = length + 16;
+        char address_to normal = (char address_to)memory_checked(room);
+        int said = UI_OPEN_NO_HANDLER, count = 0;
+        int address_to order = null;
+        if (!normal)
+                return UI_OPEN_NOT_STARTED;
+        if (!ui_open_normal(target, normal, room) || !ui_open_type(normal, type, sizeof(type), path, sizeof(path)))
+                return memory_free(normal, room), UI_OPEN_NOT_THERE;
         ui_handlers_read();
-        if ((which = ui_open_handler(type, null)) < 0)
-                return UI_OPEN_NO_HANDLER;
-        return ui_handler_start(which, target, path) ? UI_OPEN_DONE : UI_OPEN_NOT_STARTED;
+        if (ui_handlers.count && (order = (int address_to)memory_checked((positive)ui_handlers.count * sizeof(int) * 2)))
+        {
+                count = ui_open_candidates(type, order, null);
+                // A page's last ways: whatever opens HTML or the other of http and https, after what names its own scheme.
+                for (int k = 0; ui_open_web(type) && k < 3; k++)
+                {
+                        static const char address_to const also[] = {"x-scheme-handler/https", "x-scheme-handler/http", "text/html"};
+                        for (int at = 0; at < ui_handlers.count && count < 2 * ui_handlers.count; at++)
+                        {
+                                b32 seen = false;
+                                for (int c = 0; c < count; c++)
+                                        seen |= order[c] == at;
+                                if (!seen && ui_handler_takes(&ui_handlers.handler[at], also[k]))
+                                        order[count++] = at;
+                        }
+                }
+                for (int at = 0; at < count && said != UI_OPEN_DONE; at++)
+                        said = ui_handler_start(order[at], normal, path) ? UI_OPEN_DONE : UI_OPEN_NOT_STARTED;
+                memory_free(order, (positive)ui_handlers.count * sizeof(int) * 2);
+        }
+        memory_free(normal, room);
+        return said;
 }
 
 // Run a helper command synchronously and wait for exit status 0.

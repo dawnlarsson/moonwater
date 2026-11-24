@@ -5064,7 +5064,7 @@ static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c",
     "src/canvas/ui/notices.c",  "src/canvas/ui/files.c",    "src/canvas/ui/installer.c", "src/canvas/ui/software.c",
-    "src/canvas/ui/share.c"};
+    "src/canvas/ui/share.c",    "src/canvas/ui/open.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
                                                          "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c",
                                                          "src/canvas/ui/mixer.c",   "src/canvas/ui/notices.c",  "src/canvas/ui/files.c",

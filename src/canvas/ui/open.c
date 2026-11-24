@@ -152,6 +152,35 @@ static b32 open_runs(const char address_to type)
         return false;
 }
 
+/*
+        The last way, where nothing took a target: the person is told, on the desktop, and a link (a sign-in's above all) is put on the
+        clipboard to paste into a browser by hand, so it is never lost. A file that nothing opens is named.
+*/
+static fn open_last_way(string_address target, int said)
+{
+        positive length = string_length(target), room = length + 512;
+        char address_to message = (char address_to)memory_checked(room);
+        b32 link = false, copied = false;
+        positive scheme = 0;
+
+        while ((target[scheme] >= 'a' && target[scheme] <= 'z') || (target[scheme] >= 'A' && target[scheme] <= 'Z') ||
+               (scheme && ((target[scheme] >= '0' && target[scheme] <= '9') || string_first_of((string_address) "+-.", target[scheme]))))
+                scheme++;
+        link = scheme >= 2 && target[scheme] == ':' && string_compare_max(target, (string_address) "file:", 5);
+        if (link)
+        {
+                string_address words[5] = {(string_address) "/moonwater", (string_address) "clipboard", (string_address) "set", target, null};
+
+                copied = ui_run_wait(words);
+        }
+        if (!message)
+                return;
+        language_format(message, room, copied ? WORDS(open_copied) : WORDS(open_nothing), (long)target);
+        if (said != UI_OPEN_NOT_THERE || link)
+                ui_alert_show(UI_ALERT_ERROR, WORDS(open_failed), message);
+        memory_free(message, room);
+}
+
 static b32 open_main()
 {
         positive count = (positive)program_argument_count();
@@ -201,6 +230,8 @@ static b32 open_main()
                                 continue;
                         }
                         said = ui_open((const char address_to)program_argument(at));
+                        if (said != UI_OPEN_DONE)
+                                open_last_way(program_argument(at), said);
 
                         if (said == UI_OPEN_NOT_THERE)
                                 failed = open_fail("is not there, and no address", program_argument(at));

@@ -690,6 +690,8 @@ static bipolar bowl_bind_ro(string_address source, string_address target)
         generated ELF file or per-command runtime. The launcher is the whole
         system-wide installation and is intentionally created O_EXCL.
 */
+static bool bowl_is_opener(string_address name);
+
 static b32 bowl_expose_program(string_address root, string_address program,
                                string_address name, bool exclusive)
 {
@@ -725,6 +727,10 @@ static b32 bowl_expose_program(string_address root, string_address program,
         }
 
         return_if(!bowl_name(name, true), bowl_refuse("invalid command name\n"));
+        // An opener's name is Moonwater's on the machine (bowl_machine_openers_write): a distribution's xdg-open exposed there would
+        // open links the distribution's way, and come back to the bowl's openers.
+        if (bowl_is_opener(name))
+                return 0;
 
         root_length = string_length(root);
         program_length = string_length(program);
@@ -4079,6 +4085,9 @@ static string_address address_to bowl_environment(
             // GTK and GIO ask the desktop's portals as a Flatpak app does: a link or a file a program opens goes to OpenURI (the
             // person's default app, not the bowl's own idea of one), and a GTK file dialog is Files (FileChooser).
             {"GTK_USE_PORTAL", "GTK_USE_PORTAL=1", BOWL_OPT_BUS, false},
+            // A program that opens a page by $BROWSER first (Python's webbrowser, git, a command-line tool that signs in): the bowl's
+            // opener, Moonwater's (bowl_openers), which asks the desktop.
+            {"BROWSER", "BROWSER=/usr/local/bin/xdg-open", BOWL_OPT_BUS, false},
             // Nobody to ask (no terminal on standard input: an install from the software window, a profile's, a script's):
             // debconf is told so, rather than trying Dialog, Readline and Teletype in turn and saying each one failed.
             {"DEBIAN_FRONTEND", "DEBIAN_FRONTEND=noninteractive", BOWL_OPT_UNASKED, false},
@@ -4477,6 +4486,52 @@ static bool bowl_path_is_bowl_entry(string_address at, positive length)
                 length--;
         return (length == 1 && at[0] == '/') ||
                memory_is_word(at, length, BOWL_EXPOSE_DIRECTORY);
+}
+
+/*
+        /usr/local/bin first on a guest's PATH, as every distribution has it: Moonwater's openers stand there (bowl_openers), so a
+        program that opens a page, a link or a file by a name (xdg-open, x-www-browser, sensible-browser, kde-open) asks the desktop
+        and not the distribution's own. The machine's PATH, which a guest takes, has no such folder; one that has it is left as it is.
+*/
+static string_address address_to bowl_with_local_path(string_address address_to environment)
+{
+        static string_address with[BOWL_ENV_ROOM];
+        static p8 path[4096];
+        static const char local_bin[] = "/usr/local/bin";
+        positive count = 0, length;
+        b32 path_at = -1;
+        string_address value;
+
+        while (environment && environment[count])
+        {
+                if (path_at < 0 && string_has_prefix(environment[count], "PATH="))
+                        path_at = (b32)count;
+                count++;
+        }
+        if (!environment || path_at < 0 || count + 1 > BOWL_ENV_ROOM)
+                return environment;
+        value = environment[path_at] + sizeof("PATH=") - 1;
+        for (positive pos = 0; value[pos];)
+        {
+                positive start = pos;
+
+                while (value[pos] && value[pos] != ':')
+                        pos++;
+                if (pos - start == sizeof(local_bin) - 1 && !memory_compare(value + start, local_bin, sizeof(local_bin) - 1))
+                        return environment;
+                pos += value[pos] == ':';
+        }
+        length = string_length(value);
+        if (sizeof("PATH=") - 1 + sizeof(local_bin) + length >= sizeof(path))
+                return environment;
+        memory_copy(path, "PATH=", sizeof("PATH=") - 1);
+        memory_copy(path + sizeof("PATH=") - 1, local_bin, sizeof(local_bin) - 1);
+        path[sizeof("PATH=") - 1 + sizeof(local_bin) - 1] = length ? ':' : 0;
+        memory_copy(path + sizeof("PATH=") - 1 + sizeof(local_bin), value, length + 1);
+        for (positive at = 0; at < count; at++)
+                with[at] = (b32)at == path_at ? (string_address)path : environment[at];
+        with[count] = null;
+        return with;
 }
 
 /*
@@ -5198,7 +5253,7 @@ static b32 bowl_launch(string_address root, string_address program,
         else if (!isolated && !bowl_pad_root)
                 bowl_own_namespace();
         environment = bowl_environment(file_environment_all());
-        environment = bowl_without_exposed_path(environment);
+        environment = bowl_with_local_path(bowl_without_exposed_path(environment));
         if (!isolated)
                 environment = bowl_with_libc_shim(root, environment);
         if (bowl_wa_timerslack)
@@ -6154,50 +6209,105 @@ static b32 bowl_write_apt(string_address root);
 static b32 bowl_write_nix(string_address root);
 
 /*
-        A bowl's xdg-open: Moonwater's, in the bowl's /usr/local/bin where every program finds it before the distribution's (Chromium,
-        Electron's openExternal and Steam run xdg-open by name). It asks the desktop (moonwater open, the OpenURI portal), so a page, a
-        program's link (a sign-in coming back to discord: or vscode:) or a file opens with the person's default app and as the desktop
-        starts it, whichever bowl asked. Written at every configure (a setup, every package manager's run) and at every start of the
-        machine (host's disk.c), and only where it is not already this.
-*/
-#define BOWL_XDG_OPEN_DIRECTORY "/usr/local/bin"
-#define BOWL_XDG_OPEN_NAME "xdg-open"
-static const char bowl_xdg_open_script[] =
-    "#!/bin/sh\n"
-    "# Moonwater's xdg-open: a page, a program's link or a file opened with the desktop's default app (moonwater open, the OpenURI\n"
-    "# portal). Written by Moonwater (src/bowl.c), and written again where it is changed.\n"
-    "exec /moonwater open -- \"$@\"\n";
+        A bowl's openers: Moonwater's, in the bowl's /usr/local/bin where every program finds them before the distribution's, under
+        every name a program opens a page, a link or a file by: xdg-open (Chromium, Electron's openExternal, Steam, Wine's winebrowser,
+        Java and Qt outside a portal), the Debian alternatives x-www-browser, www-browser, gnome-www-browser and sensible-browser,
+        KDE's kde-open, kde-open5 and kde-open6, Xfce's exo-open, gvfs-open; and $BROWSER names it (bowl_environment) for those that
+        read that first (Python's webbrowser, git web--browse, most command-line tools that sign in). Each asks the desktop
+        (moonwater open, the OpenURI portal), so a page or a program's link (a sign-in coming back to discord: or vscode:) opens with
+        the person's default app as the desktop starts it, whichever bowl asked.
 
-static fn bowl_xdg_open_write(string_address root)
+        Where the desktop cannot be asked (no /moonwater in the view, no bus, a refusal), the distribution's own opener is tried, with
+        $BROWSER taken off and MOONWATER_OPENING set so that neither it nor anything it starts comes back here; and where there is none,
+        the opener says what it could not open and fails, so the program that asked can say so too. Written at every configure (a
+        setup, every package manager's run) and at every start of the machine (host's disk.c), each only where it is not already this.
+*/
+#define BOWL_OPENERS_DIRECTORY "/usr/local/bin"
+static const string_address bowl_openers[] = {"xdg-open",         "x-www-browser", "www-browser", "gnome-www-browser", "sensible-browser",
+                                              "kde-open",         "kde-open5",     "kde-open6",   "exo-open",          "gvfs-open"};
+static const char bowl_opener_script[] =
+    "#!/bin/sh\n"
+    "# Moonwater's opener: a page, a program's link or a file opened with the desktop's default app (moonwater open, the OpenURI\n"
+    "# portal); the distribution's own where the desktop cannot be asked. Written by Moonwater (src/bowl.c), and written again\n"
+    "# where it is changed.\n"
+    "case \"$1\" in --help|-h|--version) echo \"moonwater opener: $0 URL|FILE...\"; exit 0 ;; esac\n"
+    "# exo-open's and kde-open's own options before the target (--launch, --new-window and the like) are no target.\n"
+    "while [ \"${1#-}\" != \"$1\" ] && [ \"$1\" != - ] && [ \"$1\" != -- ]; do shift; done\n"
+    "[ \"$1\" = -- ] && shift\n"
+    "[ $# -gt 0 ] || { echo \"$0: nothing to open\" >&2; exit 1; }\n"
+    "[ -x /moonwater ] && /moonwater open -- \"$@\" && exit 0\n"
+    "# The desktop could not be asked: the distribution's own opener, which never comes back here: a Moonwater opener under its name\n"
+    "# is passed over, /usr/local/bin (where these stand) is left off its path, and $BROWSER is taken off.\n"
+    "p=; IFS=:; for d in $PATH; do [ \"$d\" = /usr/local/bin ] || p=\"${p:+$p:}$d\"; done; unset IFS\n"
+    "for own in /usr/bin/xdg-open /bin/xdg-open; do\n"
+    "        if [ -x \"$own\" ] && ! grep -q \"Moonwater's opener\" \"$own\" 2>/dev/null; then\n"
+    "                unset BROWSER; PATH=$p; export PATH; exec \"$own\" \"$@\"\n"
+    "        fi\n"
+    "done\n"
+    "echo \"$0: nothing could open $*\" >&2\n"
+    "exit 3\n";
+
+static fn bowl_opener_write(bipolar dirfd, string_address name)
 {
-        p8 directory[BOWL_PATH_LIMIT], have[sizeof(bowl_xdg_open_script)];
-        bipolar dirfd, handle, got;
+        p8 have[sizeof(bowl_opener_script)], made[64];
+        bipolar handle, got;
+        positive length = string_length(name);
         b32 ok;
 
-        if (!bowl_root_path(directory, sizeof(directory), root, BOWL_XDG_OPEN_DIRECTORY) ||
-            (dirfd = bowl_open_directory(directory, BOWL_MAKE_CHAIN, null)) < 0)
+        if (length + sizeof(".new") > sizeof(made))
                 return;
-        if ((handle = system_open_at(dirfd, BOWL_XDG_OPEN_NAME, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
+        if ((handle = system_open_at(dirfd, name, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
         {
                 got = system_read_retry((positive)handle, have, sizeof(have));
                 system_close(handle);
-                if (got == (bipolar)(sizeof(bowl_xdg_open_script) - 1) && !memory_compare(have, bowl_xdg_open_script, (positive)got))
-                {
-                        system_close(dirfd);
+                if (got == (bipolar)(sizeof(bowl_opener_script) - 1) && !memory_compare(have, bowl_opener_script, (positive)got))
                         return;
-                }
         }
-        system_remove_at(dirfd, BOWL_XDG_OPEN_NAME ".new", 0);
-        if ((handle = system_open_at_mode(dirfd, BOWL_XDG_OPEN_NAME ".new", FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC, 0755)) < 0)
-        {
-                system_close(dirfd);
+        memory_copy(made, name, length), memory_copy(made + length, ".new", sizeof(".new"));
+        system_remove_at(dirfd, made, 0);
+        if ((handle = system_open_at_mode(dirfd, made, FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC, 0755)) < 0)
                 return;
-        }
-        ok = system_write_all((positive)handle, bowl_xdg_open_script, sizeof(bowl_xdg_open_script) - 1) == sizeof(bowl_xdg_open_script) - 1 &&
+        ok = system_write_all((positive)handle, bowl_opener_script, sizeof(bowl_opener_script) - 1) == sizeof(bowl_opener_script) - 1 &&
              system_call_2(syscall(fchmod), (positive)handle, 0755) == 0;
         system_close(handle);
-        if (!ok || system_rename_at(dirfd, BOWL_XDG_OPEN_NAME ".new", dirfd, BOWL_XDG_OPEN_NAME, 0) < 0)
-                system_remove_at(dirfd, BOWL_XDG_OPEN_NAME ".new", 0);
+        if (!ok || system_rename_at(dirfd, made, dirfd, name, 0) < 0)
+                system_remove_at(dirfd, made, 0);
+}
+
+static bool bowl_is_opener(string_address name)
+{
+        for (positive at = 0; at < array_count(bowl_openers); at++)
+                if (string_equals(name, bowl_openers[at]))
+                        return true;
+        return false;
+}
+
+/*
+        The machine's openers: the same under the same names in /bowls/bin, which the machine's /usr/bin publishes (host's disk.c), in
+        place of a distribution's exposed there before (an older bowl's xdg-open), so what the machine opens by name asks the desktop.
+*/
+static fn bowl_machine_openers_write(void)
+{
+        bipolar dirfd;
+
+        if (bowl_mkdir(BOWL_ROOT_DIRECTORY) < 0 || bowl_mkdir(BOWL_EXPOSE_DIRECTORY) < 0 ||
+            (dirfd = system_open_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return;
+        for (positive at = 0; at < array_count(bowl_openers); at++)
+                bowl_opener_write(dirfd, bowl_openers[at]);
+        system_close(dirfd);
+}
+
+static fn bowl_xdg_open_write(string_address root)
+{
+        p8 directory[BOWL_PATH_LIMIT];
+        bipolar dirfd;
+
+        if (!bowl_root_path(directory, sizeof(directory), root, BOWL_OPENERS_DIRECTORY) ||
+            (dirfd = bowl_open_directory(directory, BOWL_MAKE_CHAIN, null)) < 0)
+                return;
+        for (positive at = 0; at < array_count(bowl_openers); at++)
+                bowl_opener_write(dirfd, bowl_openers[at]);
         system_close(dirfd);
 }
 

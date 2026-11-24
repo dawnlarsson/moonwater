@@ -2854,7 +2854,9 @@ static b32 host_attach(host_install address_to install)
         //      typed by hand is the one the verb starts.
         for (positive profile = 0; profile < array_count(bowl_profiles); profile++)
                 (void)bowl_profile_refresh(bowl_profiles + profile);
-        //      Every bowl's xdg-open is Moonwater's (bowl.c's BOWL_XDG_OPEN): a link a program opens goes to the desktop's default app.
+        //      Every bowl's openers are Moonwater's (bowl.c's bowl_openers): a link a program opens goes to the desktop's default app;
+        //      and the machine's own under those names in /bowls/bin, published to /usr/bin below.
+        bowl_machine_openers_write();
         for (positive at = 0; at < array_count(bowl_distros); at++)
                 if (bowl_has(bowl_distros[at].root, bowl_distros[at].marker) && !bowl_has(bowl_distros[at].root, "/nix/.reginfo"))
                         bowl_xdg_open_write(bowl_distros[at].root);

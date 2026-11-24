@@ -6021,6 +6021,44 @@ static fn check_kit_browser_files(void)
         check("kit open: a file: URI is its file, a folder is inode/directory, and what is not there or is nothing has no type", files);
         check("kit open: HTML and http are the browser's kind, an image the images', any text the text's, a program's scheme and a ZIP none", kinds);
         check("kit open: a handler takes the type it names, a type of a group it names, and nothing else", takes);
+
+        // A link as it is meant: blanks round it off, a site's name an https address, a file's name, a scheme or a path as it is.
+        {
+                char into[128];
+                b32 normal = ui_open_normal("  www.example.com/x?y=1 \n", into, sizeof into) &&
+                             string_equals((string_address)into, (string_address) "https://www.example.com/x?y=1") &&
+                             ui_open_normal("example.com", into, sizeof into) && string_equals((string_address)into, (string_address) "https://example.com") &&
+                             ui_open_normal("no-such-notes.TXT", into, sizeof into) && string_equals((string_address)into, (string_address) "no-such-notes.TXT") &&
+                             ui_open_normal("discord://-/a b", into, sizeof into) && string_equals((string_address)into, (string_address) "discord://-/a b") &&
+                             ui_open_normal("/root", into, sizeof into) && string_equals((string_address)into, (string_address) "/root") &&
+                             !ui_open_normal("   ", into, sizeof into) && !ui_open_normal("", into, sizeof into);
+                check("kit open: a link copied with blanks round it, a site's name and a file's name are each what is meant", normal);
+        }
+        check("kit open: an entry that hands its target to an opener (xdg-open, sensible-browser) is no handler, a browser is",
+              ui_open_is_opener("xdg-open") && ui_open_is_opener("sensible-browser") && ui_open_is_opener("kde-open5") && !ui_open_is_opener("chromium"));
+        // The order handlers are tried in: the kit's that names the type first (the top rank, 13), then by rank, a hidden one last.
+        {
+                static const struct { const char *handle, *types; int kit; b32 shown; } fake[] = {
+                    {"arch:dolphin", "inode/directory;", 0, true}, {"kit:files", "inode/directory;", 1, true},
+                    {"arch:code", "text/plain;", 0, true}, {"kit:editor", "text/*;", 2, true}, {"arch:hidden", "text/plain;", 0, false}};
+                int order[8], count;
+                b32 chosen = true, ranked;
+                memory_zero(&ui_handlers, sizeof(ui_handlers));
+                for (positive at = 0; at < sizeof fake / sizeof fake[0]; at++)
+                {
+                        struct ui_handler address_to h = ui_handlers_add();
+                        string_copy_bounded((p8 address_to)h->handle, (string_address)fake[at].handle, sizeof h->handle);
+                        h->types = ui_handlers_keep(fake[at].types, string_length((string_address)fake[at].types));
+                        h->exec = ui_handlers_keep("x", 1), h->kit = fake[at].kit, h->shown = fake[at].shown;
+                        ui_handlers.count++;
+                }
+                count = ui_open_candidates("inode/directory", order, &chosen);
+                ranked = count == 2 && order[0] == 1 && order[1] == 0 && !chosen;
+                count = ui_open_candidates("text/plain", order, &chosen);
+                ranked &= count == 3 && order[0] == 3 && order[1] == 2 && order[2] == 4;
+                ui_handlers.count = 0;
+                check("kit open: Files opens a folder before a bowl's file manager, the Editor text before a bowl's editor, a hidden handler last", ranked);
+        }
 }
 
 static fn check_kit_pull_parts(void)

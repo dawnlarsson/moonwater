@@ -274,6 +274,9 @@ notices_item_once_now	e604	%1$s: %2$s (once, just now)
 notices_item_times	36d7	%1$s: %2$s (%3$d times, %4$d min ago)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d times, just now)
 notices_open	c9cf	Open System notices
+open_copied	40e5	It is copied: paste it into a browser. %s
+open_failed	521a	The link could not be opened
+open_nothing	eb70	No app here opens %s
 settings_about_discord	0061	Join the community: %s
 settings_about_github	b59f	Report bugs and issues: %s
 settings_about_header	96de	About
