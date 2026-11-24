@@ -4726,6 +4726,182 @@ static fn bowl_user_store_prepare(void)
 }
 
 /*
+        A user namespace a group of launches shares, named by BOWL_SHARE=NAME in a launch's environment: the flatpak session's
+        (Flatpak's portal and every app's flatpak run). A launch is otherwise a namespace of its own, and the kernel lets no
+        namespace look into a sibling's processes (commoncap's ptrace rule: the same namespace, or one above that owns it).
+        Flatpak's portal knows which app asks by the caller's /proc/PID/root/.flatpak-info, and Electron's zypak asks it to
+        spawn every renderer: a portal of its own namespace could read no app's ("Can't find peer app id") and Discord hung
+        at its zygote. In one namespace the portal is above each app's sandbox, as on any desktop, where every program of the
+        person's is in one namespace. Each launch keeps its own mount view, and every other launch its own namespace.
+
+        Only a launch that is the machine's root joins one (bowl_become_user): a program of a bowl that names a share is in a
+        namespace of its own and makes its nested one as before, and the kernel lets nothing in a bowl's namespace join one
+        made from the machine's (setns asks CAP_SYS_ADMIN over it, which only its owner in the namespace above has). The
+        first launch that names a share makes it, a process of its own unshared with the ids a launch's namespace has, and
+        pins it at BOWL_SHARE_DIRECTORY/NAME by a bind of its namespace's file. A launch joins only a file there that is a
+        user namespace whose parent is the machine's and whose owner is the id the launch becomes (nothing in a bowl can
+        mount there, and a link is not followed); anything else is taken away and the share made again. The pins are in
+        /run: a share lasts until the machine stops.
+*/
+#define BOWL_SHARE_VARIABLE "BOWL_SHARE"
+#define BOWL_SHARE_DIRECTORY "/run/moonwater/bowl-share"
+#define BOWL_SHARE_NAME_MOST 32
+#define BOWL_NSFS_MAGIC 0x6e736673
+#define BOWL_NS_GET_PARENT 0xb702
+#define BOWL_NS_GET_NSTYPE 0xb703
+#define BOWL_NS_GET_OWNER_UID 0xb704
+
+// The share a launch's environment names: letters, digits and dashes, at most BOWL_SHARE_NAME_MOST bytes; null for none.
+static string_address bowl_share_name(string_address address_to environment)
+{
+        string_address name = environment ? string_get_environment(environment, BOWL_SHARE_VARIABLE) : null;
+        positive length = name ? string_length(name) : 0;
+
+        if (!length || length > BOWL_SHARE_NAME_MOST)
+                return null;
+        for (positive at = 0; at < length; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                        return null;
+        return name;
+}
+
+// Whether a descriptor is what a share's pin must be: a user namespace whose parent is this process's own, owned by owner.
+static bool bowl_share_is(bipolar handle, positive owner)
+{
+        file_mount_facts mount;
+        file_facts parent, self;
+        p32 uid = (p32)-1;
+        bipolar up, own;
+        bool same;
+
+        if ((bipolar)system_call_2(syscall(fstatfs), (positive)handle, (positive)address_of mount) < 0 ||
+            mount.type != BOWL_NSFS_MAGIC ||
+            (bipolar)system_call_3(syscall(ioctl), (positive)handle, BOWL_NS_GET_NSTYPE, 0) != CLONE_NEWUSER ||
+            (bipolar)system_call_3(syscall(ioctl), (positive)handle, BOWL_NS_GET_OWNER_UID, (positive)address_of uid) < 0 ||
+            uid != (p32)owner)
+                return false;
+        up = (bipolar)system_call_3(syscall(ioctl), (positive)handle, BOWL_NS_GET_PARENT, 0);
+        if (up < 0)
+                return false;
+        own = system_open_at(AT_FDCWD, "/proc/self/ns/user", FILE_READ | O_CLOEXEC);
+        same = own >= 0 && file_look_code(up, "", AT_EMPTY_PATH, address_of parent) >= 0 &&
+               file_look_code(own, "", AT_EMPTY_PATH, address_of self) >= 0 && parent.inode == self.inode &&
+               parent.device_major == self.device_major && parent.device_minor == self.device_minor;
+        system_close(up);
+        if (own >= 0)
+                system_close(own);
+        return same;
+}
+
+/*
+        A share made: a process of its own unshares the namespace (as the user it is for, in the hardened tier, so the user
+        owns it), this one gives it the ids a launch's namespace has (inside, mapped to outside and group) and binds its
+        namespace's file on a file made at the name. 0, or what failed.
+*/
+static b32 bowl_share_make(bipolar directory, string_address name, string_address path, positive inside, positive outside,
+                           positive group, bool hardened)
+{
+        b32 ready[2], go[2];
+        p8 proc[48], file[64], byte = 0;
+        positive status = 0, length;
+        bipolar child, mark;
+        b32 failed = 0;
+
+        if (system_call_2(syscall(pipe2), (positive)ready, O_CLOEXEC) < 0)
+                return 1;
+        if (system_call_2(syscall(pipe2), (positive)go, O_CLOEXEC) < 0)
+                return system_close(ready[0]), system_close(ready[1]), 1;
+        child = system_fork();
+        if (child == 0)
+        {
+                system_close(ready[0]), system_close(go[1]);
+                if ((hardened && (system_call_2(syscall(setgroups), 0, 0) < 0 ||
+                                  system_call_3(syscall(setresgid), group, group, group) < 0 ||
+                                  system_call_3(syscall(setresuid), outside, outside, outside) < 0)) ||
+                    system_call_1(syscall(unshare), CLONE_NEWUSER) < 0)
+                        exit(1);
+                (void)system_write_once(ready[1], "x", 1);
+                (void)system_read_once(go[0], &byte, 1); // until the namespace is pinned: it ends when go is closed
+                exit(0);
+        }
+        system_close(ready[1]), system_close(go[0]);
+        if (child < 0 || system_read_once(ready[0], &byte, 1) != 1)
+                failed = 1;
+        length = string_copy_end(proc, "/proc/") - proc;
+        length += positive_into_string(proc + length, (positive)(child > 0 ? child : 0));
+        proc[length] = end;
+        if (!failed)
+        {
+                string_copy_end(string_copy_end(file, proc), "/setgroups");
+                failed = ul_namespace_write(file, "deny", 4, "bowl");
+                string_copy_end(string_copy_end(file, proc), "/uid_map");
+                failed = failed || ul_namespace_map(file, inside, outside, 1, "bowl");
+                string_copy_end(string_copy_end(file, proc), "/gid_map");
+                failed = failed || ul_namespace_map(file, inside, group, 1, "bowl");
+        }
+        if (!failed)
+        {
+                mark = system_open_at_mode(directory, name, FILE_WRITE | FILE_CREATE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
+                failed = mark < 0;
+                if (mark >= 0)
+                        system_close(mark);
+                string_copy_end(string_copy_end(file, proc), "/ns/user");
+                if (!failed && system_mount(file, path, 0, MS_BIND, 0) < 0)
+                        failed = 1, system_remove_at(directory, name, 0);
+        }
+        system_close(go[1]);
+        if (child > 0)
+                system_wait4_retry(child, address_of status, 0, null);
+        system_close(ready[0]);
+        return failed;
+}
+
+/*
+        The namespace of the share this launch names, made when there is none yet, as a descriptor to join (setns): owner is
+        the id the launch is when it joins, inside, outside and group the ids its namespace maps. -1 when the launch names
+        none or the share cannot be had: it makes its own namespace then, as every launch did.
+*/
+static bipolar bowl_share_open(positive owner, positive inside, positive outside, positive group, bool hardened)
+{
+        string_address name = bowl_share_name(file_environment_all());
+        p8 path[sizeof(BOWL_SHARE_DIRECTORY) + BOWL_SHARE_NAME_MOST + 2];
+        file_facts facts;
+        bipolar directory, lock, handle;
+
+        if (!name || !bowl_is_root())
+                return -1;
+        string_copy_end(string_copy_end(string_copy_end(path, BOWL_SHARE_DIRECTORY), "/"), name);
+        (void)system_make_directory_at(AT_FDCWD, BOWL_SHARE_DIRECTORY, 0700);
+        directory = system_open_at(AT_FDCWD, BOWL_SHARE_DIRECTORY, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (directory < 0)
+                return -1;
+        if (file_look_code(directory, "", AT_EMPTY_PATH, address_of facts) < 0 || facts.owner != 0 || (facts.mode & 0022))
+                return system_close(directory), -1;
+        // One launch at a time makes it: the next waits, and joins what the first made.
+        lock = system_open_at_mode(directory, ".lock", FILE_WRITE | FILE_CREATE | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (lock >= 0)
+                (void)system_call_2(syscall(flock), (positive)lock, 2);
+        handle = system_open_at(directory, name, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (handle >= 0 && !bowl_share_is(handle, owner))
+                system_close(handle), handle = -1;
+        if (handle < 0)
+        {
+                // Whatever is at the name is no share of this launch's: taken away (a pin of another tier's, a file left by a make
+                // that failed), and the share made.
+                (void)system_call_2(syscall(umount2), (positive)path, MNT_DETACH | 8); // UMOUNT_NOFOLLOW
+                (void)system_remove_at(directory, name, 0);
+                if (!bowl_share_make(directory, name, path, inside, outside, group, hardened))
+                        handle = system_open_at(directory, name, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+                if (handle >= 0 && !bowl_share_is(handle, owner))
+                        system_close(handle), handle = -1;
+        }
+        if (lock >= 0)
+                system_close(lock);
+        system_close(directory);
+        return handle;
+}
+
+/*
         The hardened bowl tier: a program of a bowl is a real unprivileged
         kernel id on the host, not the machine's root mapped in. Until this,
         a fast launch started by root (the Canvas terminal, the console, every
@@ -4763,6 +4939,8 @@ static fn bowl_become_user_hardened(void)
         //      No input group: the pads of a bowl the grants file names are lent by nodes of its user's own (bowl_pad_keeper).
         for (positive at = 0; at < group_count; at++)
                 groups[at] = bowl_device_groups[at];
+        //      The share the launch names, opened while this is root (it may have to be made); joined once this is the user.
+        bipolar share = bowl_share_open(BOWL_USER_ID, BOWL_USER_ID, BOWL_USER_ID, BOWL_USER_ID, true);
 
         /*  Dropping from root to the user clears the dumpable flag, which
             makes /proc/self root-owned and would refuse the id-map writes
@@ -4778,12 +4956,13 @@ static fn bowl_become_user_hardened(void)
                           BOWL_USER_ID) < 0 ||
             system_call_5(syscall(prctl), BOWL_PR_SET_DUMPABLE, 1, 0, 0, 0) <
                 0 ||
-            system_call_1(syscall(unshare), CLONE_NEWUSER) < 0 ||
-            ul_namespace_write("/proc/self/setgroups", "deny", 4, "bowl") ||
-            ul_namespace_map("/proc/self/uid_map", BOWL_USER_ID, BOWL_USER_ID,
-                             1, "bowl") ||
-            ul_namespace_map("/proc/self/gid_map", BOWL_USER_ID, BOWL_USER_ID,
-                             1, "bowl") ||
+            (share >= 0 ? system_call_2(syscall(setns), (positive)share, CLONE_NEWUSER) < 0
+                        : (system_call_1(syscall(unshare), CLONE_NEWUSER) < 0 ||
+                           ul_namespace_write("/proc/self/setgroups", "deny", 4, "bowl") ||
+                           ul_namespace_map("/proc/self/uid_map", BOWL_USER_ID, BOWL_USER_ID,
+                                            1, "bowl") ||
+                           ul_namespace_map("/proc/self/gid_map", BOWL_USER_ID, BOWL_USER_ID,
+                                            1, "bowl"))) ||
             system_call_5(syscall(prctl), BOWL_PR_SET_DUMPABLE, 0, 0, 0, 0) <
                 0 ||
             !bowl_keep_capabilities() ||
@@ -4793,6 +4972,8 @@ static fn bowl_become_user_hardened(void)
                 bowl_refuse("cannot become the user\n");
                 exit(1);
         }
+        if (share >= 0)
+                system_close(share);
 
         bowl_home_over_root = true;
         bowl_fill_valid = false;
@@ -4810,6 +4991,27 @@ static fn bowl_become_user(void)
         {
                 bowl_become_user_hardened();
                 return;
+        }
+
+        /*  A launch that names a share joins it (bowl_share_open), with the ids its namespace was given when it was made;
+            one that cannot makes its own, as every launch does. */
+        bipolar share = bowl_share_open(uid, BOWL_USER_ID, uid, gid, false);
+
+        if (share >= 0)
+        {
+                bipolar joined = (bipolar)system_call_2(syscall(setns), (positive)share, CLONE_NEWUSER);
+
+                system_close(share);
+                if (joined >= 0)
+                {
+                        if (!bowl_keep_capabilities())
+                        {
+                                bowl_refuse("cannot become the user\n");
+                                exit(1);
+                        }
+                        bowl_fill_valid = false;
+                        return;
+                }
         }
 
         /*  The maps are written through /proc, and a process that has
@@ -9810,6 +10012,10 @@ struct bowl_component
         // nothing, which is a browser whose profile's own launcher is the way
         // in. Null is every program the bowl holds.
         string_address address_to expose;
+        // What install runs in the bowl after the packages are in, each an argv run where the package manager runs (the isolated
+        // view, the bowl's tree writable), in order, the first that fails ending the install: Flatpak's remote added and its
+        // AppStream data fetched. Null for none. They are part of the profile's generation, so a change to them runs them again.
+        string_address address_to const address_to after;
 };
 
 struct bowl_profile
@@ -23840,6 +24046,104 @@ static string_address bowl_steam_session[] = {
 #endif
 
 /*
+        Flatpak, from Arch's own package, with Flathub: the desktop's apps as their makers ship them (Discord, VS Code, GIMP,
+        Heroic for the Epic Games Store, Spotify, OBS, Slack, Telegram, Firefox, LibreOffice), each in Flatpak's own sandbox
+        (bubblewrap) inside the bowl's view. The component is flatpak and what the session runs beside it: Xwayland and Python
+        for the X server of the apps that are X11 clients (xwayland-moonwater, as Steam's session has it), and dbus, the system
+        bus `bowl bus` starts. Flatpak's own dependencies come with it (bubblewrap, xdg-dbus-proxy, ostree, appstream, and
+        xdg-desktop-portal, which nothing here starts: Moonwater's session bus answers the portal itself, src/dbus).
+
+        After the packages, install adds Flathub (its .flatpakrepo, which carries the key flatpak checks every download with) and
+        fetches its AppStream data, where the launcher finds the icon of an app that exports an SVG alone (Discord). Both run
+        where the package manager does, and so does every flatpak verb that changes the installation (bowl_needs_isolated):
+        a session's view has the installation read-only (/var/lib/flatpak, bowl_fast_layers).
+
+        The session is the launcher named flatpak, so `flatpak install flathub com.discordapp.Discord` typed in a terminal and
+        the launcher's entry of an app (Exec=/usr/bin/flatpak run ... APP, exported by flatpak into the bowl's
+        exports/share/applications, which ui_apps_read lists) both come here. Any verb but run is flatpak's as it is. For run:
+          - the desktop's sockets named (Wayland, sound), the launch marked the person's, the bowl's capabilities cleared
+            (bubblewrap refuses to run with any), the theme of the moment for GTK 3, and the system bus started;
+          - Flatpak's portal (org.freedesktop.portal.Flatpak, which Electron's zypak spawns its sandboxed processes through)
+            and its session helper (org.freedesktop.Flatpak) started on Moonwater's session bus when they are not running:
+            the bus starts no service itself (src/dbus/dbus.c). The portal starts what it spawns in the environment the
+            app's own flatpak run had (its instance's run-environ), DISPLAY included, so one portal serves every app. The
+            portal and every app's run share one user namespace (BOWL_SHARE=flatpak, bowl_share_open), so the portal can
+            read which app asks it, as on any desktop; started in a namespace of its own it refused zypak every spawn and
+            Discord hung at its zygote. The helper stays a launch of its own: what it runs (HostCommand) is any client's;
+          - the app run under xwayland-moonwater, so an X11 app (Discord, Spotify, Slack) has a rootless X server whose
+            windows are Canvas's, which ends with the app; an app on Wayland alone never connects to it. Without Canvas's
+            window manager socket, or a server that did not start (125), the app runs on Wayland alone.
+        Not set, against Steam's and Chrome's sessions: GSETTINGS_BACKEND (a Flatpak app keeps its settings in its own keyfile,
+        which memory would lose at every start) and the Vulkan drivers (a Flatpak app's are its runtime's, not the bowl's).
+*/
+#define BOWL_FLATPAK_ROOT BOWL_ROOT_PREFIX "arch"
+#define BOWL_FLATPAK_PORTAL "/usr/lib/flatpak-portal"
+#define BOWL_FLATPAK_HELPER "/usr/lib/flatpak-session-helper"
+#define BOWL_FLATPAK_FLATHUB "https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+static string_address bowl_flatpak_arch[] = {
+    "flatpak",
+    // X11 apps on Canvas: the X server the session starts for each, and the wrapper's interpreter.
+    "xorg-xwayland", "python",
+    // The system bus (bowl bus).
+    "dbus",
+    null};
+
+static string_address bowl_flatpak_remote[] = {"/usr/bin/flatpak", "remote-add", "--system", "--if-not-exists", "flathub",
+                                               BOWL_FLATPAK_FLATHUB, null};
+static string_address bowl_flatpak_appstream[] = {"/usr/bin/flatpak", "update", "--system", "--appstream", "flathub", null};
+static string_address address_to const bowl_flatpak_after[] = {bowl_flatpak_remote, bowl_flatpak_appstream, null};
+
+// Nothing of the bowl's /usr/bin by name: the session is the way in, under flatpak's own name.
+static string_address bowl_flatpak_expose[] = {null};
+
+static const struct bowl_component bowl_flatpak_components[] = {
+    {"arch", bowl_flatpak_arch, 0, bowl_flatpak_expose, bowl_flatpak_after},
+    {null, null, 0, null, null},
+};
+
+static string_address bowl_flatpak_session[] = {
+    "wa(){ ! grep -qx \"$1 off\" /root/workarounds 2>/dev/null; }",
+    // The verb is flatpak's first word that is no option: any but run is flatpak's own (install, update and the remote ones
+    // run where the package manager does, bowl_needs_isolated).
+    "verb=; for word in \"$@\"; do case $word in -*) ;; *) verb=$word; break ;; esac; done",
+    "[ \"$verb\" = run ] || exec bowl " BOWL_FLATPAK_ROOT " /usr/bin/flatpak \"$@\"",
+    "[ -S " BOWL_STEAM_SOCKET " ] || { echo \"flatpak: Canvas has no Wayland socket (" BOWL_STEAM_SOCKET "): this image was "
+    "built with CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
+    "export WAYLAND_DISPLAY=" BOWL_STEAM_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none GTK_A11Y=none",
+    "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
+    "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
+    "[ -S /run/dbus/system_bus_socket ] || bowl bus >/dev/null 2>&1 || true",
+    "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
+    BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    // Flatpak's session helper and portal, each started when no process of its name runs (a second one started by an app
+    // launched at the same moment cannot own the name and ends). The portal ends by itself after ten idle minutes with
+    // nothing of its own running, and the next run starts it again. The portal and every app's run share one user
+    // namespace (BOWL_SHARE, bowl_share_open), so the portal reads which app asks it; the helper is a launch of its own,
+    // since what it runs for a caller (HostCommand, flatpak-spawn --host) is whatever any client of the bus asks for.
+    "running(){ for comm in /proc/[0-9]*/comm; do read -r name 2>/dev/null < \"$comm\" && [ \"$name\" = \"$1\" ] && return 0; "
+    "done; return 1; }",
+    "wa flatpak-portal && { running flatpak-session || { bowl " BOWL_FLATPAK_ROOT " " BOWL_FLATPAK_HELPER " >/dev/null 2>&1 & }; } || true",
+    "export BOWL_SHARE=flatpak",
+    "wa flatpak-portal && { running flatpak-portal || { bowl " BOWL_FLATPAK_ROOT " " BOWL_FLATPAK_PORTAL " >/dev/null 2>&1 & }; } || true",
+    "if [ -S " BOWL_STEAM_WM " ]; then",
+    "bowl " BOWL_FLATPAK_ROOT " " BOWL_XWAYLAND_WRAPPER " /usr/bin/flatpak \"$@\"",
+    "status=$?",
+    "[ $status -ne 125 ] && exit $status",
+    "echo \"flatpak: the X server did not start: the app runs on Wayland alone\" >&2",
+    "fi",
+    "exec bowl " BOWL_FLATPAK_ROOT " /usr/bin/flatpak \"$@\"",
+    null};
+
+#if X64 || ARM64
+#define BOWL_FLATPAK_UNAVAILABLE null
+#else
+#define BOWL_FLATPAK_UNAVAILABLE                                             \
+    "Flathub has no apps for this architecture (it builds them for x86-64 "  \
+    "and aarch64 only)\n"
+#endif
+
+/*
         What `sh build.sh` reads, runs and links to build a whole image on this
         machine, from Alpine, whose toolchain the image's own programs need
         nothing of: they are freestanding (-nostdlib, no libc of anybody's), and
@@ -24093,6 +24397,9 @@ static const struct bowl_profile bowl_profiles[] = {
     {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
      "start it with: steam", bowl_steam_components, bowl_steam_session,
      false, null, BOWL_STEAM_UNAVAILABLE, true, true, false, false, null, null, false, true, true},
+    {"flatpak", "Flatpak (Arch's package) with Flathub, its apps on Canvas and in the launcher's list",
+     "add an app with: flatpak install flathub APP (com.discordapp.Discord, com.visualstudio.code, org.gimp.GIMP...)",
+     bowl_flatpak_components, bowl_flatpak_session, false, null, BOWL_FLATPAK_UNAVAILABLE, true},
     {"ssh", "OpenSSH's server (Alpine's openssh-server), run by Moonwater from its settings",
      "it is off: moonwater ssh on turns it on, and moonwater ssh says how it is",
      bowl_ssh_components, null, false, null, null, false, false, false, true},
@@ -24102,7 +24409,7 @@ static const struct bowl_profile bowl_profiles[] = {
      BOWL_BUILD_TRIPLET, bowl_build_tools, true},
 };
 
-#define BOWL_PROFILES_KNOWN "known profiles: graphics, chrome, steam, ssh, build\n"
+#define BOWL_PROFILES_KNOWN "known profiles: graphics, chrome, steam, flatpak, ssh, build\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
@@ -24583,6 +24890,23 @@ static b32 bowl_profile_refresh(const struct bowl_profile address_to profile)
                       !bowl_profile_header(want, sizeof(want), profile->name),
                   0);
         got = file_read_once_at(AT_FDCWD, path, have, sizeof(have) - 1);
+        //      A profile that is installed (every bowl of it marked) whose launcher is gone, or is its bowl's plain launcher of
+        //      the program (a package manager run by hand over it, or an install made by a binary the booted one could not run
+        //      the session of), is the profile's again: the name is free for it as install takes it (bowl_session_name_free).
+        if ((got < (bipolar)string_length(want) || string_compare_max(have, want, string_length(want))) && !profile->libraries)
+        {
+                bool installed = profile->components[0].distro != null;
+
+                for (const struct bowl_component address_to part = profile->components; installed && part->distro; part++)
+                {
+                        const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
+
+                        installed = distro && bowl_profile_marked(distro->root, profile->name);
+                }
+                return installed && bowl_session_name_free(profile, profile->name)
+                           ? (bowl_profile_script(profile) ? 1 : bowl_publish_bin(profile->name))
+                           : 0;
+        }
         return_if(got < (bipolar)string_length(want), 0);
         have[got] = end;
         //      Only one that is the install's own: it holds the session's last line, which no other script does.
@@ -24873,6 +25197,13 @@ static p32 bowl_profile_generation(const struct bowl_profile address_to profile)
                 for (positive at = 0; part->packages[at]; at++)
                         hash = hash_fnv1a(hash, part->packages[at], string_length(part->packages[at]) + 1);
                 hash = hash_fnv1a(hash, "", 1);
+                // The steps after the packages, word by word, each ended: a profile with none hashes as it did before they were.
+                for (positive step = 0; part->after && part->after[step]; step++)
+                {
+                        for (positive at = 0; part->after[step][at]; at++)
+                                hash = hash_fnv1a(hash, part->after[step][at], string_length(part->after[step][at]) + 1);
+                        hash = hash_fnv1a(hash, "\n", 2);
+                }
         }
         for (positive at = 0; profile->tools && profile->tools[at]; at++)
                 hash = hash_fnv1a(hash, profile->tools[at], string_length(profile->tools[at]) + 1);
@@ -25072,6 +25403,9 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                         failed = ssh_profile_record(distro->root);
                 if (!failed && profile->locales)
                         bowl_profile_locales(distro->root);
+                for (positive step = 0; !failed && part->after && part->after[step]; step++)
+                        failed = bowl_setup_isolated(distro->root, part->after[step][0], part->after[step],
+                                                     "the profile's step after its packages failed\n", null);
                 if (failed)
                         return failed;
         }
@@ -25550,11 +25884,41 @@ static bool bowl_desktop_path_ok(string_address path)
                string_find(path + sizeof(BOWL_ROOT_PREFIX) - 1, "/applications/") != null;
 }
 
+/*
+        A Flatpak app's entry, as flatpak exports it into a bowl's installation: /bowls/NAME/var/lib/flatpak/exports/share/
+        applications/ID.desktop, ID an application id (letters, digits, '.', '_' and '-'). The bowl's root into root and the id
+        into id; false for any other path. The entry is a link into the app's own tree, so it is not removed as a file is: the
+        app is uninstalled, and flatpak takes its export away.
+*/
+#define BOWL_FLATPAK_EXPORTS "/var/lib/flatpak/exports/share/applications/"
+
+static bool bowl_flatpak_entry(string_address path, p8 address_to root, positive root_room, p8 address_to id, positive id_room)
+{
+        string_address rest = bowl_split_root(path, root, root_room);
+        positive length;
+
+        if (!rest || !bowl_named_root(root) || !string_has_prefix(rest, BOWL_FLATPAK_EXPORTS))
+                return false;
+        rest += sizeof(BOWL_FLATPAK_EXPORTS) - 1;
+        length = string_length(rest);
+        if (length <= 8 || length - 8 >= id_room || !memory_has_suffix(rest, length, ".desktop") || rest[0] == '.' || rest[0] == '-')
+                return false;
+        for (positive at = 0; at < length - 8; at++)
+                if (!((rest[at] >= 'a' && rest[at] <= 'z') || (rest[at] >= 'A' && rest[at] <= 'Z') || (rest[at] >= '0' && rest[at] <= '9') ||
+                      rest[at] == '.' || rest[at] == '_' || rest[at] == '-'))
+                        return false;
+        memory_copy(id, rest, length - 8);
+        id[length - 8] = end;
+        return true;
+}
+
 static b32 bowl_uninstall(positive count, string_address address_to arguments)
 {
         string_address target;
         const struct bowl_profile address_to profile;
         p8 leaf[BOWL_PATH_LIMIT];
+        p8 root[BOWL_PATH_LIMIT];
+        p8 id[256];
         bipolar parent;
         file_facts facts;
         bipolar failed;
@@ -25568,6 +25932,14 @@ static b32 bowl_uninstall(positive count, string_address address_to arguments)
                 if (bowl_setup_become_root("profile", profile->name, "remove"))
                         return 1;
                 return bowl_profile_remove(profile);
+        }
+        if (bowl_flatpak_entry(target, root, sizeof(root), id, sizeof(id)))
+        {
+                string_address argv[] = {"/usr/bin/flatpak", "uninstall", "--system", "-y", (string_address)id, null};
+
+                if (bowl_setup_become_root("uninstall", target, null))
+                        return 1;
+                return bowl_setup_isolated(root, argv[0], argv, "flatpak could not uninstall the app\n", null);
         }
         if (!bowl_desktop_path_ok(target))
                 return bowl_refuse("uninstall takes a profile name or a .desktop entry under "

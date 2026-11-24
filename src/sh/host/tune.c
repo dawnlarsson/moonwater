@@ -1378,6 +1378,7 @@ static const host_workaround_row host_workaround_rows[] = {
     {"sdl-no-udev", true, "disable SDL udev probing so gamepads hotplug directly from /dev/input"},
     {"chrome-pwrite", true, "route musl pwritev2 to pwrite64 so Chromium's seccomp sandbox does not trap"},
     {"chrome-vaapi-encode", true, "pass AcceleratedVideoEncoder to Chromium for VA-API hardware video encoding"},
+    {"flatpak-portal", true, "start Flatpak's portal and session helper on the session bus for Flatpak apps (Electron's zypak spawns through it)"},
     {"vk-mailbox", false, "set MESA_VK_WSI_PRESENT_MODE=mailbox for all bowls (lower VSync latency on non-VRR screens, higher GPU power)"},
     {"mesa-glthread", false, "set mesa_glthread=true for all bowls (threaded OpenGL dispatch; Mesa drirc already whitelists safe games)"},
 };

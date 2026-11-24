@@ -21853,9 +21853,15 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                                                       SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
                 }
                 // A Flatpak app that exports its icon as SVG alone (Discord) has a PNG in Flathub's AppStream data, which flatpak
-                // keeps for every app of the remote (flatpak update --appstream, which the flatpak profile runs).
-                static const char address_to const streams[] = {"var/lib/flatpak/appstream/flathub/x86_64/active/icons/128x128/",
-                                                                "var/lib/flatpak/appstream/flathub/x86_64/active/icons/64x64/"};
+                // keeps for every app of the remote, under the machine's architecture as flatpak names it (flatpak update
+                // --appstream, which the flatpak profile runs at its install).
+#if ARM64
+#define UI_APPS_FLATPAK_ARCH "aarch64"
+#else
+#define UI_APPS_FLATPAK_ARCH "x86_64"
+#endif
+                static const char address_to const streams[] = {"var/lib/flatpak/appstream/flathub/" UI_APPS_FLATPAK_ARCH "/active/icons/128x128/",
+                                                                "var/lib/flatpak/appstream/flathub/" UI_APPS_FLATPAK_ARCH "/active/icons/64x64/"};
                 for (positive at = 0; !is_local && handle < 0 && at < sizeof(streams) / sizeof(streams[0]); at++)
                 {
                         string_copy_bounded((p8 address_to)path, (string_address)streams[at], sizeof(path));
@@ -29088,6 +29094,21 @@ static b32 ui_apps_uninstall(const char address_to root, int which, const char a
                 return false;
         app = &ui_apps.app[which];
         ui_apps_pin(root, which, false);
+        // A Flatpak app (its entry is one flatpak exported into a bowl's installation) is uninstalled, in a terminal that shows
+        // flatpak's progress (bowl uninstall), and not the flatpak profile its launch goes through.
+        if (!ui_apps_is_local(app) && string_find((string_address)app->source, (string_address) "/var/lib/flatpak/exports/share/applications/"))
+        {
+                string_address words[12];
+                positive count = 0;
+                words[count++] = (string_address) "/terminal";
+                if (mono && mono[0])
+                        words[count++] = (string_address) "-f", words[count++] = (string_address)mono;
+                if (mono_bold && mono_bold[0])
+                        words[count++] = (string_address) "-b", words[count++] = (string_address)mono_bold;
+                words[count++] = (string_address) "-x", words[count++] = (string_address) "/bowl";
+                words[count++] = (string_address) "uninstall", words[count++] = (string_address)app->source, words[count] = null;
+                return ui_start_apart(words, count);
+        }
         if (!ui_apps_is_local(app) && app->profile[0])
         {
                 string_address words[12];

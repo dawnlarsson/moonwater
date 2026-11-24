@@ -60,10 +60,13 @@ static fn launchers(void)
         for (positive item = 0; item < array_count(encoded); item++)
         for (positive room = 0; room <= 48; room++)
         {
-                p8 kept[56];
+                p8 kept[56], line[64];
                 string_address program = null;
                 memory_fill(kept, 0xa5, sizeof kept);
-                p8 got = bowl_launcher(encoded[item], kept + 4, room, &program);
+                // bowl_launcher cuts a shebang line's newline where it is, so it is given a line of its own, as a read one is (the
+                // literal itself is read-only: the write at its end was the SIGSEGV that ended every run here).
+                string_copy_bounded(line, encoded[item], sizeof line);
+                p8 got = bowl_launcher(line, kept + 4, room, &program);
                 p8 valid = item < 2 && room > string_length((const_string)roots[item]);
                 p8 intact = true;
                 for (positive at = 0; at < sizeof kept; at++)
@@ -665,7 +668,7 @@ static fn distros(void)
 
                 for (string_address address_to program = row->expose;
                      program && *program; program++)
-                        isolated &= bowl_needs_isolated(*program);
+                        isolated &= bowl_needs_isolated(*program, null);
 
                 check("Every setup row is a bowl with a marker, a URL and a manager",
                       bowl_named_root(row->root) && row->marker[0] == '/' &&
@@ -1312,6 +1315,189 @@ static fn build_profile(void)
         The pads a bowl the grants name is lent (bowl_pad_keeper): a sysfs bitmap read into bytes the way the kernel writes
         it, a HID report descriptor's top-level collections, the fields of a uevent, and the Steam session's SDL words.
 */
+/*
+        The flatpak profile: Arch's flatpak, Flathub added and its AppStream fetched after the packages (each step where the package
+        manager runs), and a session under flatpak's own name that hands every verb but run to flatpak as it is, and starts an app
+        on the desktop: its sockets, the system bus, Flatpak's portal and session helper, and the rootless X server.
+*/
+static fn flatpak_profile(void)
+{
+        const struct bowl_profile address_to flatpak = bowl_find_profile("flatpak");
+        const struct bowl_component address_to part = flatpak ? flatpak->components : null;
+        string_address address_to session = flatpak ? flatpak->session : null;
+        static string_address daemons[] = {"pipewire", "wireplumber", "systemd", "xorg-server", "networkmanager", "gamemode", null};
+        p8 named = true, isolated = true, absolute = true;
+
+        check("The flatpak profile has one component, Arch's, with a session and no libraries; it holds the X server's wrapper",
+              flatpak && !flatpak->libraries && session && part && string_equals(part->distro, "arch") && !(part + 1)->distro &&
+                  flatpak->xwayland && !flatpak->names && !flatpak->overlay_gl && !flatpak->pwrite_shim);
+        check("The flatpak component names flatpak, Xwayland and Python for the X server's wrapper, and dbus for the system bus",
+              part && chrome_has(part->packages, "flatpak") && chrome_has(part->packages, "xorg-xwayland") &&
+                  chrome_has(part->packages, "python") && chrome_has(part->packages, "dbus"));
+        for (string_address address_to name = daemons; *name; name++)
+                named &= !chrome_has(part ? part->packages : null, *name);
+        check("No package the flatpak profile names is a daemon, a display server or a seat Moonwater does not run", named);
+        check("The flatpak component exposes no program by name: the session is the way in", part && part->expose && !part->expose[0]);
+
+        // The steps after the packages: Flathub added (once, from its .flatpakrepo over https) and its AppStream fetched, each a
+        // flatpak verb that changes the installation, so it runs where the package manager does.
+        check("The flatpak profile's steps after its packages add Flathub and fetch its AppStream, in that order",
+              part && part->after && part->after[0] && part->after[1] && !part->after[2] &&
+                  chrome_has(part->after[0], "remote-add") && chrome_has(part->after[0], "--if-not-exists") &&
+                  chrome_has(part->after[0], "flathub") && chrome_has(part->after[0], "https://dl.flathub.org/repo/flathub.flatpakrepo") &&
+                  chrome_has(part->after[1], "--appstream") && chrome_has(part->after[1], "flathub"));
+        for (positive step = 0; part && part->after && part->after[step]; step++)
+        {
+                isolated &= bowl_needs_isolated(part->after[step][0], part->after[step]);
+                absolute &= part->after[step][0][0] == '/';
+        }
+        check("Every step after the packages is an absolute program run where the package manager runs", isolated && absolute);
+        {
+                struct bowl_component bare[2];
+                struct bowl_profile plain;
+
+                if (flatpak && part)
+                {
+                        plain = *flatpak, bare[0] = *part, bare[0].after = null, memory_zero(&bare[1], sizeof bare[1]), plain.components = bare;
+                        check("The steps after the packages are part of the profile's generation: a change to them installs again",
+                              bowl_profile_generation(&plain) != bowl_profile_generation(flatpak));
+                }
+        }
+        {
+                static string_address run[] = {"flatpak", "run", "com.discordapp.Discord", null};
+                static string_address flagged[] = {"flatpak", "--verbose", "install", "flathub", "org.gimp.GIMP", null};
+                static string_address list[] = {"flatpak", "list", null};
+                static string_address update[] = {"flatpak", "update", "-y", null};
+                check("flatpak's run and list stay in a session's view, and install and update (after an option too) run isolated",
+                      !bowl_needs_isolated("/usr/bin/flatpak", run) && !bowl_needs_isolated("/usr/bin/flatpak", list) &&
+                          bowl_needs_isolated("/usr/bin/flatpak", flagged) && bowl_needs_isolated("/usr/bin/flatpak", update));
+        }
+
+        positive verb = chrome_line(session, "verb=; for word in \"$@\"");
+        positive through = chrome_line(session, "[ \"$verb\" = run ] || exec bowl " BOWL_ROOT_PREFIX "arch /usr/bin/flatpak \"$@\"");
+        positive socket = chrome_line(session, "[ -S /run/moonwater/wayland-0 ] ||");
+        positive exported = chrome_line(session, "export WAYLAND_DISPLAY=/run/moonwater/wayland-0");
+        positive sound = chrome_line(session, "export PULSE_SERVER=unix:/run/moonwater/pulse/native");
+        positive bus = chrome_line(session, "bowl bus >/dev/null 2>&1");
+        positive portal = chrome_line(session, "running flatpak-portal || { bowl " BOWL_ROOT_PREFIX "arch /usr/lib/flatpak-portal ");
+        positive helper = chrome_line(session, "running flatpak-session || { bowl " BOWL_ROOT_PREFIX "arch /usr/lib/flatpak-session-helper ");
+        positive wm = chrome_line(session, "if [ -S /run/moonwater/xwm/wm-0 ]; then");
+        positive wrapped = chrome_line(session, "bowl " BOWL_ROOT_PREFIX "arch /usr/local/bin/xwayland-moonwater /usr/bin/flatpak \"$@\"");
+        positive fallback = chrome_line(session, "[ $status -ne 125 ] && exit $status");
+        positive last = 0;
+
+        while (session && session[last + 1])
+                last++;
+        check("Every verb but run is flatpak's as it is, before the session looks for the desktop (an install needs no Canvas)",
+              verb && through == verb + 1 && socket > through);
+        check("A run names the desktop's sockets, marks the launch as the person's and clears the bowl's capabilities (bubblewrap refuses any)",
+              exported > socket && strstr(session[exported - 1], "MOONWATER_ASKED=1") && strstr(session[exported - 1], "BOWL_CAPABILITIES=none") &&
+                  sound > socket && bus > socket);
+        check("A run starts Flatpak's portal and session helper on the bus when none runs, under the flatpak-portal switch, before the app",
+              portal && helper && portal < wrapped && helper < wrapped && strstr(session[portal - 1], "wa flatpak-portal && ") &&
+                  strstr(session[helper - 1], "wa flatpak-portal && ") && chrome_line(session, "running(){ for comm in /proc/[0-9]*/comm;"));
+        positive share = chrome_line(session, "export BOWL_SHARE=flatpak");
+        check("The portal and the app's run share the flatpak namespace; the helper, which runs what any client asks, is started before it is named",
+              share && helper < share && portal > share && wrapped > share && !strstr(session[helper - 1], "BOWL_SHARE"));
+        {
+                static string_address named[] = {"PATH=/bin", "BOWL_SHARE=flatpak", null};
+                static string_address upper[] = {"BOWL_SHARE=Flatpak", null};
+                static string_address dotted[] = {"BOWL_SHARE=../x", null};
+                static string_address empty[] = {"BOWL_SHARE=", null};
+                static string_address none[] = {"PATH=/bin", null};
+                static string_address longest[] = {"BOWL_SHARE=abcdefghijklmnopqrstuvwxyz012345", null};
+                static string_address longer[] = {"BOWL_SHARE=abcdefghijklmnopqrstuvwxyz0123456", null};
+                check("A share is named by letters, digits and dashes, at most 32 bytes; anything else, or none, is no share",
+                      bowl_share_name(named) && string_equals(bowl_share_name(named), "flatpak") && !bowl_share_name(upper) &&
+                          !bowl_share_name(dotted) && !bowl_share_name(empty) && !bowl_share_name(none) && bowl_share_name(longest) &&
+                          !bowl_share_name(longer) && !bowl_share_name(null));
+        }
+        {
+                // A share's pin must be a user namespace whose parent is this process's own: this process's own namespace is not (its
+                // parent is not itself), nor is a file that is none, nor another kind of namespace.
+                bipolar self = system_open_at(AT_FDCWD, "/proc/self/ns/user", FILE_READ | O_CLOEXEC);
+                bipolar mounts = system_open_at(AT_FDCWD, "/proc/self/ns/mnt", FILE_READ | O_CLOEXEC);
+                bipolar plain = system_open_at(AT_FDCWD, "/proc/self/status", FILE_READ | O_CLOEXEC);
+                check("Only a user namespace whose parent is this one's is taken for a share's pin",
+                      self >= 0 && !bowl_share_is(self, 0) && mounts >= 0 && !bowl_share_is(mounts, 0) && plain >= 0 &&
+                          !bowl_share_is(plain, 0));
+                if (self >= 0)
+                        system_close(self);
+                if (mounts >= 0)
+                        system_close(mounts);
+                if (plain >= 0)
+                        system_close(plain);
+        }
+        {
+                // A namespace a child of this process unshared is one: of this owner, and of no other.
+                b32 ready[2];
+                p8 byte = 0, path[48];
+                positive status = 0, length;
+                bipolar child, held = -1;
+
+                b32 go[2] = {-1, -1};
+
+                if (system_call_2(syscall(pipe2), (positive)ready, O_CLOEXEC) == 0 &&
+                    system_call_2(syscall(pipe2), (positive)go, O_CLOEXEC) == 0)
+                {
+                        child = system_fork();
+                        if (child == 0)
+                        {
+                                system_close(ready[0]), system_close(go[1]);
+                                if (system_call_1(syscall(unshare), CLONE_NEWUSER) == 0)
+                                        (void)system_write_once(ready[1], "x", 1), (void)system_read_once(go[0], &byte, 1);
+                                exit(0);
+                        }
+                        system_close(ready[1]), system_close(go[0]);
+                        if (child > 0 && system_read_once(ready[0], &byte, 1) == 1)
+                        {
+                                length = string_copy_end(path, "/proc/") - path;
+                                length += positive_into_string(path + length, (positive)child);
+                                string_copy_end(path + length, "/ns/user");
+                                held = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+                        }
+                        system_close(go[1]); // the child's read ends, and the child with it
+                        if (child > 0)
+                                system_wait4_retry(child, &status, 0, null);
+                        system_close(ready[0]);
+                }
+                if (held >= 0)
+                {
+                        positive owner = (positive)system_call(syscall(geteuid));
+                        check("A user namespace a child made from here is a share's pin of its owner, and of no other",
+                              bowl_share_is(held, owner) && !bowl_share_is(held, owner + 4242));
+                        system_close(held);
+                }
+                else
+                        log_direct(str("bowl: a share's pin NOT RUN -- no user namespace could be made here\n"));
+        }
+        check("The helper is looked for by the name the kernel keeps of it (its first 15 bytes)",
+              string_length("flatpak-session") == 15 && !string_compare_max("flatpak-session-helper", "flatpak-session", 15));
+        check("A run is under the rootless X server where Canvas has the window manager's socket, and on Wayland alone where it did not start",
+              wm && wrapped == wm + 1 && fallback > wrapped && session && string_equals(session[last], "exec bowl " BOWL_ROOT_PREFIX "arch /usr/bin/flatpak \"$@\""));
+        check("A Flatpak app keeps its GSettings and its runtime's Vulkan drivers: the session sets neither",
+              !chrome_line(session, "GSETTINGS_BACKEND") && !chrome_line(session, "VK_DRIVER_FILES"));
+#if X64 || ARM64
+        check("Flathub has apps for this architecture: the flatpak profile can be installed", flatpak && !flatpak->unavailable);
+#else
+        check("Flathub has no apps for this architecture: the flatpak profile says so", flatpak && flatpak->unavailable);
+#endif
+
+        // A Flatpak app's exported entry is uninstalled as the app (bowl uninstall), and only an entry of that shape is.
+        p8 root[BOWL_PATH_LIMIT], id[256];
+        check("An exported Flatpak entry is the app of its bowl's installation",
+              bowl_flatpak_entry(BOWL_ROOT_PREFIX "arch/var/lib/flatpak/exports/share/applications/com.discordapp.Discord.desktop", root,
+                                 sizeof root, id, sizeof id) &&
+                  string_equals(root, BOWL_ROOT_PREFIX "arch") && string_equals(id, "com.discordapp.Discord"));
+        check("Nothing else is: another folder, an id with a path's step or a leading dash, a root that is no bowl, no .desktop",
+              !bowl_flatpak_entry(BOWL_ROOT_PREFIX "arch/usr/share/applications/com.discordapp.Discord.desktop", root, sizeof root, id, sizeof id) &&
+                  !bowl_flatpak_entry(BOWL_ROOT_PREFIX "arch/var/lib/flatpak/exports/share/applications/a/b.desktop", root, sizeof root, id, sizeof id) &&
+                  !bowl_flatpak_entry(BOWL_ROOT_PREFIX "arch/var/lib/flatpak/exports/share/applications/-y.desktop", root, sizeof root, id, sizeof id) &&
+                  !bowl_flatpak_entry(BOWL_ROOT_PREFIX "bin/var/lib/flatpak/exports/share/applications/x.desktop", root, sizeof root, id, sizeof id) &&
+                  !bowl_flatpak_entry("/root/var/lib/flatpak/exports/share/applications/x.desktop", root, sizeof root, id, sizeof id) &&
+                  !bowl_flatpak_entry(BOWL_ROOT_PREFIX "arch/var/lib/flatpak/exports/share/applications/x.desktopx", root, sizeof root, id, sizeof id));
+}
+
 static fn pad_rows(void)
 {
         p8 bytes[96];
@@ -2007,8 +2193,10 @@ static fn chrome_profile(void)
               exec && !strstr(start, "--disable-gpu") && !strstr(start, "--use-gl") && !strstr(start, "--use-angle") &&
                   !strstr(start, "--no-sandbox") && !strstr(start, "--disable-software-rasterizer") &&
                   !strstr(start, "--disable-features") && !strstr(start, "--in-process-gpu"));
-        check("The browser encodes video on the card where it has an encoder (AcceleratedVideoEncoder), as it decodes there by default",
-              exec && strstr(start, "--enable-features=AcceleratedVideoEncoder ") && strstr(start, "--enable-features") < strstr(start, "\"$@\""));
+        positive encode = chrome_line(chrome ? chrome->session : null,
+                                      "wa chrome-vaapi-encode && wa_chrome_flags=\"--enable-features=AcceleratedVideoEncoder\"");
+        check("The browser encodes video on the card where it has an encoder (AcceleratedVideoEncoder, under its switch), as it decodes there by default",
+              exec && encode && encode < exec && strstr(start, "$wa_chrome_flags ") && strstr(start, "$wa_chrome_flags") < strstr(start, "\"$@\""));
         positive preload = chrome_line(chrome ? chrome->session : null,
                                        "LD_PRELOAD=" BOWL_CHROME_PWRITE_LIBRARY);
         check("The browser preloads its seccomp-safe pwrite shim before starting Chromium, and only Chrome carries that flag",
@@ -3982,8 +4170,8 @@ static fn station_confinement(void)
 
 static fn bowl_hardened_and_limits_rows(void)
 {
-        check("system resource limits target NOFILE=524288 and MEMLOCK=64M",
-              SYSTEM_NOFILE_TARGET == 524288 && SYSTEM_MEMLOCK_TARGET == (64ULL << 20));
+        check("system resource limits target NOFILE=1048576 and MEMLOCK=512M (raised for Proton's esync and the audio server's locked pages)",
+              SYSTEM_NOFILE_TARGET == 1048576 && SYSTEM_MEMLOCK_TARGET == (512ULL << 20));
         check("bowl_wayland_offered returns a valid boolean without crashing",
               bowl_wayland_offered() == 0 || bowl_wayland_offered() == 1);
 #if MOONWATER_STRICT_BOWL >= STRICT_TIGHT
@@ -5009,7 +5197,7 @@ static fn security_remediation_rows(void)
 
 b32 main(void)
 {
-        shader_warm_rows(); // first: a later group crashes the run (pre-existing), and these rows must run
+        shader_warm_rows();
         prewarm_rows();
         security_remediation_rows();
         ssh_rows();
@@ -5030,6 +5218,7 @@ b32 main(void)
         multilib_rows();
         record_rows();
         steam_profile();
+        flatpak_profile();
         pad_rows();
         downloads();
         download_ceiling();
