@@ -285,7 +285,8 @@ struct waterlink_frame {
 #define WATERLINK_MAY_FILES 0x0010u // push and pull
 #define WATERLINK_MAY_LOG 0x0020u   // follow the kernel log
 #define WATERLINK_MAY_PAD 0x0080u   // input: a game pad of its, made here (pad.c)
-#define WATERLINK_MAY_ALL (WATERLINK_MAY_RUN | WATERLINK_MAY_SHELL | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG | WATERLINK_MAY_PAD)
+#define WATERLINK_MAY_LEGACY_ALL (WATERLINK_MAY_RUN | WATERLINK_MAY_SHELL | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+#define WATERLINK_MAY_ALL (WATERLINK_MAY_LEGACY_ALL | WATERLINK_MAY_PAD)
 
 #define WATERLINK_MAY_DEFAULT WATERLINK_MAY_ALL
 
@@ -343,6 +344,8 @@ struct waterlink_peer {
         (link.hwids), so the machine pairing again under a new key is not
         refused for it, and purge keeps it, as it keeps a blocked one. */
 #define WATERLINK_PEER_OFF      0x0004u
+//      The input grant has been explicitly set or denied on this peer (distinguishes legacy 4-grant records from an explicit deny input).
+#define WATERLINK_PEER_INPUT_SET 0x0008u
 //      No link to or from the machine: blocked, or switched off.
 #define WATERLINK_PEER_SHUT     (WATERLINK_PEER_BLOCKED | WATERLINK_PEER_OFF)
 

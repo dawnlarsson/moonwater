@@ -97,6 +97,7 @@
 */
 #define LINK_GROUP_ONCE 1u
 #define LINK_GROUP_DONE 2u
+#define LINK_GROUP_INPUT_SET 4u
 #define LINK_PAIR_SECONDS 300
 #define LINK_PAIR_GRACE 30
 
@@ -196,6 +197,11 @@ static bipolar link_groups_read(link_groups address_to groups,
                            sizeof(struct link_group_record),
                            offset_of(struct link_group_record, namespace),
                            WATERLINK_NAMESPACE_MAX);
+        //      Upgrade legacy default-all groups (all 4 pre-input grants, without explicit input choice) so input is default on.
+        for (positive at = 0; at < groups->count; at++)
+                if (!(groups->record[at].flags & LINK_GROUP_INPUT_SET) &&
+                    (groups->record[at].may & WATERLINK_MAY_ALL) == WATERLINK_MAY_LEGACY_ALL)
+                        groups->record[at].may |= WATERLINK_MAY_PAD;
         return 0;
 }
 

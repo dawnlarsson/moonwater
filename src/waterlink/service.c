@@ -592,6 +592,11 @@ static bipolar link_peers_read(link_peers address_to peers)
                            sizeof(struct waterlink_peer),
                            offset_of(struct waterlink_peer, name),
                            WATERLINK_NAME_MAX);
+        //      Upgrade legacy default-all peers (all 4 pre-input grants, without explicit input choice) so input is default on.
+        for (positive at = 0; at < peers->count; at++)
+                if (!(peers->peer[at].flags & WATERLINK_PEER_INPUT_SET) &&
+                    (peers->peer[at].may & WATERLINK_MAY_ALL) == WATERLINK_MAY_LEGACY_ALL)
+                        peers->peer[at].may |= WATERLINK_MAY_PAD;
         return 0;
 }
 
@@ -620,6 +625,7 @@ static bipolar link_peers_save(link_peers address_to peers)
 }
 
 #define LINK_POLICY_ALL WATERLINK_MAY_ALL
+#define LINK_POLICY_V2  0x40000000u
 
 static p32 link_policy_load(void)
 {
@@ -633,14 +639,18 @@ static p32 link_policy_load(void)
         if (read == -ENOENT)
                 return LINK_POLICY_ALL;
         if (read == 0 && got == sizeof mask)
+        {
+                if (!(mask & LINK_POLICY_V2) && (mask & WATERLINK_MAY_ALL) == WATERLINK_MAY_LEGACY_ALL)
+                        mask |= WATERLINK_MAY_PAD;
                 return mask & LINK_POLICY_ALL;
+        }
         // Fail closed if the policy file exists but is unreadable, tampered, or malformed.
         return 0;
 }
 
 static p8 link_policy_save(p32 mask)
 {
-        p32 clean = mask & LINK_POLICY_ALL;
+        p32 clean = (mask & LINK_POLICY_ALL) | LINK_POLICY_V2;
 
         return link_file_replace(LINK_POLICY_PATH, address_of clean, sizeof clean, true) >= 0;
 }

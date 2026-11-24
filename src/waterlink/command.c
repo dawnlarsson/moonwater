@@ -806,6 +806,7 @@ static b32 link_grant_locked(string_address name, p8 allow,
                 found->may |= change;
         else
                 found->may &= ~change;
+        found->flags |= WATERLINK_PEER_INPUT_SET;
         if (!allow && !found->may)
                 found->flags |= WATERLINK_PEER_BLOCKED;
         else if (allow && found->may)
@@ -1064,7 +1065,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                 if (!link_grants_parse(words + at + 1, count - at - 1,
                                        address_of may, null))
                         return host_refuse("a grant is one of shell run files "
-                                           "log\n");
+                                           "log input\n");
                 granted = true;
         }
         /*      A secret typed here is in /proc/PID/cmdline, which every user
@@ -1181,6 +1182,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                 {
                         taken = record->may & ~may;
                         record->may = may;
+                        record->flags |= LINK_GROUP_INPUT_SET;
                 }
 
                 /*      What the group stops giving, its members lose, and
@@ -1677,6 +1679,8 @@ static fn link_group_restore(void)
                 memory_copy(record->key, key, 32);
                 memory_zero(record->check, sizeof record->check);
                 record->may = may;
+                if ((may & WATERLINK_MAY_ALL) == WATERLINK_MAY_LEGACY_ALL)
+                        record->may |= WATERLINK_MAY_PAD;
                 changed = true;
         }
         crypto_forget(key, sizeof key);
