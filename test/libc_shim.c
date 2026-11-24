@@ -15,6 +15,9 @@
 
         bench: cycles a call (rdtsc around 4096 calls, the best of 64 rounds, the loop alone subtracted) for the hot names at
         the lengths browsers and games make, both sides through the same pointer call.
+
+        bench compare [OLD.so|-] [NAME...]: the compare, copy and search names, at fixed lengths and at lengths drawn at
+        random, against the C library and against a second build of the shim (bench_compare below says how).
 */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -497,8 +500,8 @@ static void check_strings(void *shim)
                 size_t n = (size_t)next() % (round < 3000 ? 200 : 6000);
                 unsigned alphabet = (unsigned)(round % 4 == 0 ? 2 : round % 4 == 1 ? 4 : round % 4 == 2 ? 26 : 255);
                 char *h = string_at(src, n, round % 3, (size_t)round % 64, alphabet);
-                size_t m = (size_t)next() % 40;
-                char needle_room[64];
+                size_t m = (size_t)next() % (round & 1 ? 70 : 12);       // across the needle sizes the bodies split at
+                char needle_room[80];
                 char *needle;
                 if (round % 5 == 0 || n == 0) {
                         fill_random((unsigned char *)needle_room, m, alphabet);
@@ -548,7 +551,7 @@ static void check_memmem(mem_fn ours)
                 unsigned alphabet = (unsigned)(round % 3 == 0 ? 2 : round % 3 == 1 ? 5 : 0);
                 size_t a = place(n, round % 3, (size_t)round % 64);
                 fill_random(src + a, n, alphabet);
-                size_t m = (size_t)next() % 48;
+                size_t m = (size_t)next() % (round & 1 ? 70 : 12);       // across the needle sizes the bodies split at
                 size_t b;
                 if (round % 4 == 0 || m > n) {
                         b = place(m, (round + 1) % 3, 7);
@@ -1468,7 +1471,7 @@ static void bench(void *shim)
 */
 #define BC_END (80 * 1024ul + 1347)             // where every string ends: mid-page, off any line
 #define BC_SPAN (BC_END + 72 * 1024ul)
-#define BC_SLOT (136 * 1024ul)                  // strcat's destinations: eight, so no call reads the byte the last wrote
+#define BC_SLOT (136 * 1024ul + 5 * 64 + 8)     // strcat's destinations: eight, so no call reads the byte the last wrote, at eight offsets in their pages, so no load waits on the store before it to another (4K aliasing)
 #define BC_SLOT_END (66 * 1024ul)
 #define BC_ROUNDS 32
 #define BC_POOL 65536u
@@ -2245,7 +2248,7 @@ static void bench_hunt(void **shims, int shim_count, const char *only)
 int main(int argc, char **argv)
 {
         if (argc < 2) {
-                fprintf(stderr, "libc_shim SHIM.so [bench | hunt [OTHER.so ...] | copy [OTHER.so ...]]\n");
+                fprintf(stderr, "libc_shim SHIM.so [bench [compare [OLD.so|-] [NAME...]] | hunt [OTHER.so ...] | copy [OTHER.so ...]]\n");
                 return 2;
         }
         setvbuf(stdout, 0, _IONBF, 0);  // what was said before a crash is kept

@@ -6950,7 +6950,15 @@ __asm__(
     STRING_Z_VEC("64") "jnz " ASM_LABEL(strcmp_zat64) "\n"
     STRING_Z_VEC("128") "jnz " ASM_LABEL(strcmp_zat128) "\n"
     STRING_Z_VEC("192") "jnz " ASM_LABEL(strcmp_zat192) "\n"
-    "add $192, %rdi\n   add $192, %rsi\n"
+    //      And four more on their own when both have five hundred and twelve: a string of up to that ends
+    //      in them without the setting up of a run, which is what a three or four hundred byte one costs.
+    "test $0xe00, %eax\n   jz " ASM_LABEL(strcmp_z256) "\n"
+    STRING_Z_VEC("256") "jnz " ASM_LABEL(strcmp_zat256) "\n"
+    STRING_Z_VEC("320") "jnz " ASM_LABEL(strcmp_zat320) "\n"
+    STRING_Z_VEC("384") "jnz " ASM_LABEL(strcmp_zat384) "\n"
+    STRING_Z_VEC("448") "jnz " ASM_LABEL(strcmp_zat448) "\n"
+    "add $256, %rdi\n   add $256, %rsi\n"
+    "" ASM_LABEL(strcmp_z256) ":\n   add $192, %rdi\n   add $192, %rsi\n"
     "" ASM_LABEL(strcmp_zmore) ":\n   add $64, %rdi\n   add $64, %rsi\n   movabs $0x4000000000000000, %rdx  # no bound\n"
     //
     //      STRING_Z_RUN: everything in front of the cursors agrees and nothing has ended there, and at least
@@ -6980,7 +6988,11 @@ __asm__(
     "add $64, %rdi\n   add $64, %rsi\n   sub %r8, %rdx\n   jnz " ASM_LABEL(strcmp_zrun) "\n"
     "" ASM_LABEL(strcmp_zzero) ":\n   xor %eax, %eax\n" ASM_RET
     "" ASM_LABEL(strcmp_zwhich) ":\n   " STRING_Z_VEC("0") "jnz " ASM_LABEL(strcmp_zat0) "\n" STRING_Z_VEC("64") "jnz " ASM_LABEL(strcmp_zat64) "\n"
-    STRING_Z_VEC("128") "jnz " ASM_LABEL(strcmp_zat128) "\n" STRING_Z_VEC("192") "\n"
+    STRING_Z_VEC("128") "jnz " ASM_LABEL(strcmp_zat128) "\n" STRING_Z_VEC("192") "jmp " ASM_LABEL(strcmp_zat192) "\n"
+    "" ASM_LABEL(strcmp_zat448) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(strcmp_zat384) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(strcmp_zat320) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(strcmp_zat256) ":\n   add $64, %rdi\n   add $64, %rsi\n"
     "" ASM_LABEL(strcmp_zat192) ":\n   add $64, %rdi\n   add $64, %rsi\n"
     "" ASM_LABEL(strcmp_zat128) ":\n   add $64, %rdi\n   add $64, %rsi\n"
     "" ASM_LABEL(strcmp_zat64) ":\n   add $64, %rdi\n   add $64, %rsi\n"
@@ -6992,7 +7004,7 @@ __asm__(
     "" ASM_LABEL(strcmp_zedgein) ":\n   " STRING_Z_EDGE("r8") "jnz " ASM_LABEL(strcmp_zedge_at) "\n"
     "add %r8, %rdi\n   add %r8, %rsi\n   jmp " ASM_LABEL(strcmp_z) "\n"
     "" ASM_LABEL(strcmp_zedge_at) ":\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%r9,%rcx), %eax\n   movzbl (%r10,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
-    "" ASM_LABEL(strcmp_narrow) ":\n")
+    ".balign 64\n" ASM_LABEL(strcmp_narrow) ":\n")
     "movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n   sub %ecx, %eax\n   jnz 4f\n   test %ecx, %ecx\n   jz 4f  # both ended here, and eax is zero\n"
     ASM_USERSPACE_WIDE(
     "cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(strcmp_generic) "\n"
@@ -8559,6 +8571,8 @@ __asm__(
 #undef ICASE_X64_SSE2_ANY
     ASM_FUNC(memory_search)
     "test %rcx, %rcx\n   jz " ASM_LABEL(memory_search_x64_empty_general) "\n   cmp %rcx, %rsi\n   jb " ASM_LABEL(memory_search_x64_absent_general) "\n   cmp $1, %rcx\n   je " ASM_LABEL(memory_search_x64_one_general) "\n"
+    ASM_USERSPACE_WIDE(ASM_WIDER("cpu_has_avx512", "" ASM_LABEL(memory_search_z) ""))
+    "" ASM_LABEL(memory_search_x64_on) ":\n"
     "cmp $4, %rcx\n   jb " ASM_LABEL(memory_search_x64_short_general) "\n   sub $40, %rsp\n   mov %rdi, 0(%rsp)\n   mov %rsi, 8(%rsp)\n   mov %rdx, 16(%rsp)\n   mov %rcx, 24(%rsp)\n"
     "mov %rdx, %rdi\n   mov %rcx, %rsi\n   xor %edx, %edx\n   call memory_search_prepare\n   mov %rax, %r8\n   mov %rdx, %r9\n   mov 0(%rsp), %rdi\n   mov 8(%rsp), %rsi\n"
     "mov 16(%rsp), %rdx\n   mov 24(%rsp), %rcx\n   add $40, %rsp\n   jmp memory_search_prepared_core\n"
@@ -8566,6 +8580,31 @@ __asm__(
     "" ASM_LABEL(memory_search_x64_one_general) ":\n   movzbl (%rdx), %ecx\n   mov %rsi, %rdx\n   mov %rcx, %rsi\n   jmp memory_first_of\n"
     "" ASM_LABEL(memory_search_x64_empty_general) ":\n   mov %rdi, %rax\n" ASM_RET
     "" ASM_LABEL(memory_search_x64_absent_general) ":\n   xor %eax, %eax\n" ASM_RET
+    //
+    //      AVX-512, a needle of two to sixty four bytes: the first sixty four starts at once, before anything
+    //      is prepared, glibc's way: a start is a candidate where the haystack has the needle's first byte at
+    //      it and its last byte where the needle would end, one compare each over sixty four starts, and a
+    //      candidate is the needle's own sixty four byte compare under a mask of its length, lowest first.
+    //      Only past those does the prepared search with its rarest anchors take over, from the sixty fifth
+    //      start. Both inputs are held away from their page's end by enough that no lane read, the masked
+    //      ones included, is outside a page that holds a byte of them; one that is not goes the old way.
+    //      A needle of eight letters at the front of the haystack cost 34 ticks a call on a 9950X against
+    //      glibc 2.44's 24, and the same needle absent from eight to sixty five letters 32 to 44 against 16
+    //      to 25: the preparation is a walk of the needle and six registers kept.
+    //
+    ASM_USERSPACE_WIDE(
+    "" ASM_LABEL(memory_search_z) ":\n   cmp $64, %rcx\n   ja " ASM_LABEL(memory_search_x64_on) "\n"
+    "mov %edi, %eax\n   and $4095, %eax\n   cmp $3968, %eax\n   ja " ASM_LABEL(memory_search_x64_on) "\n"
+    "mov %edx, %eax\n   and $4095, %eax\n   cmp $4032, %eax\n   ja " ASM_LABEL(memory_search_x64_on) "\n"
+    "mov %rsi, %r8\n   sub %rcx, %r8\n   inc %r8  # the starts a match could have\n   mov $64, %r10d\n   cmp %r10, %r8\n   cmovb %r8, %r10  # bzhi reads eight bits of its count\n"
+    "mov $-1, %r9\n   bzhi %r10, %r9, %r9\n   kmovq %r9, %k3\n"
+    "mov $-1, %r10\n   bzhi %rcx, %r10, %r10\n   kmovq %r10, %k4\n   vmovdqu8 (%rdx), %zmm19{%k4}{z}  # the needle\n"
+    "vpbroadcastb (%rdx), %zmm17\n   vpbroadcastb -1(%rdx,%rcx), %zmm18\n"
+    "vpcmpeqb (%rdi), %zmm17, %k1{%k3}\n   vpcmpeqb -1(%rdi,%rcx), %zmm18, %k2{%k1}\n   kmovq %k2, %r9\n"
+    "1:  tzcnt %r9, %r11\n   jc 2f\n   vpcmpneqb (%rdi,%r11), %zmm19, %k0{%k4}\n   kortestq %k0, %k0\n   jz 3f\n   blsr %r9, %r9\n   jmp 1b\n"
+    "3:  lea (%rdi,%r11), %rax\n" ASM_RET
+    "2:  cmp $64, %r8\n   jbe " ASM_LABEL(memory_search_x64_absent_general) "\n   add $64, %rdi\n   sub $64, %rsi\n   jmp " ASM_LABEL(memory_search_x64_on) "\n"
+    )
     ASM_END(memory_search)
     ASM_FUNC(memory_search_prepared)
     "test %rcx, %rcx\n   jz " ASM_LABEL(memory_search_prepared_x64_empty) "\n   cmp %rcx, %rsi\n   jb " ASM_LABEL(memory_search_prepared_x64_absent) "\n   cmp $1, %rcx\n   je " ASM_LABEL(memory_search_prepared_x64_one) "\n"
@@ -9311,9 +9350,19 @@ __asm__(
     STRING_Z_VEC("64") "jnz " ASM_LABEL(cmpmax_zat64) "\n   cmp $128, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
     STRING_Z_VEC("128") "jnz " ASM_LABEL(cmpmax_zat128) "\n   cmp $192, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
     STRING_Z_VEC("192") "jnz " ASM_LABEL(cmpmax_zat192) "\n   cmp $256, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
-    "add $192, %rdi\n   add $192, %rsi\n   sub $192, %rdx\n"
+    "test $0xe00, %eax\n   jz " ASM_LABEL(cmpmax_z256) "\n"
+    STRING_Z_VEC("256") "jnz " ASM_LABEL(cmpmax_zat256) "\n   cmp $320, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    STRING_Z_VEC("320") "jnz " ASM_LABEL(cmpmax_zat320) "\n   cmp $384, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    STRING_Z_VEC("384") "jnz " ASM_LABEL(cmpmax_zat384) "\n   cmp $448, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    STRING_Z_VEC("448") "jnz " ASM_LABEL(cmpmax_zat448) "\n   cmp $512, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    "add $256, %rdi\n   add $256, %rsi\n   sub $256, %rdx\n"
+    "" ASM_LABEL(cmpmax_z256) ":\n   add $192, %rdi\n   add $192, %rsi\n   sub $192, %rdx\n"
     "" ASM_LABEL(cmpmax_zmore) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
     "movabs $0x4000000000000000, %rcx\n   cmp %rcx, %rdx\n   cmova %rcx, %rdx\n   jmp " ASM_LABEL(strcmp_zloop) "\n"
+    "" ASM_LABEL(cmpmax_zat448) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "" ASM_LABEL(cmpmax_zat384) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "" ASM_LABEL(cmpmax_zat320) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "" ASM_LABEL(cmpmax_zat256) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
     "" ASM_LABEL(cmpmax_zat192) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
     "" ASM_LABEL(cmpmax_zat128) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
     "" ASM_LABEL(cmpmax_zat64) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
@@ -9329,7 +9378,7 @@ __asm__(
     STRING_Z_EDGE("r8") "jnz " ASM_LABEL(cmpmax_zedge_at) "\n"
     "sub %r8, %rdx\n   jz " ASM_LABEL(cmpmax_zzero) "\n   add %r8, %rdi\n   add %r8, %rsi\n   jmp " ASM_LABEL(cmpmax_zagain) "\n"
     "" ASM_LABEL(cmpmax_zedge_at) ":\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%r9,%rcx), %eax\n   movzbl (%r10,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
-    "" ASM_LABEL(cmpmax_narrow) ":\n")
+    ".balign 64\n" ASM_LABEL(cmpmax_narrow) ":\n")
     "xor %eax, %eax\n   test %rdx, %rdx\n   jz 9f\n"
     //
     //      Thirty two bytes a step while there are sixty four left to do.
@@ -21012,7 +21061,7 @@ __asm__(
     //
     "" ASM_LABEL(strcpy_z) ":\n   mov %rdi, %rax\n"
     "" ASM_LABEL(strcpy_zcore) ":\n" STRING_COPY_Z("", "")
-    "" ASM_LABEL(strcpy_narrow) ":\n")
+    ".balign 64\n" ASM_LABEL(strcpy_narrow) ":\n")
     "mov %rdi, %r9  # the destination, where the scan will not look\n   mov %rsi, %rdi\n"
     ASM_USERSPACE_WIDE(
         ASM_NARROW("cpu_has_avx2", "5f")
@@ -21062,7 +21111,7 @@ __asm__(
     "5:  vptestnmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz 4f\n   add $64, %rcx\n   vptestnmb %zmm17, %zmm17, %k0\n   kortestq %k0, %k0\n   jnz 4f\n"
     "add $64, %rcx\n   vptestnmb %zmm18, %zmm18, %k0\n   kortestq %k0, %k0\n   jnz 4f\n   add $64, %rcx\n   vptestnmb %zmm19, %zmm19, %k0\n"
     "4:  kmovq %k0, %rdx\n   tzcnt %rdx, %rdx\n   lea (%rcx,%rdx), %rdi\n   jmp " ASM_LABEL(strcpy_zcore) "\n"
-    "" ASM_LABEL(strcat_narrow) ":\n")
+    ".balign 64\n" ASM_LABEL(strcat_narrow) ":\n")
     "push %rbx\n   push %r12\n   sub $8, %rsp  # aligned at the calls\n"
     "mov %rdi, %rbx\n   mov %rsi, %r12\n   call string_length  # the destination is already in rdi\n"
     "lea (%rbx,%rax), %rdi\n   mov %r12, %rsi\n   call string_copy\n   mov %rbx, %rax  # strcat hands the destination back\n"
@@ -22257,9 +22306,34 @@ ASM_FUNC(positive_to_string)
     //      needle left over is a byte that differs, and that leaves.
     //
     ASM_FUNC(string_search)
-    "xor %ecx, %ecx\n"
+    ASM_USERSPACE_WIDE(ASM_WIDER("cpu_has_avx512", "" ASM_LABEL(string_search_z) ""))
+    "" ASM_LABEL(string_search_x64_on) ":\n   xor %ecx, %ecx\n"
     "1:  movzbl (%rsi,%rcx), %edx\n   test %dl, %dl\n   jz 2f\n   movzbl (%rdi,%rcx), %eax\n   cmp %dl, %al\n   jne string_find\n   inc %rcx\n   jmp 1b\n"
     "2:  mov %rdi, %rax  # the needle ran out, so it was all there\n" ASM_RET
+    //
+    //      AVX-512, a needle of two to sixty three bytes, memory_search's first window: the needle's length
+    //      and the haystack's first sixty four bytes, each one vector, and the starts in those sixty four
+    //      that the needle fits after asked at once by its first and last byte, a candidate proved by one
+    //      compare of the needle under a mask of its length. A haystack that ends in them is answered there;
+    //      one that runs on is string_find's from the first start not asked. Both pointers are held away
+    //      from their page's end, as memory_search's are. A needle of eight letters absent from haystacks of
+    //      one to forty eight letters cost 17 to 58 ticks a call on a 9950X against glibc 2.44's 10 to 41.
+    //
+    ASM_USERSPACE_WIDE(
+    "" ASM_LABEL(string_search_z) ":\n   mov %esi, %eax\n   and $4095, %eax\n   cmp $4032, %eax\n   ja " ASM_LABEL(string_search_x64_on) "\n"
+    "mov %edi, %eax\n   and $4095, %eax\n   cmp $3968, %eax\n   ja " ASM_LABEL(string_search_x64_on) "\n"
+    "vmovdqu64 (%rsi), %zmm19\n   vptestnmb %zmm19, %zmm19, %k0\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   jc " ASM_LABEL(string_search_x64_on) "  # a needle of sixty four or more\n"
+    "cmp $1, %rcx\n   jbe " ASM_LABEL(string_search_x64_on) "\n"
+    "vmovdqu64 (%rdi), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kmovq %k0, %r8\n   tzcnt %r8, %r8  # where the haystack ends, or sixty four\n"
+    "mov %r8, %r9\n   sub %rcx, %r9\n   inc %r9  # the starts the needle fits after in these\n   jle 4f\n"
+    "mov $-1, %r10\n   bzhi %r9, %r10, %r10\n   kmovq %r10, %k3\n   mov $-1, %r10\n   bzhi %rcx, %r10, %r10\n   kmovq %r10, %k4\n"
+    "vpbroadcastb (%rsi), %zmm17\n   vpbroadcastb -1(%rsi,%rcx), %zmm18\n"
+    "vpcmpeqb %zmm16, %zmm17, %k1{%k3}\n   vpcmpeqb -1(%rdi,%rcx), %zmm18, %k2{%k1}\n   kmovq %k2, %r10\n"
+    "1:  tzcnt %r10, %r11\n   jc 2f\n   vpcmpneqb (%rdi,%r11), %zmm19, %k0{%k4}\n   kortestq %k0, %k0\n   jz 3f\n   blsr %r10, %r10\n   jmp 1b\n"
+    "3:  lea (%rdi,%r11), %rax\n" ASM_RET
+    "2:  cmp $64, %r8\n   jb 4f  # the haystack ended in them\n   add %r9, %rdi\n   jmp string_find\n"
+    "4:  xor %eax, %eax\n" ASM_RET
+    )
     ASM_END(string_search)
     //
     //       string_format -- the loop that reads a format string and hands
@@ -65628,7 +65702,7 @@ __asm__(
     //      12.6 to 23.2 ticks a call on a 9950X for one to five hundred and twelve bytes, against glibc
     //      2.44's __stpcpy_evex at 6.3 to 17.3.
     "" ASM_LABEL(stpcpy_z) ":\n" STRING_COPY_Z("lea (%rdi,%rdx), %rax\n", "lea 63(%rsi,%r9), %rax\n")
-    "" ASM_LABEL(stpcpy_narrow) ":\n")
+    ".balign 64\n" ASM_LABEL(stpcpy_narrow) ":\n")
     "push %rbx\n   push %r12\n   sub $8, %rsp\n   mov %rdi, %rbx  # the destination\n   mov %rsi, %r12  # the source\n"
     "mov %rsi, %rdi\n   call string_length\n   mov %rbx, %rdi\n   mov %r12, %rsi\n   lea 1(%rax), %rdx  # the terminator is copied too\n"
     "add %rax, %rbx  # which is where it lands, and the answer\n"
@@ -65669,8 +65743,14 @@ __asm__(
     "vmovdqu64 %zmm18, -64(%r11)  # the last line of the padding\n"
     "62: lea 64(%r10), %rcx\n   cmp %r11, %rcx\n   ja 63f\n   vmovdqu64 %zmm18, (%r10)\n   mov %rcx, %r10\n   jmp 62b\n"
     "63: vmovdqu64 %zmm16, (%rdi)\n   add %r8, %rax\n" ASM_RET
-    //      The first line is all source and the bound is past it.
-    "72: vmovdqu64 %zmm16, (%rdi)\n   mov %rdi, %r9\n   sub %rsi, %r9  # the destination as a distance from the source\n"
+    //      The first line is all source and the bound is past it. A bound of up to a hundred and twenty eight
+    //      inside the source's page is the sixty four that end on it, nought from a terminator on, over the
+    //      first line's back: those lanes are in front of any terminator, so they agree with it.
+    "72: vmovdqu64 %zmm16, (%rdi)\n   cmp $128, %rdx\n   ja 68f\n   mov %esi, %ecx\n   and $4095, %ecx\n   cmp $3968, %ecx\n   ja 68f\n"
+    "vmovdqu64 -64(%rsi,%rdx), %zmm17\n   vptestnmb %zmm17, %zmm17, %k0\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n"
+    "mov $-1, %r8\n   bzhi %rcx, %r8, %r8\n   kmovq %r8, %k1\n   vmovdqu8 %zmm17, %zmm17{%k1}{z}\n   vmovdqu64 %zmm17, -64(%rdi,%rdx)\n"
+    "lea -64(%rdi,%rdx), %rax\n   add %rcx, %rax  # where the terminator went, or the bound\n" ASM_RET
+    "68: mov %rdi, %r9\n   sub %rsi, %r9  # the destination as a distance from the source\n"
     "lea (%rsi,%rdx), %r11  # the end of the bound, in the source\n   lea 64(%rsi), %r8\n   and $-64, %r8\n"
     "73: lea 64(%r8), %rcx\n   cmp %r11, %rcx\n   ja 79f  # the bound ends in this line\n   test $192, %r8b\n   jnz 74f\n"
     "lea 256(%r8), %rcx\n   cmp %r11, %rcx\n   jbe 75f  # four whole lines inside the bound\n"
@@ -65695,7 +65775,7 @@ __asm__(
     "mov %esi, %ecx\n   and $63, %ecx\n   shr %cl, %r8\n   mov $64, %r9d\n   sub %ecx, %r9d  # to the page's end\n"
     "mov $-1, %r10\n   bzhi %r9, %r10, %r10\n   kmovq %r10, %k1\n   vmovdqu8 (%rsi), %zmm16{%k1}{z}\n   tzcnt %r8, %r8\n   jnc 60b\n"
     "cmp %r9, %rdx\n   ja " ASM_LABEL(stpncpy_calls) "\n   mov %r9, %r8  # the bound ends in the page: what is there is all source\n   jmp 60b\n"
-    "" ASM_LABEL(stpncpy_calls) ":\n")
+    ".balign 64\n" ASM_LABEL(stpncpy_calls) ":\n")
     "push %rbx\n   push %r12\n   push %r13\n   mov %rdi, %rbx  # the destination\n   mov %rsi, %r12  # the source\n"
     "mov %rdx, %r13  # the bound\n"
     "mov %rsi, %rdi\n   mov %rdx, %rsi\n   call string_length_max\n   mov %rbx, %rdi\n   mov %r12, %rsi\n   mov %rax, %rdx\n"
