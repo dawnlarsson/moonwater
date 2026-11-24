@@ -692,5 +692,12 @@ CONFIG_DRM_AMDGPU_CIK=y
 
 CONFIG_DRM_AMD_DC=y
 CONFIG_DRM_AMD_DC_FP=y
+# DC for Southern Islands too (Tahiti, Pitcairn, Cape Verde, Oland). Every
+# later chip has DC with the two lines above (DRM_AMD_DC_DCE is on by default);
+# these four take it only with this option, and without it amdgpu drives their
+# screens with its older code, which has no atomic modesetting: no overlay
+# plane, no flip of every screen at once, no variable refresh. amdgpu.dc=0 on
+# the command line puts a card back on the older code.
+CONFIG_DRM_AMD_DC_SI=y
 CONFIG_FW_LOADER=y
 CONFIG_FW_LOADER_USER_HELPER=n
