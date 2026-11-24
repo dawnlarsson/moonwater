@@ -432,7 +432,7 @@ cover('folds_already', 'width', 'conv3x3_f32',
       'the enhancer hands it a band of a picture a row at a time: the width is the band\'s, from the picture at run '
       'time, and the channel counts, though the model\'s, settle only the panel and tile chosen once a call, a few '
       'compares against thousands of FMAs')
-cover('folds_already', 'count', 'u8_to_f32',
+cover('folds_already', 'count', 'u8_to_f32 picture_lut3d_u32',
       'a band\'s row of a picture, its length from the picture at run time; a literal would remove one compare a '
       'vector from a stream of hundreds')
 cover('folds_already', 'quads', 'picture_quads_f32 picture_quads_add_f32',

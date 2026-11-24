@@ -294,6 +294,89 @@ static p8 enhance_quads_add_hold(void)
         return holds;
 }
 
+
+/*
+        picture_lut3d_u32 against its definition in integers: random tables over a stride through all 2^24 colours (every
+        alpha kept), the identity table giving every colour back exactly, and counts 0 to 40 with sentinels.
+*/
+static p32 enhance_lut_model(p32 word, const p16 *lut)
+{
+        int v[3] = {(int)(word >> 16) & 255, (int)(word >> 8) & 255, (int)word & 255}, cell[3], f[3];
+        static const int stride[3] = {324, 18, 1};
+        int key[3];
+
+        for (int c = 0; c < 3; c++)
+                cell[c] = v[c] / 15 > 16 ? 16 : v[c] / 15, f[c] = v[c] - 15 * cell[c], key[c] = f[c] << 10 | stride[c];
+        for (int pass = 0; pass < 3; pass++)
+                for (int i = 0; i < 2; i++)
+                        if (key[i] < key[i + 1])
+                        {
+                                int t = key[i];
+
+                                key[i] = key[i + 1], key[i + 1] = t;
+                        }
+        int base = cell[0] * 324 + cell[1] * 18 + cell[2], n1 = base + (key[0] & 1023), n2 = n1 + (key[1] & 1023), n3 = base + 343;
+        int f1 = key[0] >> 10, f2 = key[1] >> 10, f3 = key[2] >> 10;
+        p32 made = word & 0xff000000u;
+
+        for (int b = 0; b < 3; b++)
+        {
+                int sum = (15 - f1) * lut[4 * base + b] + (f1 - f2) * lut[4 * n1 + b] + (f2 - f3) * lut[4 * n2 + b] + f3 * lut[4 * n3 + b];
+
+                made |= (p32)((sum + 960) / 1920) << (8 * b);
+        }
+        return made;
+}
+
+static p8 enhance_lut_hold(p8 identity)
+{
+        static p16 lut[18 * 18 * 18 * 4];
+        static p32 pixels[4096], want[4096];
+        p8 holds = true;
+
+        for (int r = 0; r < 18; r++)
+                for (int g = 0; g < 18; g++)
+                        for (int b = 0; b < 18; b++)
+                        {
+                                p16 *node = lut + 4 * ((r * 18 + g) * 18 + b);
+
+                                node[0] = (p16)(identity ? b * 15 * 128 : enhance_next() % 32641);
+                                node[1] = (p16)(identity ? g * 15 * 128 : enhance_next() % 32641);
+                                node[2] = (p16)(identity ? r * 15 * 128 : enhance_next() % 32641);
+                                node[3] = (p16)enhance_next();
+                        }
+#if X64
+        p32 step = 3;
+#else
+        p32 step = 61;
+#endif
+        for (p32 colour = 0; colour < (1u << 24); colour += 4096 * step)
+        {
+                for (p32 i = 0; i < 4096; i++)
+                {
+                        p32 c = colour + i * step;
+
+                        pixels[i] = (c & 0xffffffu) | (p32)enhance_next() << 24;
+                        want[i] = identity ? pixels[i] : enhance_lut_model(pixels[i], lut);
+                }
+                picture_lut3d_u32(pixels, 4096, lut);
+                for (p32 i = 0; i < 4096; i++)
+                        holds &= pixels[i] == want[i];
+        }
+        for (positive n = 0; n <= 40; n++)
+        {
+                for (positive i = 0; i < n + 2; i++)
+                        pixels[i] = (p32)enhance_next(), want[i] = enhance_lut_model(pixels[i], lut);
+                p32 before = pixels[0], after = pixels[n + 1];
+
+                picture_lut3d_u32(pixels + 1, n, lut);
+                for (positive i = 1; i <= n; i++)
+                        holds &= pixels[i] == want[i];
+                holds &= pixels[0] == before && pixels[n + 1] == after;
+        }
+        return holds;
+}
+
 static fn enhance_tier(string_address tier)
 {
         enhance_faults f = {0, 0, 0, 0};
@@ -309,6 +392,9 @@ static fn enhance_tier(string_address tier)
         check("picture_quads_f32: every quad count to 40, each quad's 16 bytes in memory order", enhance_quads_hold());
         check("picture_quads_add_f32: residuals, ties to even, NaN, infinities, alpha 0xff, nothing outside",
               enhance_quads_add_hold());
+        check("picture_lut3d_u32: random tables through a stride of all 2^24 colours, alpha kept, counts to 40",
+              enhance_lut_hold(false));
+        check("picture_lut3d_u32: the identity table gives every colour back", enhance_lut_hold(true));
 }
 
 b32 main()

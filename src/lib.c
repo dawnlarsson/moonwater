@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        524 routines (497 public, 27 local), 512 of them on all three and 12 local to one.
+        525 routines (498 public, 27 local), 513 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -413,6 +413,7 @@
           path_tail_copy                 public  yes     yes     yes
           pcm_pack24                     public  yes     yes     yes
           pcm_widen                      public  yes     yes     yes
+          picture_lut3d_u32              public  yes     yes     yes
           picture_quads_add_f32          public  yes     yes     yes
           picture_quads_f32              public  yes     yes     yes
           pointer_gain                   public  yes     yes     yes
@@ -59402,6 +59403,132 @@ __asm__(
 );
 #endif
 #endif // KERNEL_MODE, conv3x3_f32
+
+/*
+        picture_lut3d_u32(pixels, count, lut) passes each 0xaarrggbb word through a 3D colour table, in place, by
+        tetrahedral interpolation in integers, so every machine gives the same bytes. The table is an 18-node lattice
+        on each axis, nodes at the bytes 0, 15, 30 ... 255, so a byte's cell is byte / 15 (16 for 255) and its weight in
+        the cell byte - 15 * cell, both exact. A node is four int16, blue, green, red and one unused, each the output in
+        128ths of a level (0 to 32640), node (r, g, b) at index (r * 18 + g) * 18 + b. The cell's tetrahedron is the
+        one whose path from the low corner takes the axes in falling order of weight; with the weights f1 >= f2 >= f3
+        and the path's nodes c0, c1, c2, c3 each output channel is
+
+            ((15 - f1) c0 + (f1 - f2) c1 + (f2 - f3) c2 + f3 c3 + 960) / 1920, rounded down
+
+        (a tie between two weights gives the same value whichever is taken first). The alpha byte is kept. The table
+        is not written; the pixels must not overlap it.
+
+        Each machine works a pixel at a time: the cells, the weights sorted with the axes' strides in one key a word
+        (weight << 10 | stride) by three conditional swaps, the four nodes' offsets from the sorted strides; then
+        x86_64 multiplies the nodes in pairs by pmaddwd (int16 nodes, so SSE2 serves every tier), arm64 by umull and
+        umlal by element, riscv64 in scalars. The divide is >> 7 and then a multiply by 4370 and >> 16, exact for every
+        quotient below 3840.
+*/
+#ifndef KERNEL_MODE
+fn picture_lut3d_u32(p32 address_to pixels, positive count, const p16 address_to lut);
+#if X64
+__asm__(
+    ASM_SECTION
+    //      picture_lut3d_u32: rdi pixels, rsi count, rdx lut. A pixel's bytes to r8 (red), r9 (green), r10 (blue),
+    //      the cells to r11-r13, the keys sorted into r8 >= r9 >= r10, the nodes' indices r11 (low corner), r12, r13,
+    //      r14 (the far corner, 343 on); xmm2 holds the weights of the first pair, xmm3 of the second.
+    ASM_FUNC(picture_lut3d_u32)
+    "test %rsi, %rsi\n   jz " ASM_LABEL(lut_none) "\n   push %rbx\n   push %r12\n   push %r13\n   push %r14\n"
+    "lea " ASM_LABEL(lut_k) "(%rip), %rax\n   movdqa (%rax), %xmm7\n   movdqa 16(%rax), %xmm6\n"
+    "" ASM_LABEL(lut_pixel) ":\n   mov (%rdi), %eax\n   movzbl %al, %r10d\n   mov %eax, %r9d\n   shr $8, %r9d\n   movzbl %r9b, %r9d\n"
+    "mov %eax, %r8d\n   shr $16, %r8d\n   movzbl %r8b, %r8d\n   mov $16, %ecx\n"
+    "imul $4370, %r8d, %r11d\n   shr $16, %r11d\n   cmp %ecx, %r11d\n   cmova %ecx, %r11d\n"
+    "imul $4370, %r9d, %r12d\n   shr $16, %r12d\n   cmp %ecx, %r12d\n   cmova %ecx, %r12d\n"
+    "imul $4370, %r10d, %r13d\n   shr $16, %r13d\n   cmp %ecx, %r13d\n   cmova %ecx, %r13d\n"
+    "imul $15, %r11d, %ecx\n   sub %ecx, %r8d\n   imul $15, %r12d, %ecx\n   sub %ecx, %r9d\n   imul $15, %r13d, %ecx\n   sub %ecx, %r10d\n"
+    "shl $10, %r8d\n   or $324, %r8d\n   shl $10, %r9d\n   or $18, %r9d\n   shl $10, %r10d\n   or $1, %r10d\n"
+    "mov %r8d, %ecx\n   cmp %r9d, %r8d\n   cmovb %r9d, %r8d\n   cmovb %ecx, %r9d\n"
+    "mov %r9d, %ecx\n   cmp %r10d, %r9d\n   cmovb %r10d, %r9d\n   cmovb %ecx, %r10d\n"
+    "mov %r8d, %ecx\n   cmp %r9d, %r8d\n   cmovb %r9d, %r8d\n   cmovb %ecx, %r9d\n"
+    "imul $324, %r11d, %r11d\n   imul $18, %r12d, %r12d\n   add %r12d, %r11d\n   add %r13d, %r11d\n"
+    "mov %r8d, %r12d\n   and $1023, %r12d\n   add %r11d, %r12d\n   mov %r9d, %r13d\n   and $1023, %r13d\n   add %r12d, %r13d\n"
+    "lea 343(%r11), %r14d\n   shr $10, %r8d\n   shr $10, %r9d\n   shr $10, %r10d\n   mov $15, %ebx\n   sub %r8d, %ebx\n"
+    "sub %r9d, %r8d\n   sub %r10d, %r9d\n   shl $16, %r8d\n   or %ebx, %r8d\n   shl $16, %r10d\n   or %r9d, %r10d\n"
+    "movd %r8d, %xmm2\n   pshufd $0, %xmm2, %xmm2\n   movd %r10d, %xmm3\n   pshufd $0, %xmm3, %xmm3\n"
+    "movq (%rdx,%r11,8), %xmm0\n   movq (%rdx,%r12,8), %xmm1\n   punpcklwd %xmm1, %xmm0\n   pmaddwd %xmm2, %xmm0\n"
+    "movq (%rdx,%r13,8), %xmm1\n   movq (%rdx,%r14,8), %xmm4\n   punpcklwd %xmm4, %xmm1\n   pmaddwd %xmm3, %xmm1\n"
+    "paddd %xmm1, %xmm0\n   paddd %xmm7, %xmm0\n   psrld $7, %xmm0\n   packssdw %xmm0, %xmm0\n   pmulhuw %xmm6, %xmm0\n"
+    "packuswb %xmm0, %xmm0\n   movd %xmm0, %ecx\n   and $0x00ffffff, %ecx\n   and $0xff000000, %eax\n   or %ecx, %eax\n"
+    "mov %eax, (%rdi)\n   add $4, %rdi\n   dec %rsi\n   jnz " ASM_LABEL(lut_pixel) "\n"
+    "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    "" ASM_LABEL(lut_none) ":\n" ASM_RET
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(lut_k) ":\n   .4byte 960, 960, 960, 960\n   .2byte 4370, 4370, 4370, 4370, 4370, 4370, 4370, 4370\n"
+    ".popsection\n"
+    ASM_END(picture_lut3d_u32)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //
+    //      picture_lut3d_u32 -- x0 pixels, x1 count, x2 lut. w10-w12 the bytes (blue, green, red), w13-w15 the cells,
+    //      the keys sorted into w12 >= w11 >= w10; the nodes by ldr d at index * 8 and weighed by umull / umlal by
+    //      element of v4.h[0..3]; v7.h[0] holds 4370, v6 960 a lane.
+    //
+    ASM_FUNC(picture_lut3d_u32)
+    "cbz x1, 9f\n   mov w9, #4370\n   dup v7.4h, w9\n   mov w9, #960\n   dup v6.4s, w9\n   mov w8, #16\n   mov w7, #15\n"
+    "mov w6, #324\n   mov w5, #18\n"
+    "1:  ldr w9, [x0]\n   and w10, w9, #255\n   ubfx w11, w9, #8, #8\n   ubfx w12, w9, #16, #8\n   mov w4, #4370\n"
+    "mul w13, w12, w4\n   lsr w13, w13, #16\n   cmp w13, w8\n   csel w13, w8, w13, hi\n"
+    "mul w14, w11, w4\n   lsr w14, w14, #16\n   cmp w14, w8\n   csel w14, w8, w14, hi\n"
+    "mul w15, w10, w4\n   lsr w15, w15, #16\n   cmp w15, w8\n   csel w15, w8, w15, hi\n"
+    "msub w12, w13, w7, w12\n   msub w11, w14, w7, w11\n   msub w10, w15, w7, w10\n"
+    "lsl w12, w12, #10\n   add w12, w12, #324\n   lsl w11, w11, #10\n   add w11, w11, #18\n   lsl w10, w10, #10\n   add w10, w10, #1\n"
+    "cmp w12, w11\n   csel w3, w12, w11, hs\n   csel w11, w11, w12, hs\n   mov w12, w3\n"
+    "cmp w11, w10\n   csel w3, w11, w10, hs\n   csel w10, w10, w11, hs\n   mov w11, w3\n"
+    "cmp w12, w11\n   csel w3, w12, w11, hs\n   csel w11, w11, w12, hs\n   mov w12, w3\n"
+    "mul w13, w13, w6\n   madd w13, w14, w5, w13\n   add w13, w13, w15\n"
+    "and w14, w12, #1023\n   add w14, w14, w13\n   and w15, w11, #1023\n   add w15, w15, w14\n   add w3, w13, #343\n"
+    "lsr w12, w12, #10\n   lsr w11, w11, #10\n   lsr w10, w10, #10\n   sub w4, w7, w12\n   sub w12, w12, w11\n   sub w11, w11, w10\n"
+    "mov v4.h[0], w4\n   mov v4.h[1], w12\n   mov v4.h[2], w11\n   mov v4.h[3], w10\n"
+    "ldr d0, [x2, x13, lsl #3]\n   ldr d1, [x2, x14, lsl #3]\n   ldr d2, [x2, x15, lsl #3]\n   ldr d3, [x2, x3, lsl #3]\n"
+    "umull v5.4s, v0.4h, v4.h[0]\n   umlal v5.4s, v1.4h, v4.h[1]\n   umlal v5.4s, v2.4h, v4.h[2]\n   umlal v5.4s, v3.4h, v4.h[3]\n"
+    "add v5.4s, v5.4s, v6.4s\n   ushr v5.4s, v5.4s, #7\n   xtn v5.4h, v5.4s\n   umull v5.4s, v5.4h, v7.4h\n   shrn v5.4h, v5.4s, #16\n"
+    "xtn v5.8b, v5.8h\n   fmov w3, s5\n   and w3, w3, #0x00ffffff\n   and w9, w9, #0xff000000\n   orr w9, w9, w3\n"
+    "str w9, [x0], #4\n   subs x1, x1, #1\n   b.ne 1b\n"
+    "9:  " ASM_RET
+    ASM_END(picture_lut3d_u32)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    //
+    //      picture_lut3d_u32 -- a0 pixels, a1 count, a2 lut. Scalars: t0-t2 the bytes (red, green, blue), t3-t5 the
+    //      cells, the keys sorted into t0 >= t1 >= t2, the nodes at a6, a7, t6 and a5, each channel's sum in t3.
+    //
+    ASM_FUNC(picture_lut3d_u32)
+    "beqz a1, 9f\n   li a3, 4370\n   li a4, 16\n"
+    "1:  lwu t6, 0(a0)\n   srli t0, t6, 16\n   andi t0, t0, 255\n   srli t1, t6, 8\n   andi t1, t1, 255\n   andi t2, t6, 255\n"
+    "mul t3, t0, a3\n   srli t3, t3, 16\n   bleu t3, a4, 2f\n   mv t3, a4\n"
+    "2:  mul t4, t1, a3\n   srli t4, t4, 16\n   bleu t4, a4, 3f\n   mv t4, a4\n"
+    "3:  mul t5, t2, a3\n   srli t5, t5, 16\n   bleu t5, a4, 4f\n   mv t5, a4\n"
+    "4:  slli a5, t3, 4\n   sub a5, a5, t3\n   sub t0, t0, a5\n   slli a5, t4, 4\n   sub a5, a5, t4\n   sub t1, t1, a5\n"
+    "slli a5, t5, 4\n   sub a5, a5, t5\n   sub t2, t2, a5\n"
+    "slli t0, t0, 10\n   addi t0, t0, 324\n   slli t1, t1, 10\n   addi t1, t1, 18\n   slli t2, t2, 10\n   addi t2, t2, 1\n"
+    "bgeu t0, t1, 5f\n   mv a5, t0\n   mv t0, t1\n   mv t1, a5\n"
+    "5:  bgeu t1, t2, 6f\n   mv a5, t1\n   mv t1, t2\n   mv t2, a5\n"
+    "6:  bgeu t0, t1, 7f\n   mv a5, t0\n   mv t0, t1\n   mv t1, a5\n"
+    "7:  li a5, 324\n   mul t3, t3, a5\n   li a5, 18\n   mul t4, t4, a5\n   add t3, t3, t4\n   add t3, t3, t5\n"
+    "andi a6, t0, 1023\n   add a6, a6, t3\n   andi a7, t1, 1023\n   add a7, a7, a6\n   addi a5, t3, 343\n"
+    "srli t0, t0, 10\n   srli t1, t1, 10\n   srli t2, t2, 10\n   li t4, 15\n   sub t4, t4, t0\n   sub t0, t0, t1\n   sub t1, t1, t2\n"
+    "slli t3, t3, 3\n   add t3, t3, a2\n   slli a6, a6, 3\n   add a6, a6, a2\n   slli a7, a7, 3\n   add a7, a7, a2\n"
+    "slli a5, a5, 3\n   add a5, a5, a2\n   srli t5, t6, 24\n   slli t5, t5, 24\n   sw t5, 0(a0)\n   li t5, 0\n"
+    //       t4, t0, t1, t2 the weights of the nodes at t3, a6, a7, a5; each channel b (blue 0, green 2, red 4)
+    "8:  add t6, t3, t5\n   lh t6, 0(t6)\n   mul t6, t6, t4\n   add a4, a6, t5\n   lh a4, 0(a4)\n   mul a4, a4, t0\n   add t6, t6, a4\n"
+    "add a4, a7, t5\n   lh a4, 0(a4)\n   mul a4, a4, t1\n   add t6, t6, a4\n   add a4, a5, t5\n   lh a4, 0(a4)\n   mul a4, a4, t2\n"
+    "add t6, t6, a4\n   addi t6, t6, 960\n   srli t6, t6, 7\n   mul t6, t6, a3\n   srli t6, t6, 16\n   srli a4, t5, 1\n   slli a4, a4, 3\n"
+    "sll t6, t6, a4\n   lwu a4, 0(a0)\n   or a4, a4, t6\n   sw a4, 0(a0)\n   addi t5, t5, 2\n   li a4, 6\n   bltu t5, a4, 8b\n"
+    "li a4, 16\n   addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 1b\n"
+    "9:  " ASM_RET
+    ASM_END(picture_lut3d_u32)
+);
+#endif
+#endif // KERNEL_MODE, picture_lut3d_u32
 
 /*
         What this processor turned out to have.
