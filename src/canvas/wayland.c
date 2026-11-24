@@ -2821,15 +2821,27 @@ static void wayland_stand_end(struct wayland_client *c, struct wayland_surface *
         wayland_lend_leave(c, s), wayland_presenting_drop(c, s);
         if (s->cbq[WLCB_READY].count)
                 wayland_callbacks_done(c, s, wayland_now());
-        if (!restore || !(root = wayland_row_surface(row, &rc)) || root->row != row || !(root->flags & WAYLAND_SURFACE_MAPPED))
+        if (!restore || !(root = wayland_row_surface(row, &rc)) || root->row != row)
                 return;
         root->need_full = 1;
-        if (wayland_has_children(root))
+        // The window's own picture again. A window with none (an X window whose server never drew, its row opened for the stand-in)
+        // keeps the stand-in's last picture, laid into its table by an empty one, so nothing of the stand-in's buffers, which go back
+        // now, is read in place on its row after them.
+        if ((root->flags & WAYLAND_SURFACE_MAPPED) && wayland_has_children(root))
                 wayland_relay(rc, root);
-        else if (root->lent || root->held)
+        else if ((root->flags & WAYLAND_SURFACE_MAPPED) && (root->lent || root->held))
         {
                 struct wayland_rect window = wayland_window_of(rc, root);
                 wayland_child_copy(rc, root, 0, &window), wayland_row_take(rc, root);
+        }
+        else
+        {
+                struct wayland_picture none;
+
+                memory_zero(&none, sizeof none);
+                none.row_width = s->window_w, none.row_height = s->window_h, none.last = 1, none.sync_fd = -1;
+                none.plane_fd[0] = none.plane_fd[1] = none.plane_fd[2] = none.plane_fd[3] = -1;
+                wayland.host->row_picture(wayland.host->context, (int)row, &none);
         }
 }
 
@@ -6280,7 +6292,16 @@ WAYLAND_API void wayland_drop(long slot)
                 else wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         }
         if (wayland.cursor_client == slot) wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
-        for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++) if (c->surfaces[at].live) wayland_row_release(c, &c->surfaces[at]), wayland.surfaces--;
+        // A stand-in's row is another surface's: it is given back (its own picture again), never closed with this client.
+        for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
+                if (c->surfaces[at].live)
+                {
+                        if (c->surfaces[at].role == WAYLAND_ROLE_STAND_IN)
+                                wayland_stand_end(c, &c->surfaces[at], 1);
+                        else
+                                wayland_row_release(c, &c->surfaces[at]);
+                        wayland.surfaces--;
+                }
         wayland_texts_drop(c);
         for (long at = 0; at < c->tbl[WLT_POOL].count; at++) if (c->pools[at].live) wayland_pool_drop(c, at);
         for (long at = 0; at < c->tbl[WLT_TIMELINE].count; at++) if (c->timelines[at].live) wayland_timeline_drop(c, at);

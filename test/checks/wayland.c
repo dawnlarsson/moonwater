@@ -9769,7 +9769,7 @@ static void test_stand_in(void)
         struct session x, g;
         unsigned long xsurface, xwin, manager, subcompositor, stand, other, buffer, callback;
         struct wl_event_seen *e;
-        long row, pictures;
+        long row, pictures, opened = -1;
 
         wl_reset();
         host.stand_in = fake_stand_in;
@@ -9906,7 +9906,7 @@ static void test_stand_in(void)
                 // the stand-in opens its row and shows there.
                 unsigned long undrawn = wlc_id(x.c, WLI_wl_surface, 6), xundrawn = wlc_id(x.c, WLI_xwayland_surface_v1, 1);
                 unsigned long late = wlc_id(g.c, WLI_wl_surface, 6);
-                long rows_before = 0, opened = -1;
+                long rows_before = 0;
 
                 wlc_send(x.c, x.compositor, WLQ_wl_compositor_create_surface, undrawn);
                 wlc_send(x.c, x.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xundrawn, undrawn);
@@ -9939,6 +9939,13 @@ static void test_stand_in(void)
         }
         wlc_end(g.c);
         WLCHECK(fake.row[row].used && fake.row[row].pixels[0] == 0xff222222, "the stand-in's client gone, the X window is its own again");
+        {
+                long open_rows = 0;
+                for (int at = 0; at < FAKE_ROWS; at++)
+                        open_rows += fake.row[at].used;
+                WLCHECK(open_rows == 2 && opened >= 0 && fake.row[opened].used && fake.row[opened].pixels[0] == 0xff00ccff,
+                        "the stand-in's client gone, the X window that never drew keeps the stand-in's last picture (%ld rows)", open_rows);
+        }
         wlc_end(x.c);
         leak_check("stand-ins");
         wayland_stop();
