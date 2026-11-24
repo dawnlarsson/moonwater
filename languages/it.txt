@@ -34,6 +34,7 @@
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
+# machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 @language it
 @name Italiano
 @translated machine
@@ -623,6 +624,7 @@ tray_month_oct	f3e9	ott
 tray_month_sep	a4ef	set
 tray_pm	f466	PM
 tray_settings	8728	Impostazioni
+ui_colour_hex	1ae3	un colore è di sei cifre esadecimali, rrggbb
 ui_confirm_again	b3ff	premi di nuovo per confermare: 
 ui_field_digits	f52b	un numero è fatto di cifre
 ui_field_full	fe02	non ce ne sta di più
@@ -651,7 +653,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Automatic	6784	Automatico
 =Automatic shows it when no keyboard is plugged in	a05a	Automatico la mostra quando non c'è una tastiera collegata
 =Background	0abd	Sfondo
-=Background colour (rrggbb or default)	e2b2	Colore dello sfondo (rrggbb o default)
 =Battery	e12e	Batteria
 =Battery shown	2a23	Batteria mostrata
 =Bluetooth	14bd	Bluetooth

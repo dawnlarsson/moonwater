@@ -5864,6 +5864,210 @@ static fn check_kit_tokens(void)
 }
 
 /*
+        The colour wheel (ui.c's ui_colour): every rrggbb is its hue, saturation and value and back, exactly, and a grey keeps the hue it had
+        (black the saturation too). Drawn in a box, its parts are where a press finds them: the disc's right edge is red at full saturation,
+        its middle white, the bar's top full value and its foot black, the well its field; a drag moves the colour and its release is its
+        rest. The arrows step the marker across the disc (Shift ten times as far), Page Up and Down the value, Home and End its ends. The
+        field is the colour's six digits whatever moved it; six typed are the colour as they come, Enter keeps them and Escape puts back what
+        it was, and three digits are no colour. Reading from the right its parts are mirrored in the box and the disc is the same disc.
+*/
+static fn check_kit_colour(void)
+{
+        static unsigned int pixels[320 * 280], scratch[320 * UI_SCRATCH_ROWS];
+        static struct ui_colour k;
+        struct ui ui = terminal.ui;
+        struct window_event event = {0};
+        positive wrong = 0;
+        b64 hue = 0, saturation = 0, value = 0;
+        p32 asks;
+        int cx, cy, ltr_disc, ltr_bar, ltr_well;
+        b32 grey, black, red, white, top, foot, well, drag, rest;
+        char said[8];
+
+        for (unsigned int rgb = 0; rgb < 0x1000000u; rgb++)
+        {
+                hue = saturation = 0;
+                ui_colour_hsv(rgb, &hue, &saturation, &value);
+                wrong += ui_colour_rgb(hue, saturation, value) != rgb;
+        }
+        check("colour wheel: every rrggbb is its hue, saturation and value and back, exactly (all 16777216)", !wrong);
+        hue = UI_ONE / 3, saturation = UI_ONE / 2, value = 0;
+        ui_colour_hsv(0x808080u, &hue, &saturation, &value);
+        grey = hue == UI_ONE / 3 && saturation == 0 && ui_colour_rgb(hue, saturation, value) == 0x808080u;
+        hue = UI_ONE / 3, saturation = UI_ONE / 2;
+        ui_colour_hsv(0, &hue, &saturation, &value);
+        black = hue == UI_ONE / 3 && saturation == UI_ONE / 2 && value == 0;
+        check("colour wheel: a grey keeps the hue it had, and black its hue and saturation", grey && black);
+
+        ui.pixels = pixels, ui.pitch = 320, ui.width = 320, ui.height = 280, ui.top = 0, ui.bottom = 280, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 320, ui.band_top = ui.band_bottom = 0;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+        ui_kit.rtl = 0;
+        if (!ui_colour_open(&k, null, 0x1e1e1e))
+        {
+                check("colour wheel: opens on its colour", false);
+                return;
+        }
+        ui_colour_draw(&ui, &k, 0, 0, 320, 280);
+        cx = k.disc_x + k.side / 2, cy = k.disc_y + k.side / 2;
+        check("colour wheel: laid in its box, the disc and the bar side by side as tall as each other, the well under both",
+              k.side > 100 && k.bar_h == k.side && k.bar_x > k.disc_x && k.well_y >= k.disc_y + k.side && k.well_w == k.side + ui_px(&ui, UI_COLOUR_GAP) + k.bar_w);
+        event.type = WINDOW_EVENT_BUTTON, event.a = UI_POINTER_LEFT, event.flags = WINDOW_KEY_DOWN;
+        asks = ui_colour_event(&ui, &k, null, &event, k.disc_x + k.side - 1, cy);
+        red = (asks & UI_COLOUR_TAKEN) && (asks & UI_COLOUR_CHANGED) && k.held == UI_COLOUR_DISC && (k.rgb >> 16) == 0x1e && k.saturation > UI_ONE - UI_ONE / 50 &&
+              (k.hue < UI_ONE / 100 || k.hue > UI_ONE - UI_ONE / 100);
+        event.type = WINDOW_EVENT_MOTION, event.flags = 0;
+        asks = ui_colour_event(&ui, &k, null, &event, cx, cy);
+        drag = (asks & UI_COLOUR_CHANGED) && k.saturation < UI_ONE / 50 && k.held;
+        event.type = WINDOW_EVENT_BUTTON, event.flags = 0;
+        asks = ui_colour_event(&ui, &k, null, &event, cx, cy);
+        rest = (asks & UI_COLOUR_DONE) && !k.held;
+        check("colour wheel: a press at the disc's right edge is red at full saturation, at the value it had", red);
+        check("colour wheel: the hand dragged to the disc's middle is white there (no saturation), and its release is the colour's rest", drag && rest);
+        event.flags = WINDOW_KEY_DOWN;
+        ui_colour_put(&k, 0, 0, k.value);
+        ui_colour_event(&ui, &k, null, &event, k.bar_x + k.bar_w / 2, k.bar_y);
+        top = k.value == UI_ONE && k.rgb == 0xffffffu;
+        event.flags = 0, ui_colour_event(&ui, &k, null, &event, 0, 0);
+        event.flags = WINDOW_KEY_DOWN;
+        ui_colour_event(&ui, &k, null, &event, k.bar_x + k.bar_w / 2, k.bar_y + k.bar_h - 1);
+        foot = k.value == 0 && k.rgb == 0;
+        event.flags = 0, ui_colour_event(&ui, &k, null, &event, 0, 0);
+        check("colour wheel: the bar's top is full value, its foot black", top && foot);
+        event.type = WINDOW_EVENT_BUTTON, event.flags = WINDOW_KEY_DOWN;
+        check("colour wheel: a press off its parts is not its, and takes the keys away", !(ui_colour_event(&ui, &k, null, &event, 2, 2) & UI_COLOUR_TAKEN) && !k.focused);
+
+        // The keys: the marker from the middle a step right is red at a fiftieth, Shift ten times as far, Up a step up the disc.
+        ui_colour_put(&k, 0, 0, UI_ONE), k.focused = 1;
+        event.type = WINDOW_EVENT_KEY, event.flags = WINDOW_KEY_DOWN, event.a = UI_KEY_RIGHT, event.b = 0;
+        asks = ui_colour_event(&ui, &k, null, &event, 0, 0);
+        white = (asks & UI_COLOUR_CHANGED) && (asks & UI_COLOUR_DONE) && k.hue == 0 && k.saturation + 1 >= UI_COLOUR_STEP && k.saturation <= UI_COLOUR_STEP + 1 && k.keyed;
+        event.flags = WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT;
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        white = white && k.hue == 0 && k.saturation + 1 >= UI_COLOUR_STEP + UI_COLOUR_LEAP && k.saturation <= UI_COLOUR_STEP + UI_COLOUR_LEAP + 1;
+        event.flags = WINDOW_KEY_DOWN, event.a = UI_KEY_UP;
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        white = white && k.hue > 0 && k.hue < UI_ONE / 4 && k.saturation > UI_COLOUR_STEP + UI_COLOUR_LEAP;
+        event.a = UI_KEY_PAGE_DOWN;
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        value = k.value;
+        event.a = UI_KEY_PAGE_DOWN, event.flags = WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT;
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        white = white && value == UI_ONE - UI_COLOUR_STEP && k.value == UI_ONE - UI_COLOUR_STEP - UI_COLOUR_LEAP;
+        event.a = UI_KEY_END, event.flags = WINDOW_KEY_DOWN;
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        white = white && k.value == 0 && k.rgb == 0;
+        event.a = UI_KEY_HOME;
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        check("colour wheel: the arrows step its marker (Shift ten times as far), Page Up and Down its value, Home and End its ends", white && k.value == UI_ONE);
+
+        // The field is the colour's six digits; six typed are the colour as they come, Enter keeps them, Escape puts back what it was.
+        ui_colour_set(&k, 0x123abc);
+        doc_read(&k.text.doc, 0, (p8 address_to)said, 6), said[6] = 0;
+        check("colour wheel: its field says the colour's rrggbb, lower case", doc_length(&k.text.doc) == 6 && string_equals((string_address)said, "123abc"));
+        ui_colour_draw(&ui, &k, 0, 0, 320, 280);
+        event.type = WINDOW_EVENT_BUTTON, event.a = UI_POINTER_LEFT, event.flags = WINDOW_KEY_DOWN, event.b = 0;
+        asks = ui_colour_event(&ui, &k, null, &event, k.well_x + k.well_w / 2, k.well_y + k.well_h / 2);
+        well = (asks & UI_COLOUR_TYPING) && k.text.focused;
+        event.flags = 0, ui_colour_event(&ui, &k, null, &event, k.well_x + k.well_w / 2, k.well_y + k.well_h / 2);
+        doc_select_set(&k.text.doc, 0, doc_length(&k.text.doc));
+        asks = 0;
+        for (const char address_to c = "#00FF00"; *c; c++)
+        {
+                event.type = WINDOW_EVENT_KEY, event.flags = WINDOW_KEY_DOWN, event.a = 30, event.b = (int)(unsigned char)*c;
+                asks |= ui_colour_event(&ui, &k, null, &event, 0, 0);
+        }
+        well = well && (asks & UI_COLOUR_CHANGED) && k.rgb == 0x00ff00u;
+        event.a = UI_KEY_ENTER, event.b = '\r';
+        asks = ui_colour_event(&ui, &k, null, &event, 0, 0);
+        doc_read(&k.text.doc, 0, (p8 address_to)said, 6), said[6] = 0;
+        well = well && (asks & UI_COLOUR_DONE) && !k.text.focused && string_equals((string_address)said, "00ff00");
+        check("colour wheel: a press on the well gives its field the keys, six digits typed (a # and either case) are the colour, and Enter keeps them",
+              well);
+        event.a = UI_KEY_ENTER, event.b = '\r';
+        ui_colour_event(&ui, &k, null, &event, 0, 0); // Enter on the wheel: its field has the keys, its digits chosen
+        for (const char address_to c = "abc"; *c; c++)
+                event.a = 30, event.b = (int)(unsigned char)*c, ui_colour_event(&ui, &k, null, &event, 0, 0);
+        event.a = UI_KEY_ENTER, event.b = '\r';
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        doc_read(&k.text.doc, 0, (p8 address_to)said, 6), said[6] = 0;
+        grey = k.rgb == 0x00ff00u && string_equals((string_address)said, "00ff00");
+        event.a = UI_KEY_ENTER, event.b = '\r';
+        ui_colour_event(&ui, &k, null, &event, 0, 0);
+        for (const char address_to c = "ff0000"; *c; c++)
+                event.a = 30, event.b = (int)(unsigned char)*c, ui_colour_event(&ui, &k, null, &event, 0, 0);
+        black = k.rgb == 0xff0000u;
+        event.a = UI_KEY_ESCAPE, event.b = 27;
+        asks = ui_colour_event(&ui, &k, null, &event, 0, 0);
+        black = black && (asks & UI_COLOUR_CHANGED) && k.rgb == 0x00ff00u && !k.text.focused;
+        check("colour wheel: three digits are no colour (the field is put back as it was), and Escape puts back the colour from before the typing",
+              grey && black);
+
+        // Reading from the right: the parts mirrored in the box, and a point at the same place from the disc's middle the same colour.
+        ltr_disc = k.disc_x, ltr_bar = k.bar_x, ltr_well = k.well_x;
+        ui_colour_put(&k, 0, 0, UI_ONE);
+        event.type = WINDOW_EVENT_BUTTON, event.a = UI_POINTER_LEFT, event.flags = WINDOW_KEY_DOWN, event.b = 0;
+        ui_colour_event(&ui, &k, null, &event, cx + k.side / 4, cy - k.side / 5);
+        hue = k.hue, saturation = k.saturation;
+        event.flags = 0, ui_colour_event(&ui, &k, null, &event, 0, 0);
+        ui_kit.rtl = 1;
+        ui_colour_draw(&ui, &k, 0, 0, 320, 280);
+        event.flags = WINDOW_KEY_DOWN;
+        ui_colour_event(&ui, &k, null, &event, k.disc_x + k.side - 1 - (k.side / 2 + k.side / 4), k.disc_y + k.side / 2 - k.side / 5);
+        event.flags = 0, ui_colour_event(&ui, &k, null, &event, 0, 0);
+        ui_kit.rtl = 0;
+        check("colour wheel: right to left its disc, bar and well are mirrored in the box, and a point of the disc turned over is the same colour",
+              k.disc_x == 320 - ltr_disc - k.side && k.bar_x == 320 - ltr_bar - k.bar_w && k.well_x == ltr_well && k.bar_x < k.disc_x &&
+                  k.hue == hue && k.saturation == saturation);
+        // Recorded for the card, the disc is the pixels the processor paints: its runs through their own tones (op 10, the identity cover,
+        // every table of tones read whole in the pool) and its edge's dots (op 1), replayed here into the ground and held to the painted
+        // picture over the half of the disc the marker is not on (hue 0 at full saturation: its right edge, the left reading from the right).
+        {
+                static unsigned int ops[8 * 4096], replay[320 * 280];
+                static unsigned char pool[1 << 20];
+                struct ui_scene scene;
+                struct ui rec = ui;
+                positive differ = 0, runs = 0, reach = 0;
+
+                for (int rtl = 0; rtl < 2; rtl++)
+                {
+                        ui_kit.rtl = (b32)rtl;
+                        ui_colour_put(&k, 0, UI_ONE, UI_ONE);
+                        memory_zero(&scene, sizeof(scene));
+                        scene.ops = ops, scene.room = 4096, scene.cover = pool, scene.size = sizeof(pool), scene.slot_gen = 1;
+                        rec.scene = &scene;
+                        memory_fill_u32(pixels, 320 * 280, 0xff202124u);
+                        memory_fill_u32(replay, 320 * 280, 0xff202124u);
+                        ui_colour_draw(&ui, &k, 0, 0, 320, 280);
+                        ui_colour_draw(&rec, &k, 0, 0, 320, 280);
+                        for (unsigned int at = 0; at < scene.count; at++)
+                        {
+                                const unsigned int address_to op = ops + 8 * at;
+                                unsigned int kind = op[0] & 255;
+
+                                for (int y = (int)op[2]; (kind == 1 || kind == 10) && y < (int)op[4]; y++)
+                                        for (int x = (int)op[1]; x < (int)op[3]; x++)
+                                                replay[y * 320 + x] = kind == 1 ? ui_over(op[5], replay[y * 320 + x])
+                                                                                : ((const unsigned int address_to)(pool + op[5]))[pool[op[7] + (positive)(x - (int)op[1])]];
+                                if (kind == 10)
+                                        runs++, reach = op[5] + 1024 > reach ? op[5] + 1024 : reach;
+                        }
+                        for (int y = k.disc_y; y < k.disc_y + k.side; y++)
+                                for (int x = k.disc_x + (rtl ? k.side / 2 + 12 : 0); x < k.disc_x + (rtl ? k.side : k.side / 2 - 12); x++)
+                                        differ += replay[y * 320 + x] != pixels[y * 320 + x];
+                }
+                ui_kit.rtl = 0;
+                check("colour wheel: recorded, its disc is runs of its own tones and dots, every table read whole, the processor's pixels both ways",
+                      !scene.lost && runs > (positive)k.side && reach <= scene.used && !differ);
+        }
+        // At twice the scale its parts are twice as large, and the disc's edge is the same red.
+        ui.scale = 200;
+        ui_colour_draw(&ui, &k, 0, 0, 320, 280);
+        check("colour wheel: at 200 percent the bar and the well are twice as wide as at 100", k.bar_w == 2 * UI_COLOUR_BAR_W && k.well_h == 2 * UI_COLOUR_WELL_H);
+        ui.scale = 100;
+}
+
+/*
         A list the person manages (ui_row.order, ui_row.remove, UI_ROW_ADD): three ordered rows that each have a remove button, and an add row.
         A press on a row's grip lifts it and the hand carries it down past two rows, where it is let go: the list says it moved from 0 to 2 in its
         group; one let go with the press cancelled moves nothing. A press on a row's remove button let go on it removes that row, let go off it

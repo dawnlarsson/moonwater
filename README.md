@@ -43,7 +43,7 @@ moonwater name [NEW|random]            what this machine is called, like space-w
 # Canvas
 moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater canvas arrange [NAME[@X,Y|@off]...|default]  where each screen is: names left to right, the first the primary [default]
-moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
+moonwater canvas background [COLOUR|default]  the colour where no wallpaper covers, and the one the Solid colour card of the wallpaper editor starts at, rrggbb; a Scene is given a colour of its own by canvas wallpaper scene N colour:rrggbb [1e1e1e]
 moonwater canvas border width [PIXELS|default]  how wide the highlight on the edge or corner of a window is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]
 moonwater canvas border grip [PIXELS|default]  how far outside the edge of a window a press of the pointer takes it to resize, 2 to 16 pixels; a finger takes 16 [6]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
@@ -65,8 +65,8 @@ moonwater canvas text scale [PERCENT|default]  how large the text of the windows
 moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]
 moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]
 moonwater canvas wallpaper             each Scene's wallpaper, and the pictures remembered
-moonwater canvas wallpaper edit [on|off]  the editor over the desktop, of the Scene you are on: open, shut, or turned
-moonwater canvas wallpaper scene N CHOICE [SCREEN]  Scene N's: auto, dark, white (the moon) or a picture's name, on SCREEN or the one you are on
+moonwater canvas wallpaper edit [on|off]  the editor over the desktop, of the Scene you are on (a solid colour on its colour wheel, the moon, the pictures): open, shut, or turned
+moonwater canvas wallpaper scene N CHOICE [SCREEN]  Scene N's: auto, dark, white (the moon), colour:rrggbb (a solid colour) or a picture's name, on SCREEN or the one you are on
 moonwater canvas wallpaper picture FILE  remember a PNG and make it the wallpaper of the Scene you are on
 moonwater canvas wallpaper forget NAME  remember a picture no more; a Scene that had it has the moon
 moonwater canvas wallpaper curated [fetch|get HEX]  the feed's curated wallpapers: those kept, fetched and verified anew, or one's picture by its digest

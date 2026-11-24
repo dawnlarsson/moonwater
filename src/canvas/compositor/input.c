@@ -1858,7 +1858,9 @@ static int compositor_key_chord(unsigned int code, int value, unsigned int modif
         }
         if (compositor_wall_editing() && value == 1 && code == CK_KEY_ESC)
         {
-                compositor_wall_edit(-1, 0);
+                // The wheel's field typing gives its keys back first; Escape again shuts the editor.
+                if (!compositor_wall_editor_escape())
+                        compositor_wall_edit(-1, 0);
                 return 1;
         }
         for (unsigned int k = 0; k < compositor_keys.count; k++)
@@ -1973,6 +1975,9 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 return;
 #endif
         if ((count = compositor_keymap_event(&compositor.keymap, code, value, modifiers, characters)) < 0)
+                return;
+        // The wallpaper editor's colour wheel has the keys while the editor is open (wallpaper.c), not the window under its veil.
+        if (compositor_wall_editor_key(code, (int)value, modifiers, characters, count))
                 return;
         if (compositor.focus < 0)
                 compositor_refocus();

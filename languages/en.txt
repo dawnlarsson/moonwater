@@ -587,6 +587,7 @@ tray_month_oct	f3e9	Oct
 tray_month_sep	a4ef	Sep
 tray_pm	f466	PM
 tray_settings	8728	Settings
+ui_colour_hex	1ae3	a colour is six hex digits, rrggbb
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds
@@ -615,7 +616,6 @@ ui_field_full	fe02	that is as much as it holds
 =Automatic	6784	Automatic
 =Automatic shows it when no keyboard is plugged in	a05a	Automatic shows it when no keyboard is plugged in
 =Background	0abd	Background
-=Background colour (rrggbb or default)	e2b2	Background colour (rrggbb or default)
 =Battery	e12e	Battery
 =Battery shown	2a23	Battery shown
 =Bluetooth	14bd	Bluetooth

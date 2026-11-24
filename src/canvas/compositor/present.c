@@ -991,6 +991,7 @@ static struct compositor_wall_job
         unsigned int accent;
         int screens[COMPOSITOR_WALL_SCREENS][4];
         int dark[COMPOSITOR_WALL_SCREENS]; // each screen's moon: the dark look, or the white
+        unsigned int colour[COMPOSITOR_WALL_SCREENS]; // each screen's plain colour (colour:RRGGBB) with its alpha, 0 for none
         unsigned int key[COMPOSITOR_WALL_KEY]; // what it is made from
         positive began, took;    // when it was begun, and how long it took (ns)
         b64 turn;                // the moon's turn it is made at
@@ -1164,6 +1165,14 @@ static void compositor_wall_make(struct compositor_wall_job *job)
 
                 if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > job->width || y + h > job->height)
                         continue;
+                if (job->colour[at])
+                {
+                        // A plain colour: the screen's rect filled (a moon's step keeps what it was copied from).
+                        memory_zero(job->squares[at], sizeof(job->squares[at]));
+                        if (!job->step)
+                                memory_fill_u32_rect(job->pixels + (long)y * job->pitch + x, (positive)job->pitch, (positive)w, (positive)h, job->colour[at]);
+                        continue;
+                }
                 if (job->picture[at][0])
                 {
                         unsigned int *corner = job->pixels + (long)y * job->pitch + x;
@@ -1284,7 +1293,10 @@ static void compositor_wall_start(b64 turn, int step)
         {
                 const char *word = compositor_wall_shown(at);
 
+                long colour = setting_wallpaper_colour(word);
+
                 job->dark[at] = setting_wallpaper_dark(word, !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT));
+                job->colour[at] = colour < 0 ? 0 : 0xff000000u | (unsigned int)colour;
                 compositor_wall_picture_of(word, job->picture[at], sizeof(job->picture[at]));
         }
         job->accent = taskbar_wall_accent(), job->done = 0, job->began = clock_monotonic_nanoseconds(), job->took = 0;

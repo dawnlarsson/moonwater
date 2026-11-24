@@ -291,6 +291,9 @@ struct settings_row
         // A row the window lists as no row of its own: its verb is a way of the add row of its group's list (settings.c's settings_way_row),
         // the way's number from 1; 0 for every other row.
         unsigned char way;
+        // A row of the command and its pages alone, which the window does not list (canvas background: its colour is chosen in the
+        // wallpaper editor's Solid colour card now, settings.c's settings_rebuild passes it over).
+        unsigned char unlisted;
 };
 
 /*
@@ -340,18 +343,22 @@ static const struct settings_row settings_rows[] = {
     //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
     {null, "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, .output = SETTINGS_OUT_NOTICES,
      .help = "the kernel's own errors and warnings the desktop has: open the row to see each one, and copy a line"},
-    SETTING_PLAIN_ROW("Canvas", "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
+    //  Each Scene's wallpaper (the compositor's wallpaper.c): chosen in the editor over the desktop, which this opens and shuts, with a
+    //  solid colour on its colour wheel, the Moonwater moon (dark, white, or with the theme), the pictures remembered and the feed's.
+    //  canvas wallpaper is its verb (page.c's rows).
+    {"Canvas", "Wallpaper", SETTINGS_ACTION, 0, 0, {null}, null, null, {"canvas", "wallpaper", "edit"}, null, 0,
+     .help = "the editor of the wallpaper of the Scene you are on, over the desktop: a solid colour, the moon, the pictures you chose and the curated ones",
+     .about = "Choose each Scene's wallpaper on the desktop"},
+    //  The desktop's colour, merged into the wallpaper: the window has no row of it (unlisted), a Scene's plain colour is chosen in the
+    //  editor's Solid colour card (colour:rrggbb, the compositor's wallpaper.c). What is kept here is the colour shown where no wallpaper
+    //  covers (while one is made, a Scene card with no miniature) and the colour that card starts at for a Scene with no colour of its own.
+    SETTING_PLAIN_ROW(null, "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
                       .type = SETTING_COLOUR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",
                       .refusal = "background is a colour like 1e1e1e, or default, not %s\n",
-                      .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
-    {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
-     {"canvas", "background"}, null, 0, .how = SETTING_ALIAS},
-    //  Each Scene's wallpaper (the compositor's wallpaper.c): chosen in the editor over the desktop, which this opens and shuts, with the
-    //  Moonwater moon (dark, white, or with the theme), the pictures remembered and the feed's. canvas wallpaper is its verb (page.c's rows).
-    {null, "Wallpaper", SETTINGS_ACTION, 0, 0, {null}, null, null, {"canvas", "wallpaper", "edit"}, null, 0,
-     .help = "the editor of the wallpaper of the Scene you are on, over the desktop: the moon, the pictures you chose and the curated ones",
-     .about = "Choose each Scene's wallpaper on the desktop"},
+                      .usage = "canvas background [COLOUR|default]",
+                      .help = "the colour where no wallpaper covers, and the one the Solid colour card of the wallpaper editor starts at, rrggbb; a Scene is given a colour of its own by canvas wallpaper scene N colour:rrggbb [1e1e1e]",
+                      .unlisted = 1),
     //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
     //  fill with; the compositor puts them in the window table and every window turns to them at once.
     SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
@@ -1841,7 +1848,7 @@ static bool setting_startup_entry(const char *line, positive length, struct sett
 /*
         Each Scene's wallpaper, the words of it as the compositor, the command and the window read them (SETTING_WALLPAPER_*). A picture's
         name is letters, digits and dashes, lower case, 1 to SETTING_WALLPAPER_NAME - 1 of them; a word is auto, dark, white, picture:NAME,
-        or curated:HEX, the 64 hex digits of the digest of one of the feed's.
+        curated:HEX, the 64 hex digits of the digest of one of the feed's, or colour:RRGGBB, a plain colour in six hex digits, lower case.
 */
 static bool setting_wallpaper_name_ok(const char address_to name, positive length)
 {
@@ -1860,12 +1867,36 @@ static bool setting_wallpaper_word_ok(const char address_to word, positive lengt
                 return true;
         if (length > 8 && !memory_compare(word, "picture:", 8))
                 return setting_wallpaper_name_ok(word + 8, length - 8);
-        if (length != 8 + 64 || memory_compare(word, "curated:", 8))
+        if (!(length == 8 + 64 && !memory_compare(word, "curated:", 8)) && !(length == 7 + 6 && !memory_compare(word, "colour:", 7)))
                 return false;
-        for (positive at = 8; at < length; at++)
+        for (positive at = word[0] == 'c' && word[1] == 'o' ? 7 : 8; at < length; at++)
                 if (!((word[at] >= '0' && word[at] <= '9') || (word[at] >= 'a' && word[at] <= 'f')))
                         return false;
         return true;
+}
+
+// A word's plain colour, 0xrrggbb: -1 for any word that is not colour:RRGGBB as setting_wallpaper_word_ok takes it.
+static long setting_wallpaper_colour(const char address_to word)
+{
+        positive length = word ? string_length((string_address)word) : 0;
+        long colour = 0;
+
+        if (length != 13 || memory_compare(word, "colour:", 7) || !setting_wallpaper_word_ok(word, length))
+                return -1;
+        for (positive at = 7; at < 13; at++)
+                colour = colour << 4 | (word[at] <= '9' ? word[at] - '0' : word[at] - 'a' + 10);
+        return colour;
+}
+
+// The word of a plain colour (0xrrggbb, its low 24 bits) into word, SETTING_WALLPAPER_WORD bytes or more: colour:rrggbb, lower case.
+static fn setting_wallpaper_colour_word(unsigned int colour, char address_to word)
+{
+        static const char digits[] = "0123456789abcdef";
+
+        memory_copy(word, "colour:", 7);
+        for (int at = 0; at < 6; at++)
+                word[7 + at] = digits[colour >> (20 - 4 * at) & 15];
+        word[13] = 0;
 }
 
 // The file of a word's picture (SETTING_WALLPAPER_DIR/NAME.png or curated/HEX.png, with suffix in place of .png): false for the moon's words.

@@ -2,8 +2,9 @@
         Each Scene's wallpaper.
 
         A Scene has one wallpaper, said by a word (registry.c's setting_wallpaper_word_ok): auto, the moon over its sky in the theme's look;
-        dark or white, the moon in that look whatever the theme; picture:NAME, a picture `canvas wallpaper picture FILE` remembered; or
-        curated:HEX, one of the feed's, kept by its digest. A Scene is known by its screen's name and its number among the screen's desktop
+        dark or white, the moon in that look whatever the theme; picture:NAME, a picture `canvas wallpaper picture FILE` remembered;
+        curated:HEX, one of the feed's, kept by its digest; or colour:RRGGBB, a plain colour (the editor's Solid colour card, its colour
+        wheel the kit's). A Scene is known by its screen's name and its number among the screen's desktop
         Scenes, from 1, so it is the same Scene again when it is made again: at a boot each screen starts with its first Scene, and the second
         has its wallpaper back when it is added. A Scene with no word of its own is auto, and a Scene added takes the word of the one it was
         added from, unless its number has one kept from before. A fullscreen Scene has none: its ground is black.
@@ -43,6 +44,8 @@ static struct
         unsigned int curateds;
         unsigned int gen;   // one more at every change of a word or the list, which the wallpaper is made again for
         unsigned int listed; // and of the list alone, which a picture's miniature is read again for
+        b32 unwritten;      // a word changed live (a hand on the colour wheel) and not yet in the file (compositor_walls_flush)
+        positive changed;   // when it last changed
 } compositor_walls;
 
 static unsigned int compositor_walls_gen(void)
@@ -168,8 +171,16 @@ static void compositor_wall_changed(void)
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
 
-// Scene number scene of the screen named screen has word (auto is no line of its own), kept at once.
-static void compositor_wall_put_named(const char *screen, unsigned int scene, const char *word)
+// The words in the file now, when a live change has not been written yet.
+static void compositor_walls_flush(void)
+{
+        if (compositor_walls.unwritten)
+                compositor_walls.unwritten = 0, compositor_walls_write();
+}
+
+// Scene number scene of the screen named screen has word (auto is no line of its own), kept at once, or (live: a colour the wheel is
+// moving through) shown at once and kept when the hand lets go or a moment after the last change (compositor_walls_flush).
+static void compositor_wall_put_named(const char *screen, unsigned int scene, const char *word, int live)
 {
         int at = compositor_wall_find(screen, scene);
         struct compositor_wall_line *l;
@@ -198,13 +209,16 @@ static void compositor_wall_put_named(const char *screen, unsigned int scene, co
                 l->scene = scene;
                 string_copy_bounded((p8 *)l->word, (string_address)saved, SETTING_WALLPAPER_WORD);
         }
-        compositor_walls_write();
+        if (live)
+                compositor_walls.unwritten = 1, compositor_walls.changed = clock_monotonic_nanoseconds();
+        else
+                compositor_walls.unwritten = 0, compositor_walls_write();
         compositor_wall_changed();
 }
 
 static void compositor_wall_put(int screen, unsigned int scene, const char *word)
 {
-        compositor_wall_put_named(compositor_wall_screen_name(screen), scene, word);
+        compositor_wall_put_named(compositor_wall_screen_name(screen), scene, word, 0);
 }
 
 // The desktop Scene a word for "the Scene you are on" goes to on a screen: the one shown, or, on a fullscreen Scene, the one it came from.
@@ -323,6 +337,14 @@ static void compositor_walls_read(void)
         struct compositor_wall_line got;
         unsigned int dropped = 0, list = compositor_walls_sum(1), words = compositor_walls_sum(0);
 
+        // A live change not written yet is written before the file is read, so the read does not take it back.
+        if (compositor_walls.unwritten)
+        {
+                if (mapped)
+                        compositor_call(syscall(munmap), mapped, size, 0, 0, 0, 0);
+                compositor_walls_flush();
+                mapped = compositor_map_file((string_address)compositor_walls_path, &size);
+        }
         compositor_walls_pictures_read();
         if (compositor_walls_sum(1) != list)
                 compositor_walls.listed++;
@@ -411,7 +433,7 @@ static void compositor_wall_ask_line(char *line)
                 if (string_equals((string_address)word[1], "-"))
                         compositor_wall_put(compositor_space_current_screen(), scene, word[3]);
                 else if (string_length((string_address)word[1]) < WINDOWS_OUTPUT_NAME)
-                        compositor_wall_put_named(word[1], scene, word[3]);
+                        compositor_wall_put_named(word[1], scene, word[3], 0);
         }
 }
 
@@ -510,6 +532,7 @@ static const unsigned int *compositor_wall_mini(const char *word, int w, int h)
 {
         unsigned long pitch = compositor_whole_lines(w); // the miniature's rows: w pixels on a pitch of whole 64-byte lines, as every reader of one takes them
         int dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT), moon, own;
+        long colour;
         unsigned int accent = taskbar_wall_accent();
         positive now = clock_monotonic_nanoseconds();
         struct compositor_wall_mini *m = 0;
@@ -519,6 +542,7 @@ static const unsigned int *compositor_wall_mini(const char *word, int w, int h)
                 return 0;
         moon = string_equals((string_address)word, "auto") || string_equals((string_address)word, "dark") || string_equals((string_address)word, "white");
         own = setting_wallpaper_dark(word, dark);
+        colour = setting_wallpaper_colour(word);
         for (unsigned int at = 0; at < compositor_wall_minis.count; at++)
         {
                 struct compositor_wall_mini *k = &compositor_wall_minis.list[at];
@@ -554,6 +578,11 @@ static const unsigned int *compositor_wall_mini(const char *word, int w, int h)
                 memory_fill_u32_rect(m->pixels, (positive)pitch, (positive)w, (positive)h, 0xff000000u);
                 taskbar_wall_draw(m->pixels, (int)pitch, w, h, own, 1, 45, 1, accent, compositor_wall_turn, 0, rect);
                 memory_or_u32(m->pixels, m->pixels, (positive)pitch * (positive)h, 0xff000000u);
+                return m->pixels;
+        }
+        if (colour >= 0)
+        {
+                memory_fill_u32_rect(m->pixels, (positive)pitch, (positive)w, (positive)h, (unsigned int)colour | 0xff000000u);
                 return m->pixels;
         }
         if (compositor_wall_mini_picture(word, m->pixels, pitch, w, h))
@@ -599,10 +628,14 @@ static const unsigned int *compositor_wall_card(const struct compositor_space *s
 /*
         The editor (canvas wallpaper edit, Settings' Wallpaper row): the wallpaper of the Scene you are on, chosen over the desktop itself, in
         the Scenes overview's look. A strip of cards comes down from the top of the screen as the overview's Scene cards do, on the kit's
-        spring: the Moonwater moon with the theme (its card the dark moon and the white one, split along a diagonal), dark and white; then the
-        pictures remembered, the most recent first, each with the close button over its corner under the hand, which forgets it; then the
+        spring: first Solid colour, the card in the colour with the kit's colour wheel on it (ui.c's ui_colour: its disc, its value bar and
+        its rrggbb in the kit's field), whose every move is the Scene's colour at once, kept in the file when the hand lets go; then the
+        Moonwater moon with the theme (its card the dark moon and the white one, split along a diagonal), dark and white on its switch; then
+        the pictures remembered, the most recent first, each with the close button over its corner under the hand, which forgets it; then the
         feed's; and last a card with a folder, which opens Files to pick a picture (files -pick image). The card of the word the Scene has is
-        ringed in the accent, the one under the hand lit. A press on a card gives the Scene its word at once and the editor stays: a Scene
+        ringed in the accent, the one under the hand lit. The keys while the editor is open are the wheel's (the arrows move its marker,
+        Page Up and Down its value, a digit or Enter its field; Escape leaves the field, then shuts the editor). The wheel starts at the
+        Scene's colour, or for a Scene with none at the background colour kept (canvas background). A press on a card gives the Scene its word at once and the editor stays: a Scene
         switched to (Ctrl+Alt+arrows, the taskbar) keeps it open, so the next Scene takes the same picture with one press. A press anywhere
         else, the right button, Escape or the verb again shuts it. The cards are in rows when one row would make them small, never more than
         about half the screen high; they are as many as there are words.
@@ -634,7 +667,16 @@ static struct
         unsigned long pill_bytes;
         int pill_w, pill_h, pill_active, pill_hover;
         unsigned int pill_key;
+        unsigned int *wheel_px; // the Solid colour card's picture: its colour, the kit's wheel over it (ui.c's ui_colour_card_*)
+        unsigned long wheel_bytes;
+        int wheel_w, wheel_h, wheel_scale, wheel_x, wheel_y; // the picture's size and scale, and the hand's place last told the wheel
+        unsigned int wheel_look; // the theme and the accent it was drawn in
+        b32 wheel_opened, wheel_drawn, wheel_busy, wheel_held; // made; its picture as it is; the kit's motion asks for frames; a press is its
 } compositor_wall_editor = {.hover = -1, .hover_seg = -1, .press_card = -1, .press_seg = -1};
+
+#define COMPOSITOR_WALL_COLOUR_CARD 0 // the cards' places: Solid colour, then the Moonwater moon
+#define COMPOSITOR_WALL_MOON_CARD 1
+#define COMPOSITOR_WALL_SETTLE (400ull * 1000000ull) // a live colour is written this long after its last change, if no hand has it
 
 static int compositor_wall_is_moon(const char *word)
 {
@@ -684,7 +726,8 @@ static int compositor_wall_editor_pill_seg(int x, int y)
         int screen = compositor_wall_editor.screen, scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
         int pill[4], seg;
 
-        if (!compositor_wall_editor.open || !compositor_wall_editor.cards || !compositor_wall_editor_pill(compositor_wall_editor.card[0], scale, pill))
+        if (!compositor_wall_editor.open || compositor_wall_editor.cards <= COMPOSITOR_WALL_MOON_CARD ||
+            !compositor_wall_editor_pill(compositor_wall_editor.card[COMPOSITOR_WALL_MOON_CARD], scale, pill))
                 return -1;
         if (x < pill[0] || x >= pill[0] + pill[2] || y < pill[1] || y >= pill[1] + pill[3])
                 return -1;
@@ -721,10 +764,11 @@ static void compositor_wall_editor_damage(void)
                 compositor_damage(0, 0, compositor.width, compositor.height);
 }
 
-// The cards laid out again: the Moonwater dynamic wallpaper (with its Dark | Light | Auto switch), the pictures, the curated feed's, and the folder last.
+// The cards laid out again: Solid colour (its wheel), the Moonwater dynamic wallpaper (with its Dark | Light | Auto switch), the pictures,
+// the curated feed's, and the folder last.
 static void compositor_wall_editor_lay(void)
 {
-        unsigned int count = 0, n = 1 + compositor_walls.names + compositor_walls.curateds + 1, cols, rows;
+        unsigned int count = 0, n = 2 + compositor_walls.names + compositor_walls.curateds + 1, cols, rows;
         const int (*screens)[4] = compositor_screens(&count);
         int screen = compositor_wall_editor.screen, gap = compositor_scenes_gap(), room[4], s[4], width, most;
         long long cw, ch;
@@ -742,14 +786,15 @@ static void compositor_wall_editor_lay(void)
         if (!mem_buf_grow(&p, &compositor_wall_editor.word_bytes, (unsigned long)n * SETTING_WALLPAPER_WORD, 0))
                 return;
         compositor_wall_editor.word = (char (*)[SETTING_WALLPAPER_WORD])p;
-        string_copy((string_address)compositor_wall_editor.word[0], "auto");
+        setting_wallpaper_colour_word(ui_colour_card_rgb(), compositor_wall_editor.word[COMPOSITOR_WALL_COLOUR_CARD]);
+        string_copy((string_address)compositor_wall_editor.word[COMPOSITOR_WALL_MOON_CARD], "auto");
         for (unsigned int at = 0; at < compositor_walls.names; at++)
         {
-                string_copy((string_address)compositor_wall_editor.word[1 + at], "picture:");
-                string_append_bounded((p8 *)compositor_wall_editor.word[1 + at], (string_address)compositor_walls.name[at], SETTING_WALLPAPER_WORD);
+                string_copy((string_address)compositor_wall_editor.word[2 + at], "picture:");
+                string_append_bounded((p8 *)compositor_wall_editor.word[2 + at], (string_address)compositor_walls.name[at], SETTING_WALLPAPER_WORD);
         }
         for (unsigned int at = 0; at < compositor_walls.curateds; at++)
-                memory_copy(compositor_wall_editor.word[1 + compositor_walls.names + at], compositor_walls.curated[at], SETTING_WALLPAPER_WORD);
+                memory_copy(compositor_wall_editor.word[2 + compositor_walls.names + at], compositor_walls.curated[at], SETTING_WALLPAPER_WORD);
         compositor_wall_editor.word[n - 1][0] = 0;
         // As the overview's Scene cards: a fifth of the room high, the screen's shape; in rows, smaller, when one row would not hold them.
         compositor_room(s, room);
@@ -812,6 +857,8 @@ static int compositor_wall_editor_on_close(int card, int px, int py)
 }
 
 static void compositor_wall_start_program(string_address *argv);
+static void compositor_wall_editor_wheel_asks(p32 asks);
+static void compositor_wall_editor_wheel_sync(int opening);
 
 // The editor opened on a screen (how 1), shut (0), or turned (-1). The overview shuts when it opens, as the editor does when the overview opens.
 static void compositor_wall_edit(int screen, int how)
@@ -822,6 +869,11 @@ static void compositor_wall_edit(int screen, int how)
         {
                 if (compositor_wall_editor.open)
                         compositor_wall_editor_damage();
+                // The wheel's field gives its digits up as they are (a colour, or put back), and a live colour is written now.
+                if (compositor_wall_editor.wheel_opened)
+                        compositor_wall_editor_wheel_asks(ui_colour_card_rest());
+                compositor_wall_editor.wheel_held = 0, compositor_wall_editor.wheel_drawn = 0;
+                compositor_walls_flush();
                 compositor_wall_editor.open = compositor_wall_editor.pressed = compositor_wall_editor.hover_close = 0;
                 compositor_wall_editor.hover = compositor_wall_editor.hover_seg = compositor_wall_editor.press_card = compositor_wall_editor.press_seg = -1;
                 return;
@@ -843,6 +895,7 @@ static void compositor_wall_edit(int screen, int how)
                 compositor_wall_start_program(argv);
         }
         compositor_wall_editor.open = 1, compositor_wall_editor.screen = screen;
+        compositor_wall_editor_wheel_sync(1);
         compositor_wall_editor.pressed = 0, compositor_wall_editor.hover_close = 0;
         compositor_wall_editor.hover = compositor_wall_editor.hover_seg = compositor_wall_editor.press_card = compositor_wall_editor.press_seg = -1;
         compositor_wall_editor_lay();
@@ -888,6 +941,125 @@ static void compositor_wall_start_program(string_address *argv)
         (void)system_wait4_retry(child, null, 0, null);
 }
 
+
+/*
+        The Solid colour card's wheel (ui.c's ui_colour, through ui_colour_card_*): drawn by the kit into the card's picture over the colour,
+        at the card's size and its screen's scale, in the theme of the windows. Its events are the hand's and the keys' as window events, at
+        the card's place where it is all the way down; what it asks is the Scene's colour, live while a hand moves it.
+*/
+static const unsigned int *compositor_wall_editor_wheel_pixels(int w, int h, int scale)
+{
+        struct windows *table = compositor.table;
+        unsigned int themed = table && table->themed;
+        unsigned long pitch = compositor_whole_lines(w);
+        unsigned int look = themed ? (table->theme * 16777619u) ^ (table->accent & 0xffffffu) : 0;
+        void *p;
+
+        if (w <= 0 || h <= 0 || !compositor_wall_editor.wheel_opened)
+                return 0;
+        if (compositor_wall_editor.wheel_px && compositor_wall_editor.wheel_drawn && !compositor_wall_editor.wheel_busy && compositor_wall_editor.wheel_w == w &&
+            compositor_wall_editor.wheel_h == h && compositor_wall_editor.wheel_scale == scale && compositor_wall_editor.wheel_look == look)
+                return compositor_wall_editor.wheel_px;
+        if (compositor_card_holds())
+                return compositor_wall_editor.wheel_px && compositor_wall_editor.wheel_w == w && compositor_wall_editor.wheel_h == h ? compositor_wall_editor.wheel_px : 0;
+        p = compositor_wall_editor.wheel_px;
+        if (!mem_buf_grow(&p, &compositor_wall_editor.wheel_bytes, pitch * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
+                return compositor_wall_editor.wheel_px = 0, compositor_wall_editor.wheel_bytes = 0, (const unsigned int *)0;
+        compositor_wall_editor.wheel_px = (unsigned int *)p;
+        compositor_wall_editor.wheel_w = w, compositor_wall_editor.wheel_h = h, compositor_wall_editor.wheel_scale = scale, compositor_wall_editor.wheel_look = look;
+        memory_fill_u32_rect(compositor_wall_editor.wheel_px, (positive)pitch, (positive)w, (positive)h, 0xff000000u | ui_colour_card_rgb());
+        compositor_wall_editor.wheel_busy = ui_colour_card_draw(compositor_wall_editor.wheel_px, pitch, w, h, scale, compositor.engine, &compositor.face,
+                                                                themed ? table->theme : UI_THEME_LIGHT, themed ? table->accent : UI_ACCENT_STANDARD) != 0;
+        memory_or_u32(compositor_wall_editor.wheel_px, compositor_wall_editor.wheel_px, (positive)pitch * (positive)h, 0xff000000u);
+        compositor_wall_editor.wheel_drawn = 1;
+        return compositor_wall_editor.wheel_px;
+}
+
+// What the wheel asks: its colour the Scene's (live while it moves, kept when it rests), and its card drawn again.
+static void compositor_wall_editor_wheel_asks(p32 asks)
+{
+        int screen = compositor_wall_editor.screen;
+        char word[SETTING_WALLPAPER_WORD];
+
+        if (asks & (UI_COLOUR_CHANGED | UI_COLOUR_DONE))
+        {
+                setting_wallpaper_colour_word(ui_colour_card_rgb(), word);
+                if (compositor_wall_editor.cards > COMPOSITOR_WALL_COLOUR_CARD)
+                        string_copy((string_address)compositor_wall_editor.word[COMPOSITOR_WALL_COLOUR_CARD], (string_address)word);
+                compositor_wall_put_named(compositor_wall_screen_name(screen), compositor_wall_current(screen), word, !(asks & UI_COLOUR_DONE));
+        }
+        if (asks & UI_COLOUR_DONE)
+                compositor_walls_flush();
+        if (asks & (UI_COLOUR_CHANGED | UI_COLOUR_DONE | UI_COLOUR_DRAW | UI_COLOUR_TYPING))
+                compositor_wall_editor.wheel_drawn = 0, compositor_wall_editor_damage();
+}
+
+// An event told the wheel at the hand's place on card 0 (where it is all the way down); its asks done. Answers them.
+static p32 compositor_wall_editor_wheel_send(unsigned int type, unsigned int flags, int a, int b)
+{
+        const int *card;
+        p32 asks;
+
+        if (!compositor_wall_editor.wheel_opened || compositor_wall_editor.cards <= COMPOSITOR_WALL_COLOUR_CARD)
+                return 0;
+        card = compositor_wall_editor.card[COMPOSITOR_WALL_COLOUR_CARD];
+        compositor_wall_editor.wheel_x = compositor.pointer_x - card[0], compositor_wall_editor.wheel_y = compositor.pointer_y - card[1];
+        asks = ui_colour_card_event(type, flags, a, b, compositor_wall_editor.wheel_x, compositor_wall_editor.wheel_y);
+        compositor_wall_editor_wheel_asks(asks);
+        return asks;
+}
+
+// The wheel made (at the background colour kept), and at the colour of the Scene shown when it has one and no hand or keys are on the wheel.
+static void compositor_wall_editor_wheel_sync(int opening)
+{
+        int screen = compositor_wall_editor.screen;
+        long colour;
+
+        if (!compositor_wall_editor.wheel_opened && !(compositor_wall_editor.wheel_opened = ui_colour_card_open(compositor_ground & 0xffffffu)))
+                return;
+        if (opening)
+                ui_colour_card_rest(), compositor_wall_editor.wheel_held = 0, compositor_wall_editor.wheel_drawn = 0;
+        colour = setting_wallpaper_colour(compositor_wall_word(screen, compositor_wall_current(screen)));
+        if (colour >= 0 && (unsigned int)colour != ui_colour_card_rgb() && !(ui_colour_card_state() & (UI_COLOUR_HELD | UI_COLOUR_FIELD)))
+                ui_colour_card_set((unsigned int)colour), compositor_wall_editor.wheel_drawn = 0;
+}
+
+// The keys while the editor is open are the wheel's (input.c's compositor_key asks here first): every key but a chord, and a chord too
+// while its field types. A key's release is taken where its press was. Answers whether it was taken.
+static unsigned char compositor_wall_editor_keys[32];
+static int compositor_wall_editor_key(unsigned int code, int value, unsigned int modifiers, const unsigned int *characters, int count)
+{
+        unsigned char mask = (unsigned char)(1u << (code & 7)), *bit = code < 256 ? &compositor_wall_editor_keys[code >> 3] : 0;
+
+        if (!value)
+        {
+                if (!bit || !(*bit & mask))
+                        return 0;
+                *bit &= (unsigned char)~mask;
+                return 1;
+        }
+        if (value == 2 && bit && !(*bit & mask))
+                return 0;
+        if (!compositor_wall_editor.open || !compositor_wall_editor.wheel_opened ||
+            ((modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) && !(ui_colour_card_state() & UI_COLOUR_FIELD)))
+                return 0;
+        if (bit)
+                *bit |= mask;
+        for (int each = 0; each < (count ? count : 1); each++)
+                compositor_wall_editor_wheel_send(WINDOW_EVENT_KEY, modifiers | WINDOW_KEY_DOWN | (value == 2 ? WINDOW_KEY_REPEAT : 0), (int)code,
+                                                  count ? (int)characters[each] : 0);
+        return 1;
+}
+
+// Escape while the editor is open: the wheel's field gives the keys back with the colour it had (1), or nothing is the wheel's (0).
+static int compositor_wall_editor_escape(void)
+{
+        if (!(ui_colour_card_state() & UI_COLOUR_FIELD))
+                return 0;
+        compositor_wall_editor_wheel_send(WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, (int)CK_KEY_ESC, 0);
+        return 1;
+}
+
 // A press let go where it began: a card's close button forgets its picture, a card is the Scene's word, the folder opens the picker, and
 // anywhere else shuts the editor.
 static void compositor_wall_editor_click(int x, int y)
@@ -919,7 +1091,13 @@ static void compositor_wall_editor_click(int x, int y)
                 compositor_wall_start_program(argv);
                 return;
         }
-        if (card == 0)
+        if (card == COMPOSITOR_WALL_COLOUR_CARD)
+        {
+                // Solid colour, pressed away from its wheel: the wheel's colour is the Scene's.
+                setting_wallpaper_colour_word(ui_colour_card_rgb(), compositor_wall_editor.word[card]);
+                word = compositor_wall_editor.word[card];
+        }
+        if (card == COMPOSITOR_WALL_MOON_CARD)
         {
                 int seg = compositor_wall_editor_pill_seg(x, y);
                 const char *cur = compositor_wall_word(screen, compositor_wall_current(screen));
@@ -962,9 +1140,23 @@ static void compositor_wall_editor_button(unsigned int code, int down)
         }
         if (down)
         {
+                // A press on the wheel is the wheel's (its disc, its bar, its field); one anywhere else first takes the keys from its field.
+                if (compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y) == COMPOSITOR_WALL_COLOUR_CARD ||
+                    (ui_colour_card_state() & (UI_COLOUR_KEYS | UI_COLOUR_FIELD)))
+                        if (compositor_wall_editor_wheel_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)COMPOSITOR_BTN_LEFT, 0) & UI_COLOUR_TAKEN)
+                        {
+                                compositor_wall_editor.wheel_held = 1;
+                                return;
+                        }
                 compositor_wall_editor.pressed = 1, compositor_wall_editor.at_x = compositor.pointer_x, compositor_wall_editor.at_y = compositor.pointer_y;
                 compositor_wall_editor.press_card = compositor_wall_editor_card_at(compositor.pointer_x, compositor.pointer_y);
                 compositor_wall_editor.press_seg = compositor_wall_editor_pill_seg(compositor.pointer_x, compositor.pointer_y);
+                return;
+        }
+        if (compositor_wall_editor.wheel_held)
+        {
+                compositor_wall_editor.wheel_held = 0;
+                compositor_wall_editor_wheel_send(WINDOW_EVENT_BUTTON, 0, (int)COMPOSITOR_BTN_LEFT, 0);
                 return;
         }
         if (!compositor_wall_editor.pressed)
@@ -1007,6 +1199,10 @@ static void compositor_wall_veil_keep(void)
                 if (compositor_wall_editor.pill && !compositor_wall_editor_shown() && !compositor_card_holds())
                         p = compositor_wall_editor.pill, mem_buf_free(&p, &compositor_wall_editor.pill_bytes, MEM_BUF_GPU_FORGET),
                         compositor_wall_editor.pill = 0, compositor_wall_editor.pill_w = compositor_wall_editor.pill_h = 0;
+                if (compositor_wall_editor.wheel_px && !compositor_wall_editor_shown() && !compositor_card_holds())
+                        p = compositor_wall_editor.wheel_px, mem_buf_free(&p, &compositor_wall_editor.wheel_bytes, MEM_BUF_GPU_FORGET),
+                        compositor_wall_editor.wheel_px = 0, compositor_wall_editor.wheel_w = compositor_wall_editor.wheel_h = 0,
+                        compositor_wall_editor.wheel_drawn = 0;
                 compositor_wall_editor.veil_level = 0;
                 return;
         }
@@ -1175,7 +1371,7 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
 {
         unsigned int count = 0, start = at, filler = compositor.stacked ? compositor.stack[0] : 0;
         const int (*screens)[4] = compositor_screens(&count);
-        int screen = compositor_wall_editor.screen, scale, radius, line, lit_w, s[4], clip[4];
+        int screen = compositor_wall_editor.screen, scale, radius, line, lit_w, s[4], clip[4], colour;
         unsigned int accent = compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu;
         const char *current;
         b64 t = compositor_wall_editor_t();
@@ -1189,6 +1385,7 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
         scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
         radius = UI_RADIUS * scale / 100, line = compositor_line_px(scale), lit_w = 2 * compositor_lit_px(scale);
         current = compositor_wall_word(screen, compositor_wall_current(screen));
+        colour = setting_wallpaper_colour(current) >= 0;
         if (compositor_wall_editor.veil && compositor_wall_editor.veil_level && at < room &&
             !memory_compare(compositor_wall_editor.veil_rect, s, sizeof(s)))
         {
@@ -1204,12 +1401,16 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                 const char *word = compositor_wall_editor.word[card];
                 int c[4], lit = compositor_wall_editor.open && compositor_wall_editor.hover == (int)card;
                 const unsigned int *mini;
-                int selected = card == 0 ? compositor_wall_is_moon(current) : word[0] && string_equals((string_address)word, (string_address)current);
+                int selected = card == COMPOSITOR_WALL_COLOUR_CARD ? colour
+                               : card == COMPOSITOR_WALL_MOON_CARD ? compositor_wall_is_moon(current)
+                                                                   : word[0] && string_equals((string_address)word, (string_address)current);
 
                 compositor_wall_editor_card_shown(card, s, t, c);
                 if (!compositor_scenes_plain(frames, rows, at, room, filler, c, clip, scale))
                         continue;
-                if (card == 0)
+                if (card == COMPOSITOR_WALL_COLOUR_CARD)
+                        mini = compositor_wall_editor_wheel_pixels(c[2], c[3], scale);
+                else if (card == COMPOSITOR_WALL_MOON_CARD)
                         mini = string_equals((string_address)current, "dark") ? compositor_wall_mini("dark", c[2], c[3])
                                : string_equals((string_address)current, "white") ? compositor_wall_mini("white", c[2], c[3])
                                                                                  : compositor_wall_editor_auto(c[2], c[3]);
@@ -1227,7 +1428,7 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                 if (lit && compositor_wall_editor_close((int)card, &(int){0}, &(int){0}, &(int){0}))
                         frames[at].close = 1;
                 at++;
-                if (card == 0)
+                if (card == COMPOSITOR_WALL_MOON_CARD)
                 {
                         int pill[4];
 
@@ -1307,6 +1508,12 @@ static void compositor_wall_editor_hover(void)
         int close = card >= 0 && compositor_wall_editor_on_close(card, x, y);
         int seg = compositor_wall_editor_pill_seg(x, y);
 
+        // A hand on the wheel's disc or bar (or a drag in its field) is where the pointer is now.
+        if (compositor_wall_editor.wheel_held && compositor_wall_editor.cards > COMPOSITOR_WALL_COLOUR_CARD &&
+            (x - compositor_wall_editor.card[COMPOSITOR_WALL_COLOUR_CARD][0] != compositor_wall_editor.wheel_x ||
+             y - compositor_wall_editor.card[COMPOSITOR_WALL_COLOUR_CARD][1] != compositor_wall_editor.wheel_y))
+                compositor_wall_editor_wheel_send(WINDOW_EVENT_MOTION, 0, 0, 0);
+
         if (card != compositor_wall_editor.hover || close != compositor_wall_editor.hover_close || seg != compositor_wall_editor.hover_seg)
                 compositor_wall_editor_damage();
         compositor_wall_editor.hover = card, compositor_wall_editor.hover_close = close, compositor_wall_editor.hover_seg = seg;
@@ -1318,6 +1525,11 @@ static positive compositor_wall_editor_due(positive now)
         positive period = compositor.period ? compositor.period : 16666667ull;
         b64 goal = compositor_wall_editor.open ? COMPOSITOR_SCENES_FULL : 0;
 
+        // A live colour is written a moment after its last change; the wheel's caret blinks a frame at a time while its field types.
+        if (compositor_walls.unwritten && !compositor_wall_editor.wheel_held)
+                return compositor_walls.changed + COMPOSITOR_WALL_SETTLE > now ? compositor_walls.changed + COMPOSITOR_WALL_SETTLE : now;
+        if (compositor_wall_editor.open && compositor_wall_editor.wheel_busy)
+                return compositor.presented + period > now ? compositor.presented + period : now;
         if (!compositor_glides() || (compositor_wall_editor.shown == goal && !compositor_wall_editor.speed))
                 return 0;
         return compositor.presented + period > now ? compositor.presented + period : now;
@@ -1326,14 +1538,24 @@ static positive compositor_wall_editor_due(positive now)
 // Every pass of the loop, before a present: the spring, the hand, the cards laid out again for a change of the list, and the veil.
 static void compositor_wall_editor_tick(positive now)
 {
+        if (compositor_walls.unwritten && !compositor_wall_editor.wheel_held && now - compositor_walls.changed >= COMPOSITOR_WALL_SETTLE)
+                compositor_walls_flush();
         if (!compositor_wall_editor.open && !compositor_wall_editor.shown && !compositor_wall_editor.veil)
                 return;
         compositor_wall_editor_step(now);
         if (compositor_wall_editor.open)
         {
+                compositor_wall_editor_wheel_sync(0);
                 if (compositor_wall_editor.gen != compositor_walls.gen)
                         compositor_wall_editor_lay(), compositor_wall_editor_damage();
                 compositor_wall_editor_hover();
+                // The caret of the wheel's field blinks: its card is drawn again, and only it.
+                if (compositor_wall_editor.wheel_busy && compositor_wall_editor.cards > COMPOSITOR_WALL_COLOUR_CARD)
+                {
+                        const int *card = compositor_wall_editor.card[COMPOSITOR_WALL_COLOUR_CARD];
+
+                        compositor_wall_editor.wheel_drawn = 0, compositor_damage(card[0], card[1], card[2], card[3]);
+                }
         }
         compositor_wall_veil_keep();
 }

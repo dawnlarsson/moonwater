@@ -1097,6 +1097,26 @@ static void taskbar_cell_waiting(int slot, const char *window_name, positive now
 static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, unsigned long pitch, int width, int height, const char *title, unsigned int ink,
                                 unsigned int ground);
 
+// The kit's colour wheel (ui_colour, the kit's part) for the wallpaper editor's Solid colour card: the compositor holds no struct ui, so it
+// draws the wheel into the card's picture and hands it events through these (ui_colour_card_*). The asks of a wheel's events:
+#define UI_COLOUR_CHANGED 1u // the colour moved: a hand on the disc or the bar, a key, six digits in the field (the colour to show)
+#define UI_COLOUR_DONE 2u    // and came to rest: the hand let go, a key's step, the field's Enter or a press away (the colour to keep)
+#define UI_COLOUR_DRAW 4u    // it is to be drawn again
+#define UI_COLOUR_TAKEN 8u   // the event was the picker's
+#define UI_COLOUR_TYPING 16u // its field has the keys
+#define UI_COLOUR_HELD 1u   // ui_colour_card_state: a hand holds its disc or its bar
+#define UI_COLOUR_KEYS 2u   // it has the keys
+#define UI_COLOUR_FIELD 4u  // its field types
+#define UI_COLOUR_MOVING 8u // the kit's motion (the field's caret) asks for its next frame
+static int ui_colour_card_open(unsigned int rgb);
+static unsigned int ui_colour_card_rgb(void);
+static void ui_colour_card_set(unsigned int rgb);
+static unsigned int ui_colour_card_state(void);
+static unsigned int ui_colour_card_rest(void);
+static unsigned int ui_colour_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                        unsigned int theme, unsigned int accent);
+static unsigned int ui_colour_card_event(unsigned int type, unsigned int flags, int a, int b, int x, int y);
+
 
 // The panel's cells and what a press on one does:
 #define TASKBAR_TRAY (-2) // what a point of the tray is over (the tray as a whole, between the cells)
@@ -7110,6 +7130,7 @@ LANGUAGE_ID(tray_month_oct, "Oct") \
 LANGUAGE_ID(tray_month_sep, "Sep") \
 LANGUAGE_ID(tray_pm, "PM") \
 LANGUAGE_ID(tray_settings, "Settings") \
+LANGUAGE_ID(ui_colour_hex, "a colour is six hex digits, rrggbb") \
 LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
 LANGUAGE_ID(ui_field_digits, "a number is digits") \
 LANGUAGE_ID(ui_field_full, "that is as much as it holds")
@@ -35677,6 +35698,613 @@ static p32 ui_tokens_menu_do(struct ui address_to ui, struct ui_tokens address_t
         k->prefix_length = k->label[t] < n ? k->label[t] : n;
         doc_read(&k->text.doc, 0, k->prefix, k->prefix_length);
         return UI_TOKENS_PRESSED | UI_TOKENS_MOVED;
+}
+
+// ---- colour wheel: a hue and saturation disc, a value bar beside it, and under them the colour's swatch and its rrggbb in the kit's field ----
+/*
+        The disc is every hue round it (red at its right, green a third of a turn on counter-clockwise, blue two thirds) and every
+        saturation out from its middle (white there), at full value; the bar beside it is the value, the chosen hue and saturation at the
+        top and black at the foot. A marker is on each where the colour is, filled with it. Under them is a well: the colour's swatch at its
+        start and its rrggbb in the kit's field, which a press or Enter gives the keys to and which is kept the colour's whatever moves it.
+        A hand presses and drags either (a finger as a mouse); the keys, once it has them, move the disc's marker with the arrows (Shift a
+        bigger step) the way each points and the value with Page Up and Page Down (Home full, End none), and Enter takes them to the field.
+        Reading from the right the picker is its picture from the left turned over: the bar at the disc's left, the swatch at the well's
+        right, and the disc itself mirrored (green and blue round its right side).
+
+        The colour is kept as its hue, saturation and value in Q30 (a hue where the colour is a grey, and both where it is black, are
+        what they were, so a hand going through either keeps them) and as its rrggbb; an rrggbb set is its own hue, saturation and value
+        exactly, and they are that rrggbb again (ui_colour_rgb of ui_colour_hsv is the identity, every one of them). The disc is the same
+        pixels on the card's path as on the processor's: its runs of whole pixels are recorded as op 10 through their own tones, its edge
+        as the kit's dots.
+*/
+#define UI_COLOUR_DISC 1     // the parts: the disc, the bar and the field's well
+#define UI_COLOUR_BAR 2
+#define UI_COLOUR_WELL 3
+#define UI_COLOUR_GAP 12     // logical pixels: between the disc and the bar, and above the well
+#define UI_COLOUR_BAR_W 16   // the bar's width, a slider's track
+#define UI_COLOUR_WELL_H 32  // the well's height, a row's field
+#define UI_COLOUR_STEP (UI_ONE / 50) // a key's step across the disc (of its radius) and along the bar
+#define UI_COLOUR_LEAP (UI_ONE / 10) // and with Shift
+
+struct ui_colour
+{
+        struct ui_text text;            // the rrggbb: the kit's field
+        b64 hue, saturation, value;     // Q30: a turn, and 0 to UI_ONE
+        unsigned int rgb, before;       // the colour, 0xrrggbb, and what it was when the field took the keys
+        int held;                       // the part a hand holds, 0 none
+        b32 focused, keyed;             // it has the keys, and the keys moved it last (its focus ring)
+        int disc_x, disc_y, side;       // the last draw's disc: its box's top left and its side, device pixels
+        int bar_x, bar_y, bar_w, bar_h; // its bar
+        int well_x, well_y, well_w, well_h; // and the well under them
+};
+
+// A colour of the wheel: hue (Q30, a turn), saturation and value (Q30, 0 to UI_ONE), as 0xrrggbb, each channel the nearest of 255.
+static unsigned int ui_colour_rgb(b64 hue, b64 saturation, b64 value)
+{
+        b64 h6, f, p, q, t, v, c[3];
+        int sector;
+        hue %= UI_ONE, hue += hue < 0 ? UI_ONE : 0;
+        saturation = saturation < 0 ? 0 : saturation > UI_ONE ? UI_ONE : saturation;
+        v = value < 0 ? 0 : value > UI_ONE ? UI_ONE : value;
+        h6 = hue * 6, sector = (int)(h6 >> UI_Q), f = h6 - ((b64)sector << UI_Q);
+        p = ui_qmul(v, UI_ONE - saturation), q = ui_qmul(v, UI_ONE - ui_qmul(saturation, f)), t = ui_qmul(v, UI_ONE - ui_qmul(saturation, UI_ONE - f));
+        switch (sector)
+        {
+        case 0: c[0] = v, c[1] = t, c[2] = p; break;
+        case 1: c[0] = q, c[1] = v, c[2] = p; break;
+        case 2: c[0] = p, c[1] = v, c[2] = t; break;
+        case 3: c[0] = p, c[1] = q, c[2] = v; break;
+        case 4: c[0] = t, c[1] = p, c[2] = v; break;
+        default: c[0] = v, c[1] = p, c[2] = q; break;
+        }
+        return (unsigned int)((c[0] * 255 + UI_HALF) >> UI_Q) << 16 | (unsigned int)((c[1] * 255 + UI_HALF) >> UI_Q) << 8 |
+               (unsigned int)((c[2] * 255 + UI_HALF) >> UI_Q);
+}
+
+// An rrggbb's hue, saturation and value (Q30): a grey keeps the hue it is given, and black the saturation too.
+static fn ui_colour_hsv(unsigned int rgb, b64 address_to hue, b64 address_to saturation, b64 address_to value)
+{
+        b64 r = rgb >> 16 & 255, g = rgb >> 8 & 255, b = rgb & 255, most = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        b64 least = r < g ? (r < b ? r : b) : (g < b ? g : b), span = most - least, turn;
+        *value = ((most << UI_Q) + 127) / 255;
+        if (!most)
+                return;
+        *saturation = ((span << UI_Q) + most / 2) / most;
+        if (!span)
+                return;
+        turn = most == r ? g - b : most == g ? 2 * span + b - r : 4 * span + r - g;
+        turn += turn < 0 ? 6 * span : 0;
+        *hue = ((turn << UI_Q) + 3 * span) / (6 * span);
+        *hue -= *hue >= UI_ONE ? UI_ONE : 0;
+}
+
+// The field said again as the colour: its six digits, lower case, the caret at their end.
+static fn ui_colour_say(struct ui_colour address_to k)
+{
+        static const char digits[] = "0123456789abcdef";
+        p8 text[6];
+        for (int at = 0; at < 6; at++)
+                text[at] = (p8)digits[k->rgb >> (20 - 4 * at) & 15];
+        doc_select_set(&k->text.doc, 0, doc_length(&k->text.doc));
+        doc_replace(&k->text.doc, 0, doc_length(&k->text.doc), text, 6);
+        doc_select_set(&k->text.doc, 6, 6);
+}
+
+// What a field's six digits are (an optional # before them, either case): the colour, or -1 for anything else.
+static long ui_colour_typed(struct ui_colour address_to k)
+{
+        p8 text[8];
+        positive length = doc_length(&k->text.doc), at = 0;
+        long colour = 0;
+        if (length > 7)
+                return -1;
+        doc_read(&k->text.doc, 0, text, length);
+        at = length == 7 && text[0] == '#';
+        if (length - at != 6)
+                return -1;
+        for (; at < length; at++)
+        {
+                p8 c = text[at] | (text[at] >= 'A' && text[at] <= 'F' ? 0x20 : 0);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                        return -1;
+                colour = colour << 4 | (c <= '9' ? c - '0' : c - 'a' + 10);
+        }
+        return colour;
+}
+
+// What the field takes as it is typed: hex digits and a #.
+static const char address_to ui_colour_accept(p32 code)
+{
+        return (code >= '0' && code <= '9') || (code >= 'a' && code <= 'f') || (code >= 'A' && code <= 'F') || code == '#' ? null : WORDS(ui_colour_hex);
+}
+
+// The colour set from its rrggbb (its hue, saturation and value made from it; a grey's hue and black's saturation kept), and said in the field.
+static fn ui_colour_set(struct ui_colour address_to k, unsigned int rgb)
+{
+        k->rgb = rgb & 0xffffffu;
+        ui_colour_hsv(k->rgb, &k->hue, &k->saturation, &k->value);
+        ui_colour_say(k);
+}
+
+// The colour from its hue, saturation and value (Q30, each kept as it is given, inside its range), and said in the field.
+static fn ui_colour_put(struct ui_colour address_to k, b64 hue, b64 saturation, b64 value)
+{
+        hue %= UI_ONE, hue += hue < 0 ? UI_ONE : 0;
+        k->hue = hue, k->saturation = saturation < 0 ? 0 : saturation > UI_ONE ? UI_ONE : saturation;
+        k->value = value < 0 ? 0 : value > UI_ONE ? UI_ONE : value;
+        k->rgb = ui_colour_rgb(k->hue, k->saturation, k->value);
+        ui_colour_say(k);
+}
+
+// The picker opened on a colour, its field the kit's (own, for the clipboard; none in the compositor), the keys not its yet.
+static b32 ui_colour_open(struct ui_colour address_to k, const struct window_row address_to own, unsigned int rgb)
+{
+        memory_zero(&k->hue, sizeof(*k) - offset_of(struct ui_colour, hue));
+        if (!ui_field_open(&k->text, own, "000000"))
+                return false;
+        ui_field_focus(&k->text, false);
+        k->text.most = 7, k->text.accept = ui_colour_accept, k->text.keeps_vertical = true;
+        ui_colour_set(k, rgb);
+        return true;
+}
+
+// Its parts laid in a box (device pixels): the disc and the bar side by side, the well under them, the three in the middle of the box.
+static fn ui_colour_lay(struct ui address_to ui, struct ui_colour address_to k, int x, int y, int w, int h)
+{
+        int gap = ui_px(ui, UI_COLOUR_GAP), bar = ui_px(ui, UI_COLOUR_BAR_W), well = ui_px(ui, UI_COLOUR_WELL_H), side, gx, gy, gw;
+        side = h - well - gap < w - gap - bar ? h - well - gap : w - gap - bar;
+        side = side < 2 ? 2 : side;
+        gw = side + gap + bar, gx = x + (w - gw) / 2, gy = y + (h - side - gap - well) / 2;
+        k->side = side, k->disc_x = ui_mirror(gx, side, gx, gw), k->disc_y = gy;
+        k->bar_x = ui_mirror(gx + side + gap, bar, gx, gw), k->bar_y = gy, k->bar_w = bar, k->bar_h = side;
+        k->well_x = gx, k->well_y = gy + side + gap, k->well_w = gw, k->well_h = well;
+}
+
+/*
+        The disc of a side: each pixel's colour at its hue and saturation, at full value, and in its alpha how much of the pixel the disc
+        covers (255 inside, 0 outside, the edge's share between). Made for a side once and kept until another side is asked for.
+*/
+static struct
+{
+        unsigned int address_to pixels, address_to row; // the disc, and a row of it turned over (a window that reads from the right)
+        positive bytes;
+        int side;
+} ui_colour_disc;
+
+static const unsigned int address_to ui_colour_disc_of(int side)
+{
+        positive bytes = (positive)side * (positive)side * 4;
+        decimal r = side / 2.0;
+        if (side <= 0)
+                return null;
+        if (ui_colour_disc.pixels && ui_colour_disc.side == side)
+                return ui_colour_disc.pixels;
+        if (ui_colour_disc.pixels)
+                memory_free(ui_colour_disc.pixels, ui_colour_disc.bytes + (positive)ui_colour_disc.side * 4), ui_colour_disc.pixels = null;
+        if (!(ui_colour_disc.pixels = (unsigned int address_to)memory_checked(bytes + (positive)side * 4)))
+                return null;
+        ui_colour_disc.row = ui_colour_disc.pixels + (positive)side * (positive)side;
+        ui_colour_disc.bytes = bytes, ui_colour_disc.side = side;
+        for (int y = 0; y < side; y++)
+                for (int x = 0; x < side; x++)
+                {
+                        decimal dx = x + 0.5 - r, dy = r - (y + 0.5), d = square_root(dx * dx + dy * dy), cover = r - d + 0.5, turn;
+                        b64 saturation = d >= r ? UI_ONE : (b64)(d / r * UI_ONE);
+                        cover = cover < 0 ? 0 : cover > 1 ? 1 : cover;
+                        turn = arc_tangent_two(dy, dx) / (2 * UI_MOON_PI);
+                        turn += turn < 0 ? 1 : 0;
+                        ui_colour_disc.pixels[(positive)y * (positive)side + (positive)x] =
+                            (unsigned int)(cover * 255 + 0.5) << 24 | ui_colour_rgb((b64)(turn * UI_ONE), saturation, UI_ONE);
+                }
+        return ui_colour_disc.pixels;
+}
+
+// The identity of the 256 covers: a run of opaque pixels is recorded through it (ui_scene_pixels), its tones the pixels themselves.
+static unsigned char ui_scene_identity[256];
+
+/*
+        A run of opaque pixels (n, at most 256) at a point of the picture recorded for the card as op 10: its tones the pixels, in the pool
+        on a 16 byte line, its cover the identity, copied once a frame. The card reads a whole table of tones (1024 bytes) from the start of
+        one, which *reach keeps the farthest of: the caller pads the pool to it after its last run (ui_scene_reach).
+*/
+static b32 ui_scene_pixels(struct ui_scene address_to scene, int x, int y, const unsigned int address_to argb, int n, unsigned long address_to reach)
+{
+        unsigned long cover_at, start, bytes = (unsigned long)n * 4;
+        unsigned int address_to op;
+        if (n <= 0 || n > 256)
+                return n <= 0;
+        if (!ui_scene_identity[255])
+                for (int at = 0; at < 256; at++)
+                        ui_scene_identity[at] = (unsigned char)at;
+        if (scene->count >= scene->room)
+                return scene->lost = UI_LOST_ROOM, false;
+        if (!ui_scene_copy_rect(scene, scene->cover_slots, (p64)(unsigned long)ui_scene_identity, 256, 1, ui_scene_identity, 256, 1, 256, &cover_at))
+                return scene->lost = UI_LOST_POOL, false;
+        start = (scene->used + 15) & ~15ul;
+        if (start < scene->used || start > scene->size || bytes > scene->size - start)
+                return scene->lost = UI_LOST_POOL, false;
+        memory_copy(scene->cover + start, argb, (positive)bytes);
+        scene->used = start + bytes;
+        *reach = start + 1024 > *reach ? start + 1024 : *reach;
+        op = scene->ops + 8 * scene->count++;
+        op[0] = 10u | 256u << 8, op[1] = (unsigned int)(scene->ox + x), op[2] = (unsigned int)(scene->oy + y);
+        op[3] = (unsigned int)(scene->ox + x + n), op[4] = (unsigned int)(scene->oy + y + 1), op[5] = (unsigned int)(scene->at + start), op[6] = 0;
+        op[7] = (unsigned int)cover_at;
+        ui_scene_touch(scene, scene->ox + x, scene->oy + y, scene->ox + x + n, scene->oy + y + 1);
+        return true;
+}
+
+// The pool padded to reach (from its start), so every table of tones a run was given can be read whole: false when it does not fit.
+static b32 ui_scene_reach(struct ui_scene address_to scene, unsigned long reach)
+{
+        if (reach <= scene->used)
+                return true;
+        if (reach > scene->size)
+                return scene->lost = UI_LOST_POOL, false;
+        memory_zero(scene->cover + scene->used, (positive)(reach - scene->used));
+        scene->used = reach;
+        return true;
+}
+
+/*
+        A row of opaque pixels at a device point, n of them (their alpha is taken as 255): laid into the picture, or recorded as runs of
+        256 at the most. Cut to the picture's columns and to the rows that may be drawn, as every piece is.
+*/
+static fn ui_kit_pixels(struct ui address_to ui, int x, int y, const unsigned int address_to argb, int n, unsigned long address_to reach)
+{
+        int from = x < 0 ? -x : 0, to = x + n > ui->width ? ui->width - x : n;
+        if (y < 0 || y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y) || to <= from)
+                return;
+        if (!ui->scene)
+        {
+                unsigned int address_to into = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(x + from);
+                memory_copy(into, argb + from, (positive)(to - from) * 4);
+                memory_or_u32(into, into, (positive)(to - from), 0xff000000u);
+                return;
+        }
+        for (int at = from; at < to && !ui->scene->lost; at += 256)
+        {
+                static unsigned int run[256];
+                int count = to - at < 256 ? to - at : 256;
+                memory_or_u32(run, argb + at, (positive)count, 0xff000000u);
+                ui_scene_pixels(ui->scene, x + at, y, run, count, reach);
+        }
+}
+
+// A marker, round or a capsule (box in 256ths): filled with the colour, ringed in white and the white ringed in a quiet black.
+static fn ui_colour_marker(struct ui address_to ui, struct ui_box box, unsigned int rgb)
+{
+        b32 ring = ui_q8(ui, 2), line = ui_stroke(ui);
+        struct ui_box outer = {box.x0 - line, box.y0 - line, box.x1 + line, box.y1 + line, box.rx + line, box.ry + line};
+        ui_kit_ring(ui, &outer, line, 0x66000000u);
+        ui_kit_fill(ui, &box, 0xffffffffu, null);
+        box.x0 += ring, box.y0 += ring, box.x1 -= ring, box.y1 -= ring, box.rx -= ring, box.ry -= ring;
+        if (box.x1 > box.x0 && box.y1 > box.y0)
+                ui_kit_fill(ui, &box, 0xff000000u | rgb, null);
+}
+
+// The picker drawn in a box (device pixels): the disc, its marker, the bar and its marker, the well with the swatch and the field.
+static fn ui_colour_draw(struct ui address_to ui, struct ui_colour address_to k, int x, int y, int w, int h)
+{
+        UI_CALL();
+        const unsigned int address_to disc;
+        unsigned long reach = 0;
+        unsigned int ground = ui_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+        int side, swatch = ui_px(ui, UI_SWATCH), in = ui_px(ui, 6), text_x, text_w;
+        b32 r;
+        ui_colour_lay(ui, k, x, y, w, h);
+        side = k->side, r = side * 128;
+        // The disc: a row's whole pixels as they are, and its edge's at their cover over what is under them.
+        if ((disc = ui_colour_disc_of(side)))
+        {
+                for (int row = 0; row < side; row++)
+                {
+                        const unsigned int address_to line = disc + (positive)row * (positive)side;
+                        int first = 0, last = side;
+                        if (ui_rtl())
+                        {
+                                for (int at = 0; at < side; at++)
+                                        ui_colour_disc.row[at] = line[side - 1 - at];
+                                line = ui_colour_disc.row;
+                        }
+                        while (first < side && line[first] >> 24 != 255)
+                                first++;
+                        while (last > first && line[last - 1] >> 24 != 255)
+                                last--;
+                        for (int at = 0; at < side; at++)
+                                if ((at < first || at >= last) && line[at] >> 24)
+                                        ui_dot(ui, k->disc_x + at, k->disc_y + row, ui_tone(line[at], line[at] >> 24));
+                        if (last > first)
+                                ui_kit_pixels(ui, k->disc_x + first, k->disc_y + row, line + first, last - first, &reach);
+                }
+                if (ui->scene && reach)
+                        ui_scene_reach(ui->scene, reach);
+        }
+        // Its marker, where the hue turns and the saturation is out from the middle.
+        {
+                decimal turn = (decimal)k->hue / UI_ONE * 2 * UI_MOON_PI, out = (decimal)k->saturation / UI_ONE * (side / 2.0);
+                b32 mx = k->disc_x * 256 + r + (b32)(cosine(turn) * out * 256) * ui_dir(), my = k->disc_y * 256 + r - (b32)(sine(turn) * out * 256), m = ui_q8(ui, 8);
+                ui_colour_marker(ui, (struct ui_box){mx - m, my - m, mx + m, my + m, m, m}, k->rgb);
+        }
+        // The bar: a row of each value, the chosen hue and saturation at its top and black at its foot, cut to a capsule.
+        {
+                struct ui_box capsule = {k->bar_x * 256, k->bar_y * 256, (k->bar_x + k->bar_w) * 256, (k->bar_y + k->bar_h) * 256, k->bar_w * 128, k->bar_w * 128};
+                b32 at = k->bar_y * 256 + (b32)(((b64)(UI_ONE - k->value) * (k->bar_h - 1) * 256) >> UI_Q) + 128, m = ui_q8(ui, 5);
+                for (int row = 0; row < k->bar_h; row++)
+                {
+                        b64 value = k->bar_h > 1 ? UI_ONE - ui_qdiv(ui_q(row), ui_q(k->bar_h - 1)) : UI_ONE;
+                        struct ui_box line = {capsule.x0, (k->bar_y + row) * 256, capsule.x1, (k->bar_y + row + 1) * 256, 0, 0};
+                        ui_kit_fill(ui, &line, 0xff000000u | ui_colour_rgb(k->hue, k->saturation, value), &capsule);
+                }
+                ui_colour_marker(ui, (struct ui_box){capsule.x0 - ui_q8(ui, 2), at - m, capsule.x1 + ui_q8(ui, 2), at + m, m, m}, k->rgb);
+        }
+        // The well under them: the swatch at its start, then the field's six digits.
+        {
+                b32 sx = ui_mirror(k->well_x + in, swatch, k->well_x, k->well_w) * 256, sy = (k->well_y + (k->well_h - swatch) / 2) * 256, s = swatch * 256;
+                struct ui_box well = {k->well_x * 256, k->well_y * 256, (k->well_x + k->well_w) * 256, (k->well_y + k->well_h) * 256, k->well_h * 128, k->well_h * 128};
+                struct ui_box dot = {sx, sy, sx + s, sy + s, s / 2, s / 2};
+                ui_kit_fill(ui, &well, ground, null);
+                ui_kit_fill(ui, &dot, 0xff000000u | k->rgb, null);
+                ui_kit_ring(ui, &dot, ui_stroke(ui), ui_role(UI_OUTLINE_VARIANT) | 0xff000000u);
+                text_x = ui_mirror(k->well_x + in + swatch + ui_px(ui, 8), k->well_w - 2 * in - swatch - ui_px(ui, 8), k->well_x, k->well_w);
+                text_w = k->well_w - 2 * in - swatch - ui_px(ui, 8);
+                if (text_w > 0 && ui->engine && ui->regular)
+                        ui_text_draw(ui, &k->text, text_x, k->well_y, text_w, k->well_h, ground & 0xffffffu);
+                // The hand reaches the field anywhere in the well.
+                k->text.well_left = k->well_x, k->text.well_right = k->well_x + k->well_w, k->text.well_top = k->well_y, k->text.well_bottom = k->well_y + k->well_h;
+        }
+        if (k->focused && k->keyed && !k->text.focused)
+        {
+                int left = k->disc_x < k->bar_x ? k->disc_x : k->bar_x;
+                struct ui_box face = {left * 256, k->disc_y * 256, (left + k->side + ui_px(ui, UI_COLOUR_GAP) + k->bar_w) * 256, (k->disc_y + k->side) * 256, 0, 0};
+                face = ui_kit_focus_outset(ui, face);
+                ui_kit_focus_ring(ui, &face);
+        }
+}
+
+// The part under a device point of the last draw, 0 none: the disc (a press a little past its edge too, a finger's more), the bar or the well.
+static int ui_colour_part(struct ui address_to ui, const struct ui_colour address_to k, int x, int y, b32 touch)
+{
+        decimal r = k->side / 2.0, dx = x + 0.5 - (k->disc_x + r), dy = y + 0.5 - (k->disc_y + r), slop = ui_px(ui, touch ? 8 : 2);
+        if (k->side > 0 && dx * dx + dy * dy <= (r + slop) * (r + slop))
+                return UI_COLOUR_DISC;
+        if (ui_hit(ui, touch, x, y, k->bar_x, k->bar_y - ui_px(ui, 4), k->bar_w, k->bar_h + ui_px(ui, 8)))
+                return UI_COLOUR_BAR;
+        if (x >= k->well_x && x < k->well_x + k->well_w && y >= k->well_y && y < k->well_y + k->well_h)
+                return UI_COLOUR_WELL;
+        return 0;
+}
+
+// A point of the disc or the bar the hand is at, as the colour (past the disc's edge, on the edge; past the bar's ends, at them).
+static fn ui_colour_point(struct ui_colour address_to k, int part, int x, int y)
+{
+        if (part == UI_COLOUR_DISC)
+        {
+                decimal r = k->side / 2.0, dx = (x + 0.5 - (k->disc_x + r)) * ui_dir(), dy = (k->disc_y + r) - (y + 0.5), d = square_root(dx * dx + dy * dy);
+                decimal turn = arc_tangent_two(dy, dx) / (2 * UI_MOON_PI);
+                turn += turn < 0 ? 1 : 0;
+                ui_colour_put(k, d > 0 ? (b64)(turn * UI_ONE) : k->hue, r > 0 && d < r ? (b64)(d / r * UI_ONE) : UI_ONE, k->value);
+        }
+        else if (part == UI_COLOUR_BAR)
+        {
+                int along = k->bar_y + k->bar_h - 1 - y;
+                along = along < 0 ? 0 : along > k->bar_h - 1 ? k->bar_h - 1 : along;
+                ui_colour_put(k, k->hue, k->saturation, k->bar_h > 1 ? ui_qdiv(ui_q(along), ui_q(k->bar_h - 1)) : UI_ONE);
+        }
+}
+
+// A key the picker takes while it has the keys and its field does not: the asks, 0 for a key it leaves (Tab, Escape, a chord).
+static p32 ui_colour_key(struct ui_colour address_to k, int key, unsigned int flags)
+{
+        b64 step = flags & WINDOW_KEY_SHIFT ? UI_COLOUR_LEAP : UI_COLOUR_STEP;
+        unsigned int was = k->rgb;
+        if (flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER))
+                return 0;
+        if (key == UI_KEY_LEFT || key == UI_KEY_RIGHT || key == UI_KEY_UP || key == UI_KEY_DOWN)
+        {
+                // The marker moved across the disc as the arrow points, held inside its edge.
+                decimal turn = (decimal)k->hue / UI_ONE * 2 * UI_MOON_PI, out = (decimal)k->saturation / UI_ONE, u = cosine(turn) * out, v = sine(turn) * out;
+                decimal by = (decimal)step / UI_ONE, d;
+                u += (key == UI_KEY_RIGHT ? by : key == UI_KEY_LEFT ? -by : 0) * ui_dir();
+                v += key == UI_KEY_UP ? by : key == UI_KEY_DOWN ? -by : 0;
+                d = square_root(u * u + v * v);
+                if (d > 1)
+                        u /= d, v /= d, d = 1;
+                turn = arc_tangent_two(v, u) / (2 * UI_MOON_PI);
+                turn += turn < 0 ? 1 : 0;
+                ui_colour_put(k, d > 1e-9 ? (b64)(turn * UI_ONE + 0.5) : k->hue, (b64)(d * UI_ONE + 0.5), k->value);
+        }
+        else if (key == UI_KEY_PAGE_UP || key == UI_KEY_PAGE_DOWN || key == UI_KEY_HOME || key == UI_KEY_END)
+                ui_colour_put(k, k->hue, k->saturation,
+                              key == UI_KEY_HOME ? UI_ONE : key == UI_KEY_END ? 0 : k->value + (key == UI_KEY_PAGE_UP ? step : -step));
+        else
+                return 0;
+        k->keyed = 1;
+        return UI_COLOUR_TAKEN | UI_COLOUR_DRAW | (k->rgb != was ? UI_COLOUR_CHANGED | UI_COLOUR_DONE : 0);
+}
+
+// The field gives the keys back: its six digits the colour's (a value that is none is put back as the colour), Escape the colour it had.
+static p32 ui_colour_leave(struct ui_colour address_to k, b32 cancel)
+{
+        long typed = ui_colour_typed(k);
+        unsigned int was = k->rgb;
+        ui_field_focus(&k->text, false);
+        if (cancel || typed < 0)
+                ui_colour_set(k, cancel ? k->before : k->rgb);
+        else
+                ui_colour_set(k, (unsigned int)typed);
+        return UI_COLOUR_DRAW | (k->rgb != was ? UI_COLOUR_CHANGED : 0) | (k->rgb != k->before || k->rgb != was ? UI_COLOUR_DONE : 0);
+}
+
+// The field takes the keys: what the colour is now is what Escape puts back, and its digits are chosen, so what is typed replaces them.
+static fn ui_colour_type(struct ui_colour address_to k)
+{
+        k->before = k->rgb, k->focused = 1;
+        ui_field_focus(&k->text, true);
+        ui_text_wake(&k->text);
+        doc_select_set(&k->text.doc, 0, doc_length(&k->text.doc));
+}
+
+/*
+        The picker's events (x, y the device point of a press or a motion, the window's): a press on the disc or the bar holds it and
+        the colour is where the hand is, the hand's motion moves it and its release lets go; a press on the well gives the field the keys,
+        a press anywhere else takes them away. Keys go to the field while it has them, else to ui_colour_key while the picker has them.
+*/
+static p32 ui_colour_event(struct ui address_to ui, struct ui_colour address_to k, struct ui_popup address_to menu, const struct window_event address_to event,
+                           int x, int y)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, touch = (event->flags & WINDOW_KEY_TOUCH) != 0, left = event->a == UI_POINTER_LEFT;
+        unsigned int was = k->rgb;
+        p32 asks = 0, text;
+        int part;
+        if (event->type == WINDOW_EVENT_BUTTON && down && !(event->flags & WINDOW_KEY_CANCEL))
+        {
+                part = ui_colour_part(ui, k, x, y, touch);
+                if (k->text.focused && part != UI_COLOUR_WELL)
+                        asks |= ui_colour_leave(k, false);
+                if (!part || !left)
+                        return k->focused = k->keyed = 0, asks;
+                k->focused = 1, k->keyed = 0;
+                if (part == UI_COLOUR_WELL)
+                {
+                        if (!k->text.focused)
+                                ui_colour_type(k);
+                        if (ui->engine && ui->regular)
+                                ui_field_event(ui, &k->text, menu, event, x, y);
+                        return asks | UI_COLOUR_TAKEN | UI_COLOUR_DRAW | UI_COLOUR_TYPING;
+                }
+                k->held = part;
+                ui_colour_point(k, part, x, y);
+                return asks | UI_COLOUR_TAKEN | UI_COLOUR_DRAW | (k->rgb != was ? UI_COLOUR_CHANGED : 0);
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && k->held)
+        {
+                k->held = 0;
+                return UI_COLOUR_TAKEN | UI_COLOUR_DRAW | UI_COLOUR_DONE;
+        }
+        if (event->type == WINDOW_EVENT_MOTION && k->held)
+        {
+                ui_colour_point(k, k->held, x, y);
+                return UI_COLOUR_TAKEN | (k->rgb != was ? UI_COLOUR_CHANGED | UI_COLOUR_DRAW : 0);
+        }
+        if (k->text.focused && (event->type != WINDOW_EVENT_KEY || down))
+        {
+                if (event->type == WINDOW_EVENT_KEY && (event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD || event->a == UI_KEY_ESCAPE))
+                        return UI_COLOUR_TAKEN | ui_colour_leave(k, event->a == UI_KEY_ESCAPE);
+                // Tab gives the keys back as Enter does, and is the window's to go on with.
+                if (event->type == WINDOW_EVENT_KEY && event->a == UI_KEY_TAB)
+                        return ui_colour_leave(k, false);
+                text = ui->engine && ui->regular ? ui_field_event(ui, &k->text, menu, event, x, y) : 0;
+                if (text & UI_TEXT_CHANGED)
+                {
+                        long typed = ui_colour_typed(k);
+                        if (typed >= 0 && (unsigned int)typed != k->rgb)
+                                k->rgb = (unsigned int)typed, ui_colour_hsv(k->rgb, &k->hue, &k->saturation, &k->value), asks |= UI_COLOUR_CHANGED;
+                }
+                if (text & (UI_TEXT_SUBMIT | UI_TEXT_CANCEL | UI_TEXT_COMMIT))
+                        asks |= ui_colour_leave(k, (text & UI_TEXT_CANCEL) != 0);
+                return asks | (text || event->type == WINDOW_EVENT_KEY ? UI_COLOUR_TAKEN | UI_COLOUR_DRAW : 0) | (k->text.focused ? UI_COLOUR_TYPING : 0);
+        }
+        if (event->type != WINDOW_EVENT_KEY || !down || !k->focused)
+                return 0;
+        if ((event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD) && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)))
+                return ui_colour_type(k), UI_COLOUR_TAKEN | UI_COLOUR_DRAW | UI_COLOUR_TYPING;
+        // A digit typed with the keys on the picker is the field's first: its six are chosen, so the typing replaces them.
+        if (event->b > ' ' && !ui_colour_accept((p32)event->b) && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)))
+        {
+                ui_colour_type(k);
+                if (ui->engine && ui->regular)
+                        ui_field_event(ui, &k->text, menu, event, x, y);
+                return UI_COLOUR_TAKEN | UI_COLOUR_DRAW | UI_COLOUR_TYPING;
+        }
+        return ui_colour_key(k, (int)event->a, event->flags);
+}
+
+
+/*
+        The wheel of the wallpaper editor's Solid colour card (the compositor's wallpaper.c), which holds no struct ui: one wheel, drawn by
+        the kit into the card's picture (pixels, pitch, w by h, at scale, the compositor's face) in the windows' theme, the kit's own theme
+        given back after, and told events at device points of the picture. Its field is the kit's, with no window for a clipboard.
+*/
+static struct
+{
+        struct ui_colour wheel;
+        struct ui ui;
+        b32 open, moving;
+} ui_colour_card;
+
+static int ui_colour_card_open(unsigned int rgb)
+{
+        if (!ui_colour_card.open)
+                ui_colour_card.open = ui_colour_open(&ui_colour_card.wheel, null, rgb);
+        return ui_colour_card.open;
+}
+
+static unsigned int ui_colour_card_rgb(void) { return ui_colour_card.wheel.rgb; }
+
+static void ui_colour_card_set(unsigned int rgb)
+{
+        if (ui_colour_card.open)
+                ui_colour_set(&ui_colour_card.wheel, rgb);
+}
+
+static unsigned int ui_colour_card_state(void)
+{
+        const struct ui_colour address_to k = &ui_colour_card.wheel;
+        return (k->held ? UI_COLOUR_HELD : 0) | (k->focused ? UI_COLOUR_KEYS : 0) | (k->text.focused ? UI_COLOUR_FIELD : 0) |
+               (ui_colour_card.moving ? UI_COLOUR_MOVING : 0);
+}
+
+// The hand and the keys taken off it (the editor opened or shut): its field gives up its digits as ui_colour_leave keeps them. The asks.
+static unsigned int ui_colour_card_rest(void)
+{
+        struct ui_colour address_to k = &ui_colour_card.wheel;
+        p32 asks = ui_colour_card.open && k->text.focused ? ui_colour_leave(k, false) : 0;
+        k->held = 0, k->focused = k->keyed = 0, ui_colour_card.moving = 0;
+        return asks;
+}
+
+// The wheel drawn over what is in the picture, in its middle inset by 8 logical pixels. Answers whether its motion asks for a next frame.
+static unsigned int ui_colour_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                        unsigned int theme, unsigned int accent)
+{
+        struct ui address_to ui = &ui_colour_card.ui;
+        unsigned int address_to scratch = ui->scratch;
+        int sw = ui->scratch_width, ss = ui->scratch_scale, pad;
+        struct ui_theme shown = ui_kit.shown, from = ui_kit.from, to = ui_kit.to;
+        struct ui_tween turn = ui_kit.turn;
+        unsigned int mode = ui_kit.mode, was_accent = ui_kit.accent, motion = ui_kit.motion;
+        b32 made = ui_kit.made, busy = ui_kit.busy;
+        if (!ui_colour_card.open || !pixels || w <= 0 || h <= 0)
+                return 0;
+        memory_zero(ui, sizeof(*ui));
+        ui->engine = engine, ui->regular = ui->bold = face;
+        ui->scale = scale > 0 ? scale : 100, ui->opaque = 1, ui->pixels = pixels, ui->pitch = pitch, ui->width = w, ui->height = ui->bottom = h;
+        ui->scratch = scratch, ui->scratch_width = sw, ui->scratch_scale = ss;
+        if (engine)
+                ui_scratch_fit(ui, (unsigned int)w);
+        ui_kit_theme(theme, accent, 1);
+        ui_inks(ui, ui_role(UI_SURFACE) & 0xffffffu);
+        ui_kit.now = (b64)ui_kit_clock(), ui_kit.busy = 0;
+        pad = ui_px(ui, 8);
+        ui_colour_draw(ui, &ui_colour_card.wheel, pad, pad, w - 2 * pad, h - 2 * pad);
+        ui_colour_card.moving = ui_kit.busy && ui_colour_card.wheel.text.focused;
+        ui_kit.shown = shown, ui_kit.from = from, ui_kit.to = to, ui_kit.turn = turn;
+        ui_kit.mode = mode, ui_kit.accent = was_accent, ui_kit.motion = motion, ui_kit.made = made, ui_kit.busy = busy;
+        return ui_colour_card.moving;
+}
+
+// An event at a device point of the last picture drawn (type, flags, a and b as a window's event has them). Answers its asks.
+static unsigned int ui_colour_card_event(unsigned int type, unsigned int flags, int a, int b, int x, int y)
+{
+        struct window_event event = {type, flags, a, b, 0};
+        if (!ui_colour_card.open || !ui_colour_card.ui.scale)
+                return 0;
+        // The editor's keys are its wheel's: the keys are on it whatever the hand did last.
+        if (type == WINDOW_EVENT_KEY)
+                ui_colour_card.wheel.focused = 1;
+        ui_kit.now = (b64)ui_kit_clock();
+        return ui_colour_event(&ui_colour_card.ui, &ui_colour_card.wheel, null, &event, x, y);
 }
 
 // The battery reader (the sysfs files): the settings window and the taskbar read it.

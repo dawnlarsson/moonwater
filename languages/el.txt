@@ -34,6 +34,7 @@
 # machine-made 2026-11-24 (Files transfer status card), not yet read by a person: files_transfer_copying files_transfer_deleting files_transfer_eta files_transfer_moving files_transfer_preparing files_transfer_queued files_transfer_rate
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
+# machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 @language el
 @name Ελληνικά
 @translated machine
@@ -623,6 +624,7 @@ tray_month_oct	f3e9	Οκτ
 tray_month_sep	a4ef	Σεπ
 tray_pm	f466	μμ
 tray_settings	8728	Ρυθμίσεις
+ui_colour_hex	1ae3	ένα χρώμα είναι έξι δεκαεξαδικά ψηφία, rrggbb
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
 ui_field_full	fe02	δεν χωράει περισσότερο
@@ -651,7 +653,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Automatic	6784	Αυτόματο
 =Automatic shows it when no keyboard is plugged in	a05a	Το αυτόματο το δείχνει όταν δεν είναι συνδεδεμένο πληκτρολόγιο
 =Background	0abd	Φόντο
-=Background colour (rrggbb or default)	e2b2	Χρώμα φόντου (rrggbb ή default)
 =Battery	e12e	Μπαταρία
 =Battery shown	2a23	Μπαταρία που εμφανίζεται
 =Bluetooth	14bd	Bluetooth

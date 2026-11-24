@@ -1511,6 +1511,70 @@ b32 main()
         }
 
         check("gpu model kit: the text runs (ui_run_in), as a scene and as a program's list drawn by the model card are the processor's, pixel for pixel", model_wrong == wrong_before && !gpu_model.fault.code);
+        wrong_before = model_wrong;
+        // The colour wheel (ui.c's ui_colour_draw): its disc's whole pixels as runs through their own tones (op 10) and its edge's as dots, the bar's
+        // rows cut to its capsule, the markers, the well, the swatch and the field's digits, recorded as a program's list and drawn by the model card
+        // through the compositor's cut (compositor_gpu_list_ops), against the processor's picture of it, at 100, 150 and 200 percent and right to
+        // left, a colour of its own each round. Needs the face (argument 3).
+        if (program_argument_count() > 3)
+        {
+                enum { CW = 400, CH = 300, CP = 404, CUT = 9000, CUT_ROOM = 20000 };
+                static font_engine engine;
+                static p8 atlas[512 * 512];
+                static font_face face;
+                static unsigned int scratch[CW * UI_SCRATCH_ROWS], want_c[CP * CH];
+                static struct ui_colour wheel;
+                static const int scales[4] = {100, 150, 200, 100};
+                positive size = 0, bytes_of_face = compositor_map_file(program_argument(3), &size), colour_bad = 0;
+                positive c_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), cops_at = c_at + (positive)CP * CH * 4, ccover_at = cops_at + (1 << 20),
+                         cbins_at = ccover_at + (8 << 20);
+                unsigned int address_to cpic = (unsigned int address_to)((p8 address_to)gpu.at + c_at), address_to cops = (unsigned int address_to)((p8 address_to)gpu.at + cops_at);
+                positive address_to bases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT);
+                struct ui_scene scene;
+                struct ui cpu, rec;
+                b32 recorded = 1;
+
+                if (bytes_of_face && font_load(&face, (const p8 address_to)bytes_of_face, size, 0) == 0 && ui_colour_open(&wheel, null, 0x3a7bd5))
+                {
+                        font_start(&engine, atlas, 512, 512);
+                        ui_kit_theme(UI_THEME_DARK, 0x5b7fa6u, 1);
+                        bases[3] = GPU_VA;
+                        for (int round = 0; round < 4; round++)
+                        {
+                                unsigned int ground = ui_role(UI_SURFACE) | 0xff000000u, made;
+
+                                memory_zero(&cpu, sizeof(cpu));
+                                cpu.engine = &engine, cpu.regular = cpu.bold = &face, cpu.scratch = scratch, cpu.scratch_width = CW, cpu.scale = scales[round];
+                                cpu.width = CW, cpu.height = CH, cpu.top = 0, cpu.bottom = CH, cpu.pitch = CP, cpu.pixels = want_c;
+                                rec = cpu, rec.scene = &scene;
+                                memory_zero(&scene, sizeof(scene));
+                                scene.ops = cops + 8, scene.room = CUT - 1, scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + ccover_at), scene.size = 8 << 20;
+                                scene.at = ccover_at, scene.slot_gen = 1;
+                                ui_kit.rtl = round == 3;
+                                ui_colour_put(&wheel, (b64)(gpu_random() % (unsigned int)UI_ONE), (b64)(gpu_random() % (unsigned int)UI_ONE), (b64)(gpu_random() % (unsigned int)UI_ONE));
+                                for (positive i = 0; i < (positive)CP * CH; i++)
+                                        want_c[i] = ground, cpic[i] = 0x12345678u;
+                                cops[0] = 0, cops[1] = cops[2] = 0, cops[3] = CW, cops[4] = CH, cops[5] = ground, cops[6] = cops[7] = 0;
+                                ui_colour_draw(&cpu, &wheel, 0, 0, CW, CH);
+                                ui_colour_draw(&rec, &wheel, 0, 0, CW, CH);
+                                recorded &= scene.count > 100 && !scene.lost;
+                                made = compositor_gpu_list_ops(cops, 1 + scene.count, ccover_at, scene.used, gpu.size, CW, CH, 3, cops + 8 * CUT, CUT_ROOM);
+                                if (made == COMPOSITOR_GPU_LIST_REFUSED || !gpu_scene(cops_at + 32 * CUT, made, cbins_at, c_at, CP, CW, CH, 0, 0, CW, CH))
+                                {
+                                        check("gpu colour wheel: the list is taken whole and the scene finishes", false);
+                                        break;
+                                }
+                                for (int y = 0; y < CH; y++)
+                                        for (int x = 0; x < CW; x++)
+                                                model_kit_pixel(&colour_bad, "gpu colour wheel", (positive)round, (positive)x, (positive)y, cpic[(positive)y * CP + x],
+                                                                want_c[(positive)y * CP + x]);
+                        }
+                        ui_kit.rtl = 0;
+                        check("gpu model kit: the colour wheel is recorded whole (op 10 runs, dots, boxes and text), no op lost", recorded);
+                }
+        }
+        check("gpu model kit: the colour wheel (ui_colour_draw), as a program's list drawn by the model card, is the processor's, pixel for pixel, at three scales and right to left",
+              model_wrong == wrong_before && !gpu_model.fault.code);
 
         // A blended window (a client's premultiplied picture with alpha, frame->blend) with round corners, as the compositor's records draw it on the card
         // (compositor_gpu_frames: the line, kind 11 over the middle, each round corner's line by its cover (5) and the picture laid over by the inner cover (12)),

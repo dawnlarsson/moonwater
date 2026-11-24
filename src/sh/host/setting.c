@@ -462,8 +462,8 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         moonwater canvas wallpaper: each Scene's wallpaper (the compositor's wallpaper.c, registry.c's SETTING_WALLPAPER_*).
 
         Bare, the Scenes' words and the pictures remembered. edit [on|off] opens the editor over the desktop, shuts it, or turns it. scene N
-        CHOICE [SCREEN] is Scene N's: auto, dark or white (the moon), or the name of a picture remembered; on SCREEN by its connector's name,
-        or on the screen you are on. picture FILE remembers a PNG (a copy of it in SETTING_WALLPAPER_DIR as NAME.png, its miniature beside
+        CHOICE [SCREEN] is Scene N's: auto, dark or white (the moon), colour:RRGGBB (a solid colour, six hex digits in either case, kept in
+        lower case), or the name of a picture remembered; on SCREEN by its connector's name, or on the screen you are on. picture FILE remembers a PNG (a copy of it in SETTING_WALLPAPER_DIR as NAME.png, its miniature beside
         it, its name first in the list) and makes it the wallpaper of the Scene you are on; the name is the file's, in letters, digits and
         dashes, and another picture of the same name already remembered gives it a number after. forget NAME remembers the picture no more:
         its copy and miniature are taken away, and a Scene that had it has the moon again. The compositor alone writes the Scenes' words, so
@@ -1117,8 +1117,16 @@ static b32 locale_canvas_wallpaper(string_address address_to arguments, positive
                                            arguments[6], (positive)(WINDOWS_OUTPUT_NAME - 1));
                 if (count == 6)
                         string_copy(screen, (string_address) "-");
+                // A solid colour's digits in either case are kept in lower case, and validated as every word is (setting_wallpaper_word_ok).
+                if (length == 13 && !memory_compare(choice, "colour:", 7) && length < sizeof(word))
+                {
+                        for (positive at = 0; at <= length; at++)
+                                word[at] = at >= 7 && choice[at] >= 'A' && choice[at] <= 'F' ? (p8)(choice[at] | 0x20) : choice[at];
+                        if (!setting_wallpaper_word_ok((const char address_to)word, length))
+                                return host_refuse("a solid colour is colour: and six hex digits, rrggbb, not %s\n", choice);
+                }
                 // A picture's name alone is the picture remembered by it.
-                if (setting_wallpaper_name_ok((const char address_to)choice, length) && !setting_wallpaper_word_ok((const char address_to)choice, length))
+                else if (setting_wallpaper_name_ok((const char address_to)choice, length) && !setting_wallpaper_word_ok((const char address_to)choice, length))
                 {
                         positive used_list, room, from, to;
                         p8 address_to list = locale_wallpaper_text((string_address)SETTING_WALLPAPER_PICTURES_PATH, address_of used_list, address_of room);
@@ -1133,7 +1141,7 @@ static b32 locale_canvas_wallpaper(string_address address_to arguments, positive
                 else if (setting_wallpaper_word_ok((const char address_to)choice, length) && length < sizeof(word))
                         string_copy(word, choice);
                 else
-                        return host_refuse("a Scene's wallpaper is auto, dark, white or a picture's name, not %s\n", choice);
+                        return host_refuse("a Scene's wallpaper is auto, dark, white, colour:rrggbb or a picture's name, not %s\n", choice);
                 host_need_root();
                 string_join(line, sizeof(line), (string_address) "scene ", screen);
                 string_append_bounded(line, (string_address) " ", sizeof(line));

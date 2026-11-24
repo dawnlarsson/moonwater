@@ -40,6 +40,8 @@ static struct
         struct ui_control control[GALLERY_MOST];
         int count;                 // the controls the page declared, in the order it declared them
         struct ui_text field[2];   // the fields' engines: a node's name, which takes a name's characters, and a region
+        struct ui_colour colour;   // the colour wheel (ui.c's), in the box the page keeps for it
+        struct ui_rect colour_box;
         int band_top, band_bottom; // the rows a motion that moved only a slider's ghost draws again (none: the whole page)
 } gallery;
 
@@ -154,6 +156,7 @@ static fn gallery_page(void)
                 }
         }
         ui_row(.class = "cards", .w = GALLERY_W - 48)
+        {
                 ui_col(.control = surface(UI_CARD), .class = "panel", .grow = 1)
                 {
                         ui_text("System upgrades", .class = "title");
@@ -166,6 +169,13 @@ static fn gallery_page(void)
                         ui_row(.class = "spread")
                                 ui_text("3 nodes pending a kernel rebuild.", .class = "quiet"), piece(UI_BUTTON, UI_BUTTON_PRIMARY, 127, 36, "Verify updates");
                 }
+                // The colour wheel: its disc, its value bar and its well, drawn by the kit in the box the page keeps (gallery_draw).
+                ui_col(.control = surface(UI_CARD), .class = "panel")
+                {
+                        ui_text("Colour", .class = "title");
+                        ui_host(&gallery.colour_box, .w = 236, .h = 196, .keys = 1);
+                }
+        }
 }
 
 #undef surface
@@ -190,6 +200,9 @@ static fn gallery_build(struct window_row address_to own, const char address_to 
         }
         gallery.field[0].accept = accept;
         gallery.field[0].most = most, gallery.field[0].most_said = "a name is under 32 characters";
+        if (!gallery.colour.text.doc.selections)
+                ui_colour_open(&gallery.colour, own, 0x5b7fa6);
+        gallery.colour.focused = gallery.colour.keyed = 0, gallery.colour.held = 0;
 }
 
 // The page declared and laid out in a window, which is where every control is: the paper, a column that scrolls, and on it the rows of
@@ -209,6 +222,8 @@ static fn gallery_draw(struct ui address_to ui)
 {
         gallery_layout(ui, ui->width, ui->height);
         ui_view_draw(ui, &gallery.view, false);
+        if (gallery.colour.text.doc.selections && gallery.colour_box.w > 0 && gallery.colour_box.h > 0)
+                ui_colour_draw(ui, &gallery.colour, gallery.colour_box.x, gallery.colour_box.y, gallery.colour_box.w, gallery.colour_box.h);
         ui_text_overlay(ui, &gallery.field[0]);
         ui_text_overlay(ui, &gallery.field[1]);
 }
@@ -220,6 +235,23 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
 
         gallery.band_top = gallery.band_bottom = 0;
         gallery_layout(ui, width, height);
+        // The colour wheel has what is its first: a press on it, its hand's drag, and the keys while it has them (a press on it, or the
+        // view's way across the page handed them to its box).
+        if (gallery.colour.text.doc.selections && gallery.colour_box.w > 0)
+        {
+                struct ui_colour address_to k = &gallery.colour;
+
+                if (event->type == WINDOW_EVENT_KEY && gallery.view.handed == &gallery.colour_box && !k->focused)
+                        k->focused = k->keyed = 1;
+                if (event->type != WINDOW_EVENT_KEY || k->focused)
+                {
+                        asks = ui_colour_event(ui, k, popup, event, ui_kit.pointer_x, ui_kit.pointer_y);
+                        if (asks & UI_COLOUR_TAKEN)
+                                return *redraw = true;
+                        if (asks & UI_COLOUR_DRAW)
+                                *redraw = true;
+                }
+        }
         // The fields are the kit's: the one a press focused has the keys first (Escape gives them back to the page),
         // and each takes the pointer on its well, the drag it began and the clipboard's answer to its paste.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))

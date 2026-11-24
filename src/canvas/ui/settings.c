@@ -1845,8 +1845,8 @@ static fn settings_rebuild(void)
         settings_sub_count = 0, settings_sub_cut = 0;
         ui_list_begin(&settings.list);
         for (positive row = 0; row < settings_rows_count(); row++)
-                // A row that is a way of a list's add row (.way) is no row of its own.
-                if ((row >= SETTINGS_ROWS || !settings_rows[row].way) &&
+                // A row that is a way of a list's add row (.way) is no row of its own, and an unlisted one is the command's alone.
+                if ((row >= SETTINGS_ROWS || (!settings_rows[row].way && !settings_rows[row].unlisted)) &&
                     (filtered ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
                 {
                         count = settings_try_emit((int)row, true, count);

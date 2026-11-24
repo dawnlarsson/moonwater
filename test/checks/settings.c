@@ -2215,26 +2215,27 @@ static fn check_settings(string_address regular, string_address bold)
 
                 // The desktop's colour and the pointer: what canvas background and canvas cursor say, and the words that set them.
                 {
-                        int ink = settings_row_named("Background"), colour = settings_row_named("Background colour (rrggbb or default)"),
+                        int ink = settings_row_named("Background"), wallpaper = settings_row_named("Wallpaper"),
                             size = settings_row_named("Cursor size (percent, or default)"), look = settings_row_named("Cursor look");
+                        b32 no_field = true;
 
-                        check("settings: the desktop colour has a choice of inks and a field, and the pointer a size slider and a look",
-                              settings_rows[ink].kind == SETTINGS_CHOICE && (settings_rows[ink].flags & SETTINGS_INK) &&
-                                  settings_rows[colour].kind == SETTINGS_FIELD && !(settings_rows[colour].flags & SETTINGS_INK) &&
+                        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                                no_field &= at == (positive)ink || !settings_same_verb(&settings_rows[ink], &settings_rows[at]);
+                        check("settings: the desktop colour is the command's alone, a row the window does not list and no field of it (the wallpaper "
+                              "editor's Solid colour card chooses a Scene's colour), and the pointer has a size slider and a look",
+                              string_equals((string_address)settings_rows[ink].label, (string_address) "Background") && settings_rows[ink].unlisted &&
+                                  settings_rows[ink].how == SETTING_PLAIN && settings_rows[ink].type == SETTING_COLOUR && no_field &&
+                                  settings_rows[wallpaper].kind == SETTINGS_ACTION && !settings_rows[wallpaper].unlisted &&
+                                  string_equals((string_address)settings_rows[wallpaper].set[2], (string_address) "edit") &&
                                   settings_rows[size].kind == SETTINGS_SLIDER && settings_rows[look].kind == SETTINGS_CHOICE &&
-                                  settings_group_of(colour) == settings_group_of(ink) &&
-                                  settings_group_of(size) == settings_group_of(look) && settings_group_of(size) != settings_group_of(ink) &&
-                                  settings_same_verb(&settings_rows[ink], &settings_rows[colour]) &&
+                                  settings_group_of(size) == settings_group_of(look) && settings_group_of(size) != settings_group_of(wallpaper) &&
                                   !settings_same_verb(&settings_rows[size], &settings_rows[look]) &&
                                   !settings_same_verb(&settings_rows[ink], &settings_rows[size]) &&
                                   settings_options(&settings_rows[ink]) == sizeof(settings_inks) / sizeof(settings_inks[0]));
                         check("settings: the first ink is the default",
                               string_equals((string_address)settings_inks[0].name, (string_address) "default") &&
                                   string_equals((string_address)settings_inks[0].colour, (string_address) "1e1e1e"));
-                        check("settings: the field says the colour as the verb does, and the choice by the ink's name",
-                              settings_read(&settings_rows[colour], "[Moonwater] background #1e1e1e\n", 30, value, SETTINGS_VALUE, false) ==
-                                      SETTINGS_READ &&
-                                  string_equals((string_address)value, (string_address) "#1e1e1e") &&
+                        check("settings: what the verb says of the colour is read by the ink's name, and an rrggbb of none as it is",
                                   settings_read(&settings_rows[ink], "[Moonwater] background #1e1e1e\n", 30, value, SETTINGS_VALUE, false) ==
                                       SETTINGS_READ &&
                                   string_equals((string_address)value, (string_address) "default") &&
@@ -2274,9 +2275,6 @@ static fn check_settings(string_address regular, string_address bold)
                                   !words[4]);
                         count = settings_command(&settings_rows[ink], (string_address) "/moonwater", "default", words, SETTINGS_WORDS, false);
                         check("settings: and the default ink is its colour", count == 4 && string_equals(words[3], (string_address) "1e1e1e"));
-                        count = settings_command(&settings_rows[colour], (string_address) "/moonwater", "a0b1c2", words, SETTINGS_WORDS, false);
-                        check("settings: a colour typed is the word the verb is run with, whatever it is",
-                              count == 4 && string_equals(words[3], (string_address) "a0b1c2"));
                         count = settings_command(&settings_rows[size], (string_address) "/moonwater", "150", words, SETTINGS_WORDS, false);
                         check("settings: the pointer's size is canvas cursor size and its percent",
                               count == 5 && string_equals(words[2], (string_address) "cursor") && string_equals(words[3], (string_address) "size") &&
@@ -2306,7 +2304,7 @@ static fn check_settings(string_address regular, string_address bold)
 "  canvas arrange [NAME[@X,Y|@off]...|default]\n"
 "                                    where each screen is: names left to right, the first the primary [default]\n"
 "  canvas background [COLOUR|default]\n"
-"                                    the desktop colour, rrggbb [1e1e1e]\n"
+"                                    the colour where no wallpaper covers, and the one the Solid colour card of the wallpaper editor starts at, rrggbb; a Scene is given a colour of its own by canvas wallpaper scene N colour:rrggbb [1e1e1e]\n"
 "  canvas caret blink [slow|normal|fast|off]\n"
 "                                    how the caret blinks, or off for a solid caret [normal]\n"
 "  canvas caret thickness [thin|normal|thick]\n"
@@ -3382,10 +3380,12 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: a value that is none of the choices starts the keys on the first", settings.page.menu_row == kb && settings.popup.menu.hot == 0);
                         settings_menu_press(UI_KEY_ESCAPE);
 
-                        // The desktop's colour: a list of named inks, with the one in force the keys' and a letter going by name,
-                        // a field that keeps what is typed as it is, and the pointer's rows found by what they are called.
+                        // The accent: a list of named inks, with the one in force the keys' and a letter going by name, and a field that
+                        // keeps what is typed as it is; the desktop's colour is no row of the window (the wallpaper editor's); the pointer's
+                        // rows are found by what they are called.
                         {
-                                int ink = settings_row_named("Background"), colour = settings_row_named("Background colour (rrggbb or default)"),
+                                int ink = settings_row_named("Accent"), colour = settings_row_named("Accent colour (rrggbb or reset)"),
+                                    background = settings_row_named("Background"), wallpaper = settings_row_named("Wallpaper"),
                                     size = settings_row_named("Cursor size (percent, or default)"), look = settings_row_named("Cursor look");
 
                                 settings.page.chosen = settings_group_of(ink);
@@ -3393,23 +3393,23 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.page.pane = 1;
                                 settings.list.focus = ink;
                                 settings.state[ink] = SETTINGS_READ;
-                                string_copy_bounded((string_address)settings.value[ink], (string_address) "forest", SETTINGS_VALUE);
+                                string_copy_bounded((string_address)settings.value[ink], (string_address) "blue", SETTINGS_VALUE);
                                 settings_press(UI_KEY_ENTER);
                                 check("settings: the inks open as a list, the one in force the keys'",
-                                      settings.page.menu_row == ink && settings.popup.menu.count == 9 && settings.popup.menu.hot == 5);
-                                settings_menu_type('p');
+                                      settings.page.menu_row == ink && settings.popup.menu.count == 7 && settings.popup.menu.hot == 2);
+                                settings_menu_type('r');
                                 settings_menu_press(UI_KEY_ENTER);
                                 check("settings: an ink chosen goes to the verb by its name, set as its colour there",
                                       settings.page.menu_row < 0 && settings.queued == 1 && settings.queue[0].row == ink &&
-                                          string_equals((string_address)settings.queue[0].value, (string_address) "plum"));
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "rose"));
                                 settings.queued = 0;
 
                                 settings.list.focus = colour;
                                 settings.state[colour] = SETTINGS_READ;
-                                string_copy_bounded((string_address)settings.value[colour], (string_address) "#1e1e1e", SETTINGS_VALUE);
+                                string_copy_bounded((string_address)settings.value[colour], (string_address) "#ffffff", SETTINGS_VALUE);
                                 settings_press(UI_KEY_ENTER);
                                 check("settings: Enter on the colour field opens it on the colour as the verb says it",
-                                      settings_editing() == colour && settings_holds("#1e1e1e"));
+                                      settings_editing() == colour && settings_holds("#ffffff"));
                                 settings_press(UI_KEY_ENTER);
                                 check("settings: and Enter on what it already is sends nothing", settings_editing() < 0 && settings.queued == 0);
                                 settings_press(UI_KEY_ENTER);
@@ -3422,6 +3422,16 @@ static fn check_settings(string_address regular, string_address bold)
                                       settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == colour &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "20ff00"));
                                 settings.queued = 0;
+
+                                // The desktop's colour: no row of the Canvas group, and what is typed finds the Wallpaper row and not it.
+                                settings.page.chosen = settings_group_of(wallpaper);
+                                settings_refilter();
+                                check("settings: the Canvas group lists the Wallpaper row and no row of the desktop's colour",
+                                      settings_pos(wallpaper) >= 0 && settings_pos(background) < 0);
+                                for (const char address_to c = "background"; address_to c; c++)
+                                        settings_type_code((unsigned char)address_to c);
+                                check("settings: and typing background lists no row of it", settings_pos(background) < 0);
+                                settings_press(UI_KEY_ESCAPE);
 
                                 // The pointer's rows are the Input group's.
                                 settings.page.chosen = settings_group_of(size);
@@ -3454,9 +3464,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 check("settings: typing cursor lists the pointer's rows, from whatever group is shown, and not the ink's",
                                       settings_pos(size) >= 0 && settings_pos(look) >= 0 && settings_pos(ink) < 0);
                                 settings_press(UI_KEY_ESCAPE);
-                                for (const char address_to c = "background"; address_to c; c++)
+                                for (const char address_to c = "accent"; address_to c; c++)
                                         settings_type_code((unsigned char)address_to c);
-                                check("settings: and typing background lists the colour's, both rows",
+                                check("settings: and typing accent lists the colour's, both rows",
                                       settings_pos(ink) >= 0 && settings_pos(colour) >= 0 && settings_pos(size) < 0);
                                 settings_press(UI_KEY_ESCAPE);
                                 settings.page.chosen = 0;
@@ -7567,7 +7577,7 @@ static fn check_settings_groups(void)
             {"Time zone", "Time"},
             {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
             {"Allow recording", "Sound"}, {"Input device (name, or default)", "Sound"}, {"Input volume (percent, or default)", "Sound"}, {"Input mute", "Sound"},
-            {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},
+            {"Wallpaper", "Canvas"}, {"Theme", "Canvas"},
             {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
             {"Resize border width (pixels, or default)", "Canvas"},
