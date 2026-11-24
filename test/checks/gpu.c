@@ -7833,6 +7833,136 @@ static void jit_ready_rows(void)
         compositor.spaces.ready = kept_ready, compositor_wl.started = kept_started;
 }
 
+static void gpu_teamb_security_rows(void)
+{
+        /* GKW-1: window_list_of() must reject out-of-bounds / tampered shared-memory table->lists. */
+        {
+                struct windows address_to table = windows_scratch_table(address_of app_table_scratch);
+                unsigned long buf = 64ul * 32ul * 4ul;
+                unsigned int room = 16u;
+
+                table->capacity = room;
+                table->buffer = buf;
+                table->list_bytes = WINDOW_LIST_BYTES;
+                table->lists = 0x7fff00000000ul;
+                check("GKW-1: window_list_of rejects out-of-bounds table->lists", window_list_of(table, 0) == null);
+                table->lists = WINDOWS_LISTS_AT(buf, room) + 4096ul;
+                check("GKW-1: window_list_of rejects shifted table->lists", window_list_of(table, 0) == null);
+                table->lists = WINDOWS_LISTS_AT(buf, room);
+                check("GKW-1: window_list_of accepts exact WINDOWS_LISTS_AT(buffer, room)",
+                      window_list_of(table, 3) == (unsigned char address_to)table + WINDOWS_LISTS_AT(buf, room) + 3ul * WINDOW_LIST_BYTES);
+                table->lists = 0, table->buffer = 0, table->list_bytes = 0, table->capacity = 0;
+        }
+
+        /* GKW-3: gpu_drop_unmapped() must not drop BOs while a pipelined job is still pending, and must treat handed maps from earlier ticks as used. */
+        {
+                unsigned char kept_gpu[sizeof(gpu)];
+                unsigned int kept_tick = gpu_tick, kept_at = gpu_gone_at, kept_count = gpu_map_count;
+                b32 refused, used_old;
+
+                memory_copy(kept_gpu, address_of gpu, sizeof(gpu));
+                gpu.fd = -1, gpu.pending = 88, gpu_fake_busy = 1, gpu_fake_idle = 0, gpu_tick = 200, gpu_map_count = 1, gpu_gone_at = 0;
+                gpu_maps[0].from = 0, gpu_maps[0].to = 0, gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = 0x4000;
+                gpu_maps[0].handle = 11, gpu_maps[0].used = gpu_tick - 1, gpu_maps[0].written = 0, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0, gpu_maps[0].offset = 0;
+                refused = gpu_drop_unmapped();
+                check("GKW-3: gpu_drop_unmapped refuses and keeps maps while a pipelined job is pending",
+                      refused && gpu_map_count == 1 && gpu_gone_at == 0);
+
+                gpu.pending = 0, gpu_fake_busy = 0, gpu_fake_idle = 1;
+                gpu_maps[0].from = 0, gpu_maps[0].to = 0, gpu_maps[0].handed = 1, gpu_maps[0].used = gpu_tick - 5;
+                used_old = gpu_drop_unmapped();
+                check("GKW-3: gpu_drop_unmapped treats a handed map from an earlier tick as used",
+                      used_old && gpu_map_count == 0);
+
+                gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_gone_at = kept_at;
+                memory_copy(address_of gpu, kept_gpu, sizeof(gpu));
+        }
+
+        /* GKW-4: compositor_readback_rect() and compositor_readback_row() must check direct/row bounds and scaled_direct. */
+        {
+                static unsigned int rb_scanout[16 * 4], rb_out[16 * 4], rb_row_buf[64 * 4];
+                unsigned int address_to saved_scanout = compositor.scanout;
+                unsigned int saved_pitch = compositor.scanout_pitch, saved_w = compositor.width, saved_h = compositor.height;
+                unsigned int saved_on = compositor.on_screen, saved_fb = compositor.fb, saved_rows = compositor_rows_in_use;
+                unsigned long saved_pixels = compositor.pixels, saved_buffer = compositor.buffer;
+                int saved_direct = compositor.direct_row, saved_plane = compositor.plane_row, saved_scaled = compositor.scaled_direct;
+                int saved_x0 = compositor.x[0], saved_y0 = compositor.y[0];
+                unsigned int saved_w0 = compositor.w[0], saved_h0 = compositor.h[0], saved_front0 = compositor.front[0];
+                struct windows address_to saved_table = compositor.table;
+                unsigned int flags = 0;
+                int clamped;
+
+                memory_fill_u32(rb_scanout, 16 * 4, 0x11223344u);
+                memory_fill_u32(rb_out, 16 * 4, 0u);
+                memory_fill_u32(rb_row_buf, 64 * 4, 0x55667788u);
+                compositor.scanout = rb_scanout, compositor.scanout_pitch = 16 * 4, compositor.width = 16, compositor.height = 4;
+                compositor.direct_row = 0, compositor.plane_row = -1, compositor.on_screen = 2, compositor.fb = 1;
+                compositor.x[0] = 0, compositor.y[0] = 0, compositor.w[0] = 8, compositor.h[0] = 4, compositor.front[0] = 0;
+                compositor.scaled_direct = 0;
+                compositor_rows_in_use = 1;
+                compositor.table = (struct windows address_to)rb_row_buf;
+                compositor.pixels = 0, compositor.buffer = 0;
+
+                /* Direct row is 8x4, readback requests 16x4: must NOT use direct fast path (bit 29 clear, scanout copied). */
+                flags = 0;
+                compositor_readback_rect(rb_out, 16, 0, 0, 16, 4, address_of flags);
+                check("GKW-4: compositor_readback_rect skips direct fast path when readback exceeds direct_row width",
+                      (flags & (1u << 29)) == 0 && rb_out[12] == 0x11223344u);
+
+                /* Scaled direct scanout active: must NOT use direct fast path even when dimensions match. */
+                compositor.scaled_direct = 1, flags = 0;
+                compositor_readback_rect(rb_out, 16, 0, 0, 8, 4, address_of flags);
+                check("GKW-4: compositor_readback_rect skips direct fast path when scaled_direct is active",
+                      (flags & (1u << 29)) == 0);
+
+                /* compositor_readback_row with rectangle completely past row bounds [0..8] must clamp to empty and return 0. */
+                compositor.scaled_direct = 0;
+                clamped = compositor_readback_row(0, rb_out, 16, 0, 0, 10, 0, 14, 4);
+                check("GKW-4: compositor_readback_row clamps disjoint rectangle to empty and returns 0", clamped == 0);
+
+                compositor.scanout = saved_scanout, compositor.scanout_pitch = saved_pitch, compositor.width = saved_w, compositor.height = saved_h;
+                compositor.direct_row = saved_direct, compositor.plane_row = saved_plane, compositor.on_screen = saved_on, compositor.fb = saved_fb;
+                compositor.scaled_direct = saved_scaled, compositor_rows_in_use = saved_rows;
+                compositor.pixels = saved_pixels, compositor.buffer = saved_buffer;
+                compositor.x[0] = saved_x0, compositor.y[0] = saved_y0, compositor.w[0] = saved_w0, compositor.h[0] = saved_h0;
+                compositor.front[0] = saved_front0, compositor.table = saved_table;
+        }
+
+        /* GKW-5: windows_gpu_wanted() must not crash on windows_gpu_reasons[20..23] == NULL, must NUL-terminate gpu_said/gpu_fault, and avoid 32-bit overflow. */
+        {
+                struct windows address_to table = windows_scratch_table(address_of app_table_scratch);
+                long pid;
+                int status = -1;
+
+                table->gpu_on = 1;
+                table->gpu_drawn = 10, table->gpu_processor = 10;
+                table->gpu_refused[20] = 20;
+                table->gpu_map_why = 3u;
+                memory_fill(table->gpu_said, 'A', sizeof(table->gpu_said));
+                memory_fill(table->gpu_fault, 'B', sizeof(table->gpu_fault));
+
+                pid = system_call_5(syscall(clone), 17, 0, 0, 0, 0);
+                if (pid == 0)
+                {
+                        struct windows_issue want[8];
+                        unsigned int n = windows_gpu_wanted(table, want, 8);
+                        int found_refused = 0;
+
+                        for (unsigned int i = 0; i < n; i++)
+                                if (want[i].code == WINDOWS_ISSUE_GPU_REFUSED && want[i].b == 20u && want[i].detail[0] != 0)
+                                        found_refused = 1;
+                        system_call_1(syscall(exit_group), found_refused ? 0 : 1);
+                }
+                if (pid > 0)
+                        system_call_4(syscall(wait4), (positive)pid, (positive)address_of status, 0, 0);
+                check("GKW-5: windows_gpu_wanted handles gpu_refused[20] without NULL deref and handles unterminated gpu_said/gpu_fault",
+                      pid > 0 && status == 0);
+                table->gpu_on = 0, table->gpu_drawn = 0, table->gpu_processor = 0, table->gpu_refused[20] = 0, table->gpu_map_why = 0;
+                memory_zero(table->gpu_said, sizeof(table->gpu_said));
+                memory_zero(table->gpu_fault, sizeof(table->gpu_fault));
+        }
+}
+
 b32 main(void)
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
@@ -7842,6 +7972,7 @@ b32 main(void)
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
         ui_pace = UI_PACE_DESIGNED;
 
+        gpu_teamb_security_rows();
         gpu_fault_rows();
         gpu_bo_rows();
         gpu_vmfault_rows();

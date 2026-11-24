@@ -802,7 +802,7 @@ static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set, _
         width = mode_set->mode->hdisplay;
         height = mode_set->mode->vdisplay;
         if (either ? width == output->width && height == output->height
-                   : (unsigned long)width * height <= (unsigned long)output->width * output->height)
+                   : width <= output->width && height <= output->height)
                 return false;
         fresh = output_buffer_make(output->canvas, mode_set, width, height, &opaque);
         if (IS_ERR(fresh))
@@ -1661,11 +1661,16 @@ static int canvas_claim(const char *path, unsigned int minor,
         if (!canvas)
                 return -EBUSY;
 
+        _Bool is_virtual = canvas_is_virtual(dev);
+        _Bool is_firmware = canvas_is_firmware(dev);
+
+        drm_dev_get(dev);
         drm_client_register(&canvas->client);
         pr_info(CANVAS_LOG "attached to %s, %s display\n",
-                canvas->client.dev->driver->name,
-                canvas_is_virtual(canvas->client.dev) ? "a guest's" : "a real");
-        if (!canvas_is_firmware(canvas->client.dev))
+                dev->driver->name,
+                is_virtual ? "a guest's" : "a real");
+        drm_dev_put(dev);
+        if (!is_firmware)
                 canvas_firmware_yield();
         return 0;
 }
@@ -1761,18 +1766,13 @@ static void canvas_firmware_yield(void)
         }
 }
 
-static long canvas_turn_off(void)
+static long canvas_turn_off_locked(void)
 {
         struct drm_device *released[8], *dev;
         unsigned int count = 0;
 
-        if (mutex_lock_killable(&canvas_control_lock))
-                return -EINTR;
         if (!canvas_is_on())
-        {
-                mutex_unlock(&canvas_control_lock);
                 return -EALREADY;
-        }
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
@@ -1807,9 +1807,20 @@ static long canvas_turn_off(void)
                 drm_dev_put(released[i]);
         }
         pr_info(CANVAS_LOG "off: %u card(s) given back to the console\n", count);
-        mutex_unlock(&canvas_control_lock);
-        moonwater_bind_fire(SPARK_BIND_CANVAS_OFF);
         return 0;
+}
+
+static long canvas_turn_off(void)
+{
+        long r;
+
+        if (mutex_lock_killable(&canvas_control_lock))
+                return -EINTR;
+        r = canvas_turn_off_locked();
+        mutex_unlock(&canvas_control_lock);
+        if (!r)
+                moonwater_bind_fire(SPARK_BIND_CANVAS_OFF);
+        return r;
 }
 
 static long canvas_turn_on(struct canvas_control *answer)
@@ -2604,11 +2615,17 @@ void canvas_boot(void)
 void canvas_unload(void)
 {
         struct workqueue_struct *wq;
+        long r;
 
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
-        (void)canvas_turn_off();
+        mutex_lock(&canvas_control_lock);
+        r = canvas_turn_off_locked();
+        mutex_unlock(&canvas_control_lock);
+        if (!r)
+                moonwater_bind_fire(SPARK_BIND_CANVAS_OFF);
+        cancel_work_sync(&canvas_exit);
         wq = xchg(&canvas_plug_wq, null);
         if (wq)
                 destroy_workqueue(wq);

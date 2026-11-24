@@ -2916,13 +2916,15 @@ static b32 gpu_drop_unmapped(void)
 {
         b32 used = false;
 
+        if (!gpu_idle())
+                return true;
         for (unsigned int i = 0; i < gpu_map_count; i++)
         {
                 b32 forgotten = !gpu_maps[i].from && !gpu_maps[i].to;
 
                 if (forgotten || system_call_3(syscall(msync), gpu_maps[i].from, gpu_maps[i].to - gpu_maps[i].from, 1) != 0)
                 {
-                        if (forgotten ? gpu_maps[i].handed && gpu_maps[i].used == gpu_tick : gpu_maps[i].used == gpu_tick)
+                        if (gpu_maps[i].handed || (!forgotten && gpu_maps[i].used == gpu_tick))
                                 used = true;
                         gpu_drop(i--, forgotten ? GPU_GONE_FORGET : GPU_GONE_UNMAPPED);
                 }

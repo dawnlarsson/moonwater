@@ -714,8 +714,23 @@ static int compositor_readback_row(int row, unsigned int *out, unsigned long out
 {
         const unsigned int *from;
         unsigned long pitch;
+        int rx0, ry0, rx1, ry1;
 
-        compositor_wl_straight_settle(row, y1 - compositor.y[row], y2 - compositor.y[row]);
+        if (row < 0 || row >= (int)compositor_rows_in_use)
+                return 0;
+        rx0 = compositor.x[row], ry0 = compositor.y[row];
+        rx1 = rx0 + (int)compositor.w[row], ry1 = ry0 + (int)compositor.h[row];
+        if (x1 < rx0)
+                x1 = rx0;
+        if (y1 < ry0)
+                y1 = ry0;
+        if (x2 > rx1)
+                x2 = rx1;
+        if (y2 > ry1)
+                y2 = ry1;
+        if (x1 >= x2 || y1 >= y2)
+                return 0;
+        compositor_wl_straight_settle(row, y1 - ry0, y2 - ry0);
         from = compositor_lent_pixels(row, &pitch);
         if (!from && compositor.table)
                 from = compositor_buffer(row, compositor.front[row]), pitch = (unsigned long)compositor_stride();
@@ -725,7 +740,7 @@ static int compositor_readback_row(int row, unsigned int *out, unsigned long out
         {
                 unsigned int *line = out + (unsigned long)(at - oy) * out_pitch + (unsigned long)(x1 - ox);
 
-                memory_copy(line, from + (unsigned long)(at - compositor.y[row]) * pitch + (unsigned long)(x1 - compositor.x[row]),
+                memory_copy(line, from + (unsigned long)(at - ry0) * pitch + (unsigned long)(x1 - rx0),
                             (unsigned long)(x2 - x1) * 4);
                 if (compositor_lent_swap(row))
                         memory_swizzle_rb_u32(line, line, (positive)(x2 - x1), 0);
@@ -738,7 +753,11 @@ static void compositor_readback_rect(unsigned int *out, unsigned long out_pitch,
         int direct = compositor.direct_row, plane = compositor.plane_row;
 
         if (direct >= 0 && direct < (int)compositor_rows_in_use && plane != direct && compositor.on_screen &&
-            compositor.on_screen != compositor.fb && compositor.x[direct] == 0 && compositor.y[direct] == 0 &&
+            compositor.on_screen != compositor.fb && !compositor.scaled_direct &&
+            compositor.x[direct] == 0 && compositor.y[direct] == 0 &&
+            x >= 0 && y >= 0 && w > 0 && h > 0 &&
+            x <= (int)compositor.w[direct] && w <= (int)compositor.w[direct] - x &&
+            y <= (int)compositor.h[direct] && h <= (int)compositor.h[direct] - y &&
             compositor_readback_row(direct, out, out_pitch, x, y, x, y, x + w, y + h))
         {
                 if (flags_out)

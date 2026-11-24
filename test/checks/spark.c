@@ -1323,7 +1323,9 @@ static int check_font_term_gpu_ui_002_canvas_wq(void)
         src[sz] = '\0';
         fclose(fp);
 
-        char *fn_turn_off = extract_c_function(src, "static long canvas_turn_off(void)");
+        char *fn_turn_off = extract_c_function(src, "static long canvas_turn_off_locked(void)");
+        if (!fn_turn_off)
+                fn_turn_off = extract_c_function(src, "static long canvas_turn_off(void)");
         char *fn_thread_stop = extract_c_function(src, "static void canvas_thread_stop(void)");
         char *fn_plug_queue = extract_c_function(src, "static void canvas_plug_queue(struct canvas *canvas)");
         char *fn_unload = extract_c_function(src, "\nvoid canvas_unload(void)");
@@ -1437,12 +1439,174 @@ static int check_font_term_gpu_ui_002_canvas_wq(void)
         return failed;
 }
 
+static char *read_source_file(const char *path)
+{
+        FILE *fp = fopen(path, "rb");
+        if (!fp)
+                return NULL;
+        fseek(fp, 0, SEEK_END);
+        long sz = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        if (sz < 0)
+        {
+                fclose(fp);
+                return NULL;
+        }
+        char *src = malloc((size_t)sz + 1);
+        if (!src || fread(src, 1, (size_t)sz, fp) != (size_t)sz)
+        {
+                fclose(fp);
+                free(src);
+                return NULL;
+        }
+        src[sz] = '\0';
+        fclose(fp);
+        return src;
+}
+
+static int check_gkw_2_canvas_unload(void)
+{
+        char *src = read_source_file("src/canvas/canvas.c");
+        if (!src)
+        {
+                fprintf(stderr, "GKW-2 FAIL: cannot open src/canvas/canvas.c\n");
+                return 1;
+        }
+        char *fn_unload = extract_c_function(src, "\nvoid canvas_unload(void)");
+        free(src);
+        int failed = 0;
+        if (!fn_unload)
+        {
+                fprintf(stderr, "GKW-2 FAIL: missing canvas_unload()\n");
+                return 1;
+        }
+        const char *cancel_exit = strstr(fn_unload, "cancel_work_sync(&canvas_exit)");
+        const char *destroy_wq = strstr(fn_unload, "destroy_workqueue(");
+        if (!cancel_exit || !destroy_wq || cancel_exit > destroy_wq)
+        {
+                fprintf(stderr, "GKW-2 FAIL: canvas_unload() does not call cancel_work_sync(&canvas_exit) before destroy_workqueue()\n");
+                failed = 1;
+        }
+        if (strstr(fn_unload, "canvas_turn_off()") != NULL || !strstr(fn_unload, "mutex_lock(&canvas_control_lock)"))
+        {
+                fprintf(stderr, "GKW-2 FAIL: canvas_unload() uses killable canvas_turn_off() instead of uninterruptible mutex_lock(&canvas_control_lock)\n");
+                failed = 1;
+        }
+        free(fn_unload);
+        if (!failed)
+                printf("PASS GKW-2: canvas_unload() acquires canvas_control_lock uninterruptibly and cancels canvas_exit before destroying workqueue\n");
+        return failed;
+}
+
+static int check_gkw_6_canvas_claim_uaf(void)
+{
+        char *src = read_source_file("src/canvas/canvas.c");
+        if (!src)
+        {
+                fprintf(stderr, "GKW-6 FAIL: cannot open src/canvas/canvas.c\n");
+                return 1;
+        }
+        char *fn_claim = extract_c_function(src, "static int canvas_claim(const char *path, unsigned int minor,\n                        struct canvas_control *on, _Bool firmware_ok)");
+        free(src);
+        int failed = 0;
+        if (!fn_claim)
+        {
+                fprintf(stderr, "GKW-6 FAIL: missing canvas_claim()\n");
+                return 1;
+        }
+        const char *reg = strstr(fn_claim, "drm_client_register(&canvas->client)");
+        if (!reg)
+        {
+                fprintf(stderr, "GKW-6 FAIL: missing drm_client_register(&canvas->client) in canvas_claim()\n");
+                failed = 1;
+        }
+        else if (strstr(reg + strlen("drm_client_register(&canvas->client)"), "canvas->") != NULL)
+        {
+                fprintf(stderr, "GKW-6 FAIL: canvas_claim() dereferences canvas-> after drm_client_register(&canvas->client) (UAF on concurrent unplug)\n");
+                failed = 1;
+        }
+        free(fn_claim);
+        if (!failed)
+                printf("PASS GKW-6: canvas_claim() does not dereference canvas after drm_client_register()\n");
+        return failed;
+}
+
+static int check_gkw_8_output_grow(void)
+{
+        char *src = read_source_file("src/canvas/canvas.c");
+        if (!src)
+        {
+                fprintf(stderr, "GKW-8 FAIL: cannot open src/canvas/canvas.c\n");
+                return 1;
+        }
+        char *fn_grow = extract_c_function(src, "static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set, _Bool either)");
+        free(src);
+        int failed = 0;
+        if (!fn_grow)
+        {
+                fprintf(stderr, "GKW-8 FAIL: missing output_grow()\n");
+                return 1;
+        }
+        int uses_area = (strstr(fn_grow, "width * height <= (unsigned long)output->width * output->height") != NULL);
+        int uses_axes = (strstr(fn_grow, "width <= output->width && height <= output->height") != NULL);
+        free(fn_grow);
+
+        /* Model hotplug aspect-ratio change: 1920x1440 -> 2560x1080 (same pixel area 2,764,800) and 1080x1920 -> 1920x1080. */
+        unsigned int ow = 1920, oh = 1440, nw = 2560, nh = 1080;
+        int skip_realloc = uses_area ? ((unsigned long)nw * nh <= (unsigned long)ow * oh)
+                                     : (nw <= ow && nh <= oh);
+        if (uses_area || !uses_axes || skip_realloc)
+        {
+                fprintf(stderr, "GKW-8 FAIL: output_grow() checks pixel area instead of per-axis bounds (1920x1440->2560x1080 skipped=%d)\n", skip_realloc);
+                failed = 1;
+        }
+        if (!failed)
+                printf("PASS GKW-8: output_grow() checks per-axis bounds (width <= output->width && height <= output->height)\n");
+        return failed;
+}
+
+static int check_gkw_7_windows_take_toctou(void)
+{
+        char *src = read_source_file("src/canvas/window.c");
+        if (!src)
+        {
+                fprintf(stderr, "GKW-7 FAIL: cannot open src/canvas/window.c\n");
+                return 1;
+        }
+        char *fn_take = extract_c_function(src, "static long windows_take(struct window_row *own)");
+        free(src);
+        int failed = 0;
+        if (!fn_take)
+        {
+                fprintf(stderr, "GKW-7 FAIL: missing windows_take()\n");
+                return 1;
+        }
+        if (strstr(fn_take, "windows_rows(table)") != NULL)
+        {
+                fprintf(stderr, "GKW-7 FAIL: windows_take() re-reads shared-memory table->capacity via windows_rows(table) after windows_fits()\n");
+                failed = 1;
+        }
+        if (strstr(fn_take, ".room = room") == NULL)
+        {
+                fprintf(stderr, "GKW-7 FAIL: windows_take() does not snapshot and store validated room in struct window_row\n");
+                failed = 1;
+        }
+        free(fn_take);
+        if (!failed)
+                printf("PASS GKW-7: windows_take() snapshots room once before validation and clamps row claiming against it\n");
+        return failed;
+}
+
 int main(void)
 {
         int rc = 0;
 
         rc |= check_hmb_003_rules_cap_sys_boot();
         rc |= check_font_term_gpu_ui_002_canvas_wq();
+        rc |= check_gkw_2_canvas_unload();
+        rc |= check_gkw_6_canvas_claim_uaf();
+        rc |= check_gkw_8_output_grow();
+        rc |= check_gkw_7_windows_take_toctou();
         return rc;
 }
 #endif /* CHECK_spark_security */

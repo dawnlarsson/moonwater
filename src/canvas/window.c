@@ -631,11 +631,48 @@ static inline unsigned int windows_us_bucket(unsigned long long us)
 #define WINDOW_LIST_BYTES (4ul << 20)
 #define WINDOW_LIST_ROOM 16384u
 
+static inline unsigned char *window_list_of_in(const struct windows *table, unsigned long bytes, unsigned long buffer, unsigned int room, int row)
+{
+        unsigned long lists, list_bytes;
+
+        if (!table || !buffer || (buffer & 4095ul) || !room || room > WINDOWS || row < 0 || (unsigned int)row >= room)
+                return 0;
+        lists = __atomic_load_n(&table->lists, __ATOMIC_ACQUIRE);
+        list_bytes = __atomic_load_n(&table->list_bytes, __ATOMIC_ACQUIRE);
+        if (!lists || list_bytes != WINDOW_LIST_BYTES)
+                return 0;
+        if (buffer > (~0ul - WINDOWS_HEADER) / (2ul * room))
+                return 0;
+        if (lists != WINDOWS_LISTS_AT(buffer, room) || lists > bytes || (bytes - lists) / WINDOW_LIST_BYTES < room)
+                return 0;
+        return (unsigned char *)table + lists + (unsigned long)row * WINDOW_LIST_BYTES;
+}
+
 static inline unsigned char *window_list_of(const struct windows *table, int row)
 {
-        if (!table || !table->lists || table->list_bytes != WINDOW_LIST_BYTES || row < 0 || (unsigned int)row >= windows_room(table))
+        unsigned long lists, list_bytes, buffer;
+        unsigned int room;
+
+        if (!table || row < 0)
                 return 0;
-        return (unsigned char *)table + table->lists + (unsigned long)row * table->list_bytes;
+        room = windows_room(table);
+        if (!room || (unsigned int)row >= room)
+                return 0;
+        lists = __atomic_load_n(&table->lists, __ATOMIC_ACQUIRE);
+        list_bytes = __atomic_load_n(&table->list_bytes, __ATOMIC_ACQUIRE);
+        buffer = __atomic_load_n(&table->buffer, __ATOMIC_ACQUIRE);
+        if (!lists || list_bytes != WINDOW_LIST_BYTES || lists < WINDOWS_HEADER || (lists & 4095ul))
+                return 0;
+        if (buffer)
+        {
+                if ((buffer & 4095ul) || buffer > (~0ul - WINDOWS_HEADER) / (2ul * room) || lists != WINDOWS_LISTS_AT(buffer, room))
+                        return 0;
+        }
+        else if ((lists - WINDOWS_HEADER) % (2ul * room * 4096ul) != 0 || lists > WINDOWS_HEADER + (1ul << 36))
+                return 0;
+        if (lists > (~0ul - (unsigned long)room * WINDOW_LIST_BYTES))
+                return 0;
+        return (unsigned char *)table + lists + (unsigned long)row * WINDOW_LIST_BYTES;
 }
 
 static inline unsigned int window_list_check(unsigned char *list, int width, int height, struct ui_draw_view *view)
@@ -880,16 +917,22 @@ static void windows_want_push(struct windows_issue *want, unsigned int *count, u
 
 static unsigned int windows_gpu_wanted(const struct windows *table, struct windows_issue *want, unsigned int room)
 {
-        unsigned int count = 0, step, error, total, refused_top = 0, refused_why = 0, tried = 0, lost = 0;
+        unsigned int count = 0, step, error, refused_top = 0, refused_why = 0, tried = 0, lost = 0;
+        unsigned long long total;
 
         if (!table || !want || !table->gpu_on)
                 return 0;
         step = table->gpu_map_why & 255u, error = table->gpu_map_why >> 8;
         if (step && step != 9u)
+        {
+                char said[sizeof(table->gpu_said) + 1];
+
+                memory_copy(said, table->gpu_said, sizeof(table->gpu_said)), said[sizeof(table->gpu_said)] = 0;
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR,
-                                  windows_has_word(table->gpu_said, "HMM_MIRROR") || (step == 3 && error == 19)
+                                  windows_has_word(said, "HMM_MIRROR") || (step == 3 && error == 19)
                                       ? WINDOWS_ISSUE_GPU_USERPTR : WINDOWS_ISSUE_GPU_MAP,
-                                  step, error, table->gpu_said);
+                                  step, error, said);
+        }
         if (table->gpu_state == WINDOWS_GPU_UNTRUSTED)
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_UNTRUSTED, table->gpu_family, 0, "");
         if (table->gpu_state == WINDOWS_GPU_NO_CARD && table->gpu_family)
@@ -904,13 +947,22 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
         if (table->gpu_state == WINDOWS_GPU_HUNG)
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_HUNG, 0, 0, "");
         if (table->gpu_fault[0])
-                windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, table->gpu_fault);
+        {
+                char fault[sizeof(table->gpu_fault) + 1];
+
+                memory_copy(fault, table->gpu_fault, sizeof(table->gpu_fault)), fault[sizeof(table->gpu_fault)] = 0;
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, fault);
+        }
         for (unsigned int why = 5; why < WINDOWS_GPU_REASONS; why++)
                 if (why != WINDOWS_GPU_WHY_GENERATION && table->gpu_refused[why] > refused_top)
                         refused_top = table->gpu_refused[why], refused_why = why;
-        total = table->gpu_drawn + table->gpu_processor;
-        if (refused_top >= WINDOWS_GPU_REFUSAL_MIN && refused_top * WINDOWS_GPU_REFUSAL_SHARE >= total && refused_why)
-                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REFUSED, refused_top, refused_why, windows_gpu_reasons[refused_why]);
+        total = (unsigned long long)table->gpu_drawn + (unsigned long long)table->gpu_processor;
+        if (refused_top >= WINDOWS_GPU_REFUSAL_MIN && (unsigned long long)refused_top * WINDOWS_GPU_REFUSAL_SHARE >= total && refused_why)
+        {
+                const char *reason = windows_gpu_reasons[refused_why] ? (const char *)windows_gpu_reasons[refused_why] : "unknown";
+
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REFUSED, refused_top, refused_why, reason);
+        }
         if (!table->gpu_able && table->gpu_state == WINDOWS_GPU_UP && total > 0)
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
         for (unsigned int row = 0; row < windows_rows(table); row++)
@@ -920,7 +972,7 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
                         for (unsigned int why = 0; why < UI_LOST_COUNT; why++)
                                 lost += table->list_lost[row][why];
                 }
-        if (lost >= WINDOWS_GPU_LOST_MIN && lost * 10 >= tried)
+        if (lost >= WINDOWS_GPU_LOST_MIN && (unsigned long long)lost * 10ull >= (unsigned long long)tried)
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LOST, lost, tried, "");
         if (table->refused && table->refused_error)
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_SCANOUT, table->refused_error, 0, "");
@@ -1846,7 +1898,7 @@ struct window_row
         unsigned int row;
         long door, wake;
         unsigned long bytes, buffer;
-        unsigned int stride, output_width, output_height, closes;
+        unsigned int stride, output_width, output_height, closes, room;
 };
 
 static inline unsigned int *windows_pixels(const struct window_row *own, unsigned int which)
@@ -2136,12 +2188,20 @@ static void windows_drain(long handle)
                 ;
 }
 
+static int windows_lists_fit_room(const struct windows *table, unsigned long size, unsigned long buffer, unsigned int room)
+{
+        unsigned long lists = __atomic_load_n(&table->lists, __ATOMIC_ACQUIRE);
+        unsigned long list_bytes = __atomic_load_n(&table->list_bytes, __ATOMIC_ACQUIRE);
+
+        return !lists || (list_bytes == WINDOW_LIST_BYTES && room && room <= WINDOWS &&
+                          buffer <= (~0ul - WINDOWS_HEADER) / (2ul * room) &&
+                          lists == WINDOWS_LISTS_AT(buffer, room) && lists <= size &&
+                          (size - lists) / WINDOW_LIST_BYTES >= room);
+}
+
 static int windows_lists_fit(const struct windows *table, unsigned long size, unsigned long buffer)
 {
-        unsigned long lists = table->lists, room = windows_room(table);
-
-        return !lists || (table->list_bytes == WINDOW_LIST_BYTES && lists == WINDOWS_LISTS_AT(buffer, room) && lists <= size &&
-                          (size - lists) / WINDOW_LIST_BYTES >= room);
+        return windows_lists_fit_room(table, size, buffer, windows_room(table));
 }
 
 static unsigned int windows_copy_word_clean(char *into, const volatile char *src)
@@ -2332,9 +2392,8 @@ static int windows_fits(unsigned long size, unsigned long pixels, unsigned long 
                buffer <= (size - WINDOWS_HEADER) / (2 * (unsigned long)room) && width && height && stride >= width && buffer / 4 / stride >= height;
 }
 
-static void windows_reset_row(struct windows *table, unsigned int row)
+static void windows_reset_row_with_list(struct windows *table, unsigned int row, unsigned char *list)
 {
-        unsigned char *list = window_list_of(table, (int)row);
         #define Z(f) __atomic_store_n(&table->f, 0, __ATOMIC_RELEASE)
 
         table->state[row] = table->buffer_index[row] = table->glass[row] = table->asked[row] = table->ground[row] = 0;
@@ -2360,6 +2419,11 @@ static void windows_reset_row(struct windows *table, unsigned int row)
                 memory_zero(list, UI_DRAW_LIST_HEADER);
         Z(list_state[row]); Z(list_seen[row]);
         #undef Z
+}
+
+static void windows_reset_row(struct windows *table, unsigned int row)
+{
+        windows_reset_row_with_list(table, row, window_list_of(table, (int)row));
 }
 
 static int window_name_valid(const char *name)
@@ -2936,30 +3000,37 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
         radio_state_tick(table);
 }
 
-#define WINDOWS_ROWS_WAIT_MS 30000
-static int windows_rows_ask(struct windows *table, unsigned int had)
+static unsigned int windows_rows_clamped(const struct windows *table, unsigned int room)
 {
-        unsigned int seen = windows_rows(table);
+        unsigned int rows = table ? __atomic_load_n(&table->rows, __ATOMIC_ACQUIRE) : 0;
+
+        return rows < room ? rows : room;
+}
+
+#define WINDOWS_ROWS_WAIT_MS 30000
+static int windows_rows_ask_room(struct windows *table, unsigned int had, unsigned int room)
+{
+        unsigned int seen = windows_rows_clamped(table, room);
         long door;
 
-        if (had >= windows_room(table))
+        if (had >= room)
                 return 0;
         __atomic_add_fetch(&table->rows_wanted, 1u, __ATOMIC_RELEASE);
         if ((door = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_CLIP_DOOR, WINDOWS_O_WRITE, 0, 0, 0)) < 0)
                 return 0;
-        for (unsigned int waited = 0; waited < WINDOWS_ROWS_WAIT_MS && windows_rows(table) <= had; waited++)
+        for (unsigned int waited = 0; waited < WINDOWS_ROWS_WAIT_MS && windows_rows_clamped(table, room) <= had; waited++)
         {
                 long nap[2] = {0, 1000000};
                 char byte = 0;
 
-                if (windows_rows(table) != seen)
-                        seen = windows_rows(table), waited = 0;
+                if (windows_rows_clamped(table, room) != seen)
+                        seen = windows_rows_clamped(table, room), waited = 0;
                 if (waited % 100 == 0 && window_call(WINDOW_SYS_WRITE, door, (long)&byte, 1, 0, 0, 0) == -32)
                         break;
                 window_call(WINDOW_SYS_PPOLL, 0, 0, (long)nap, 0, 8, 0);
         }
         window_call(WINDOW_SYS_CLOSE, door, 0, 0, 0, 0, 0);
-        return windows_rows(table) > had;
+        return windows_rows_clamped(table, room) > had;
 }
 
 static long windows_table_map(long file, long *size)
@@ -3041,32 +3112,36 @@ static long windows_take(struct window_row *own)
         stride = __atomic_load_n(&table->stride, __ATOMIC_ACQUIRE);
         width = __atomic_load_n(&table->output_width, __ATOMIC_ACQUIRE);
         height = __atomic_load_n(&table->output_height, __ATOMIC_ACQUIRE);
-        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height, windows_room(table)) ||
-            !windows_lists_fit(table, (unsigned long)size, buffer))
+        unsigned int room = windows_room(table);
+
+        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height, room) ||
+            !windows_lists_fit_room(table, (unsigned long)size, buffer, room))
                 return window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0), -22;
         *own = (struct window_row){.table = table, .bytes = (unsigned long)size, .buffer = buffer,
-                                   .stride = stride, .output_width = width, .output_height = height};
+                                   .stride = stride, .output_width = width, .output_height = height, .room = room};
         for (unsigned int from = 0;; from = own->row + 1)
         {
-                for (own->row = from; own->row < windows_rows(table); own->row++)
+                unsigned int rows = windows_rows_clamped(table, room);
+
+                for (own->row = from; own->row < rows; own->row++)
                 {
                         unsigned int none = 0;
 
                         if (__atomic_compare_exchange_n(&table->pid[own->row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
                                 break;
                 }
-                if (own->row >= windows_rows(table))
+                if (own->row >= rows)
                 {
                         unsigned int had = own->row;
 
-                        if (had && windows_rows_ask(table, had))
+                        if (had && had < room && windows_rows_ask_room(table, had, room))
                         {
                                 own->row = had - 1;
                                 continue;
                         }
                         return window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0), failed ? failed : -28;
                 }
-                windows_reset_row(table, own->row);
+                windows_reset_row_with_list(table, own->row, window_list_of_in(table, own->bytes, own->buffer, room, (int)own->row));
                 windows_place_take(table, own->row);
                 windows_asked_take(table, own->row, program_environment_list());
                 windows_door_name(name, own->row, 0);
