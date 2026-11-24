@@ -784,6 +784,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Settings	8728	Ustawienia
 =Shake sensitivity	8d3a	Czułość potrząsania
 =Shake the pointer to find it	f508	Potrząśnij wskaźnikiem, aby go znaleźć
+=Share	6dd8	Udostępnij
 =Show touch area	9ca8	Pokaż obszar dotyku
 =Side taskbar text faces	d115	Kierunek tekstu paska bocznego
 =Simultaneous threads (SMT)	e836	Wątki jednoczesne (SMT)

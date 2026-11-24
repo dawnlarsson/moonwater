@@ -785,6 +785,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Settings	8728	تنظیمات
 =Shake sensitivity	8d3a	حساسیت تکان دادن
 =Shake the pointer to find it	f508	تکان دادن نشانگر برای پیدا کردن آن
+=Share	6dd8	اشتراک‌گذاری
 =Show touch area	9ca8	نمایش ناحیه لمس
 =Side taskbar text faces	d115	جهت متن نوار وظیفه کناری
 =Simultaneous threads (SMT)	e836	رشته‌های هم‌زمان (SMT)

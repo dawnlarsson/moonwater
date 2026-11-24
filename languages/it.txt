@@ -784,6 +784,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Settings	8728	Impostazioni
 =Shake sensitivity	8d3a	Sensibilità allo scuotimento
 =Shake the pointer to find it	f508	Agita il puntatore per trovarlo
+=Share	6dd8	Condividi
 =Show touch area	9ca8	Mostra l'area di tocco
 =Side taskbar text faces	d115	Orientamento del testo della barra laterale
 =Simultaneous threads (SMT)	e836	Thread simultanei (SMT)

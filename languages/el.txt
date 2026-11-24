@@ -784,6 +784,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Settings	8728	Ρυθμίσεις
 =Shake sensitivity	8d3a	Ευαισθησία κουνήματος
 =Shake the pointer to find it	f508	Κούνημα του δείκτη για να βρεθεί
+=Share	6dd8	Κοινή χρήση
 =Show touch area	9ca8	Εμφάνιση περιοχής αφής
 =Side taskbar text faces	d115	Προσανατολισμός κειμένου πλευρικής γραμμής
 =Simultaneous threads (SMT)	e836	Ταυτόχρονα νήματα (SMT)

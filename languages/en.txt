@@ -751,6 +751,7 @@ ui_field_full	fe02	that is as much as it holds
 =Settings	8728	Settings
 =Shake sensitivity	8d3a	Shake sensitivity
 =Shake the pointer to find it	f508	Shake the pointer to find it
+=Share	6dd8	Share
 =Show touch area	9ca8	Show touch area
 =Side taskbar text faces	d115	Side taskbar text faces
 =Simultaneous threads (SMT)	e836	Simultaneous threads (SMT)

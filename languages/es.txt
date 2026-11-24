@@ -784,6 +784,7 @@ ui_field_full	fe02	no cabe más
 =Settings	8728	Ajustes
 =Shake sensitivity	8d3a	Sensibilidad al agitar
 =Shake the pointer to find it	f508	Agitar el puntero para encontrarlo
+=Share	6dd8	Compartir
 =Show touch area	9ca8	Mostrar el área táctil
 =Side taskbar text faces	d115	Orientación del texto de la barra lateral
 =Simultaneous threads (SMT)	e836	Hilos simultáneos (SMT)

@@ -785,6 +785,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Settings	8728	ترتیبات
 =Shake sensitivity	8d3a	ہلانے کی حساسیت
 =Shake the pointer to find it	f508	پوائنٹر ہلا کر اسے تلاش کریں
+=Share	6dd8	شیئر کریں
 =Show touch area	9ca8	ٹچ کا علاقہ دکھائیں
 =Side taskbar text faces	d115	سائیڈ ٹاسک بار کے متن کا رخ
 =Simultaneous threads (SMT)	e836	بیک وقت تھریڈز (SMT)

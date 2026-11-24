@@ -785,6 +785,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Settings	8728	הגדרות
 =Shake sensitivity	8d3a	רגישות לניעור
 =Shake the pointer to find it	f508	נער את המצביע כדי למצוא אותו
+=Share	6dd8	שיתוף
 =Show touch area	9ca8	הצג אזור מגע
 =Side taskbar text faces	d115	כיוון הטקסט בשורת המשימות הצדדית
 =Simultaneous threads (SMT)	e836	תהליכונים בו-זמניים (SMT)

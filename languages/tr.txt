@@ -784,6 +784,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Settings	8728	Ayarlar
 =Shake sensitivity	8d3a	Sallama duyarlılığı
 =Shake the pointer to find it	f508	İşaretçiyi bulmak için salla
+=Share	6dd8	Paylaş
 =Show touch area	9ca8	Dokunma alanını göster
 =Side taskbar text faces	d115	Yan çubuğun metin yönü
 =Simultaneous threads (SMT)	e836	Eşzamanlı iş parçacıkları (SMT)

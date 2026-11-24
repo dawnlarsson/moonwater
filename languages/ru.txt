@@ -784,6 +784,7 @@ ui_field_full	fe02	больше не помещается
 =Settings	8728	Настройки
 =Shake sensitivity	8d3a	Чувствительность встряхивания
 =Shake the pointer to find it	f508	Потрясти указатель, чтобы найти его
+=Share	6dd8	Поделиться
 =Show touch area	9ca8	Показывать область касания
 =Side taskbar text faces	d115	Направление текста боковой панели
 =Simultaneous threads (SMT)	e836	Одновременные потоки (SMT)

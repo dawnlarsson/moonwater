@@ -784,6 +784,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Settings	8728	Paramètres
 =Shake sensitivity	8d3a	Sensibilité à la secousse
 =Shake the pointer to find it	f508	Secouer le pointeur pour le retrouver
+=Share	6dd8	Partager
 =Show touch area	9ca8	Afficher la zone de toucher
 =Side taskbar text faces	d115	Orientation du texte de la barre latérale
 =Simultaneous threads (SMT)	e836	Threads simultanés (SMT)

@@ -784,6 +784,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Settings	8728	Einstellungen
 =Shake sensitivity	8d3a	Schüttelempfindlichkeit
 =Shake the pointer to find it	f508	Mauszeiger schütteln, um ihn zu finden
+=Share	6dd8	Teilen
 =Show touch area	9ca8	Berührungsbereich anzeigen
 =Side taskbar text faces	d115	Textausrichtung der seitlichen Taskleiste
 =Simultaneous threads (SMT)	e836	Simultane Threads (SMT)
