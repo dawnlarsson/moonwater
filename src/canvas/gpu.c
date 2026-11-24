@@ -3327,8 +3327,10 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
                 // instruction pointer: a jmpi moves both by the first one's flag. The kernels' jumps are each thread's own (a strip's count of records,
                 // their kinds, whether a tile is covered), so on an Alder Lake UHD 710 the second strip of every pair drew with the first's jumps: its
                 // list cut at the first's length, a tone drawn as the first's fill, tiles not read because the first's were covered. MEDIA_VFE_STATE's
-                // Fused EU Dispatch (word 3, bit 6: set is disabled) dispatches a thread a pair instead, each with its own pointer.
-                unsigned int unfused = gpu.family >= 1200 ? 1u << 6 : 0u;
+                // Fused EU Dispatch (word 3, bit 6: set is disabled) dispatches a thread a pair instead, each with its own pointer. Gen11 (Ice Lake,
+                // Elkhart and Jasper Lake) has fused EUs and the same field at the same bit, and no Gen11 card has run these words: the bit is set
+                // there by the documentation alone, and the self-test's third scene, which a paired dispatch draws wrong, is what holds it.
+                unsigned int unfused = gpu.family >= 1100 ? 1u << 6 : 0u;
 
                 words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (threads << 16) | (1u << 8) | unfused; words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
         }
