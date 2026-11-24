@@ -31,5 +31,13 @@ CONFIG_MITIGATION_SPECTRE_V1=y
 CONFIG_MITIGATION_SPECTRE_V2=y
 CONFIG_MITIGATION_SRBDS=y
 CONFIG_MITIGATION_SSB=y
+#
+# VMSCAPE: a guest steering the branch predictor of its own userspace
+# hypervisor (qemu, ours included). Kconfig defaults it on with KVM, but it
+# is a prompt, so allnoconfig left it off and the box said "vmscape:
+# Vulnerable". The cost is one IBPB on the way back to userspace after a VM
+# exit, so a machine running no guest pays nothing.
+#
+CONFIG_MITIGATION_VMSCAPE=y
 CONFIG_MITIGATION_CALL_DEPTH_TRACKING=n
 CONFIG_MITIGATION_SLS=n

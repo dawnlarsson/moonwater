@@ -3233,6 +3233,36 @@ and the function audit seal only). The claim is by reading the code.
 **Related.** MW-2026-208 (same face, a substitution that wrote its input).
 `697155d9a`, the commit that added the composite reads.
 
+### MW-2026-218: the kernel was built without the VMSCAPE mitigation, so a guest could steer its own hypervisor's branch predictor
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-24 (the commit "kernel: the VMSCAPE mitigation and every r8169 firmware file") |
+| Class | Missing CPU mitigation: a guest's branch-predictor state reached the host's userspace VMM (Spectre v2 against qemu) |
+| Attacker | Code running inside a KVM guest on an affected Intel or AMD part |
+| Reachable | Any x64 image with KVM (profile limbo); the box reported `vmscape: Vulnerable` in /sys/devices/system/cpu/vulnerabilities |
+
+**What happened.** `MITIGATION_VMSCAPE` is a prompt whose Kconfig default is y
+with KVM. The kernel configuration is composed from allnoconfig, which answers
+every prompt n, so each mitigation must be named in sec_baseline.x64.
+VMSCAPE came after the list was written in `b7c5be644` (2026-10-07) and was
+never added. Every other `MITIGATION_*` option in arch/x86/Kconfig is listed.
+
+**The fix.** `CONFIG_MITIGATION_VMSCAPE=y` in kernel/profile/sec_baseline.x64.
+The kernel then issues one IBPB on the return to userspace after a VM exit,
+and only on a part that reports the bug, so a machine running no guest pays
+nothing.
+
+**Tests that fail without the fix.** None in the tree. After a boot of the
+fixed image, /sys/devices/system/cpu/vulnerabilities/vmscape reads
+`Mitigation: IBPB before exit to userspace` on the box.
+
+**Related.** The same read of the box showed `tsa: Vulnerable: No microcode`
+and `spec_rstack_overflow: Vulnerable: Microcode, no safe RET`. Those are the
+processor's microcode at 0x0b404023, below AMD's EntrySign cutoff 0xb404031.
+The kernel loads no unlisted patch below that cutoff, so they wait on a BIOS
+update. Not a bug in the tree.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
