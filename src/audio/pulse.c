@@ -230,6 +230,9 @@ struct pulse_host
         // The microseconds of sound the output of a sink holds (its card's target) for a stream that asks for asked_us in all: what
         // a stream that adjusts its latency leaves to the card. 0 or no host function: the sink holds nothing of its own (a clock).
         long (*latency)(void *context, long sink, long asked_us);
+        // Optional: whether the person shares what plays with the programs of this uid now (a share of the screen with its sound,
+        // picked in the share app): then a monitor is theirs to record while the share lasts. A loopback never is.
+        int (*shared)(void *context, unsigned int uid);
 };
 
 #define PULSE_CHANGED_SINK_VOLUME 1
@@ -860,6 +863,12 @@ static struct pulse_stream *pulse_input_of(struct pulse *p, unsigned long index)
 }
 
 // A client may read and change what is its own; root may change anything.
+// Whether the person shares what plays with this client's programs now (pulse_host.shared): a monitor is theirs to record.
+static int pulse_shared_with(const struct pulse *p, const struct pulse_client *c)
+{
+        return p->host.shared && p->host.shared(p->host.context, c->uid);
+}
+
 static int pulse_may(const struct pulse_client *c, long uid)
 {
         return c->root || c->uid == uid;
@@ -2478,8 +2487,8 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r
         else
                 source = p->default_source;
         // What a sink plays is what everyone in the session plays: another user's program does not hear it, and a source it may
-        // not hear (a monitor, or one that is not there) is refused alike.
-        if (!c->root && (source < 0 || !p->source[source].capture || p->source[source].loop))
+        // not hear (a monitor, or one that is not there) is refused alike; a monitor is heard only while the person shares it with them.
+        if (!c->root && (source < 0 || p->source[source].loop || (!p->source[source].capture && !pulse_shared_with(p, c))))
                 return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         if (source < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -3797,8 +3806,9 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 source = pulse_find_source(p, device, name);
                 if (!rec || !pulse_may(c, rec->uid))
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
-                // A source that is not a capture device, or is a loopback, or is not there, is refused a program that is not root alike.
-                if (!c->root && (source < 0 || !p->source[source].capture || p->source[source].loop))
+                // A source that is not a capture device (but a monitor shared with it), or is a loopback, or is not there, is refused a
+                // program that is not root alike.
+                if (!c->root && (source < 0 || p->source[source].loop || (!p->source[source].capture && !pulse_shared_with(p, c))))
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);

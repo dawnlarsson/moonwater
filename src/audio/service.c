@@ -1700,34 +1700,55 @@ static void audio_refuse(long fd)
         another program's streams and the server's defaults stay root's, and a bowl's program records a capture device and plays
         as any user does. 1 when the namespace could not be read: such a client is not root either.
 */
-#define AUDIO_UID_BOWL 0x40000000u
+#define AUDIO_UID_BOWL 0x40000000u // window.c's WINDOWS_UID_BOWL, the same: a share's sound is granted by it
 
+// The inode of the outermost user namespace under the server's own that holds pid (the bowl's, whatever a sandbox in it made under it:
+// window.c's windows_userns, the same walk), the server's own for pid <= 0 or a process of it, 1 when it cannot be read.
 static unsigned long audio_userns(long pid)
 {
-        char path[48], link[64];
-        long n = 0, got;
-        unsigned long inode = 0;
+        char path[48];
+        unsigned long st[18], own = 0, inode = 1;
+        long fd, n = 6;
 
-        if (pid <= 0)
-                memory_copy(path, "/proc/self/ns/user", 19);
-        else
+        if ((fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/proc/self/ns/user", O_RDONLY | O_CLOEXEC, 0, 0, 0)) < 0)
+                return 1;
+        if (audio_call(syscall(fstat), (positive)fd, (positive)st, 0, 0, 0, 0) >= 0)
+                own = st[1];
+        system_close((int)fd);
+        if (pid <= 0 || !own)
+                return own ? own : 1;
         {
                 char digits[24];
                 int k = 0;
 
-                memory_copy(path, "/proc/", 6), n = 6;
+                memory_copy(path, "/proc/", 6);
                 for (unsigned long v = (unsigned long)pid; v || !k; v /= 10)
                         digits[k++] = (char)('0' + v % 10);
                 while (k)
                         path[n++] = digits[--k];
                 memory_copy(path + n, "/ns/user", 9);
         }
-        got = audio_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)link, sizeof link - 1, 0, 0);
-        // "user:[4026531837]"
-        for (long at = 0; got > 0 && at < got; at++)
-                if (link[at] >= '0' && link[at] <= '9')
-                        inode = inode * 10 + (unsigned long)(link[at] - '0');
-        return got > 0 ? inode : 1;
+        if ((fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, O_RDONLY | O_CLOEXEC, 0, 0, 0)) < 0)
+                return 1;
+        for (int depth = 0; depth < 32; depth++)
+        {
+                long parent;
+
+                if (audio_call(syscall(fstat), (positive)fd, (positive)st, 0, 0, 0, 0) < 0)
+                        break;
+                inode = st[1];
+                if (inode == own || (parent = audio_call(syscall(ioctl), (positive)fd, 0xb702, 0, 0, 0, 0)) < 0) // NS_GET_PARENT
+                        break;
+                if (audio_call(syscall(fstat), (positive)parent, (positive)st, 0, 0, 0, 0) < 0 || st[1] == own)
+                {
+                        system_close((int)parent);
+                        break;
+                }
+                system_close((int)fd);
+                fd = parent;
+        }
+        system_close((int)fd);
+        return inode;
 }
 
 static unsigned int audio_peer_uid(int pid, int uid)
@@ -3052,6 +3073,26 @@ static void audio_lock_memory(void)
                 audio_say("memory is not locked, error", locked);
 }
 
+/*
+        Whether the person shares what plays with the programs of uid (a share of a screen or a Scene with its sound, picked in the share
+        app, and live): the table's casts, from the compositor's own table only (windows_board_trusted). 0 with no desktop.
+*/
+static int audio_host_shared(void *context, unsigned int uid)
+{
+        (void)context;
+#ifdef AUDIO_BOARD
+        struct windows *table = windows_board_trusted();
+
+        for (unsigned int at = 0; table && at < WINDOWS_CASTS; at++)
+                if (__atomic_load_n(&table->casts[at].state, __ATOMIC_ACQUIRE) == WINDOWS_CAST_LIVE && table->casts[at].sound &&
+                    table->casts[at].uid == uid)
+                        return 1;
+#else
+        (void)uid;
+#endif
+        return 0;
+}
+
 static void audio_start(void)
 {
         struct pulse_host host = {0};
@@ -3062,6 +3103,7 @@ static void audio_start(void)
         host.release = audio_host_release;
         host.now = audio_host_now;
         host.latency = audio_host_latency;
+        host.shared = audio_host_shared;
         host.real = audio_host_real;
         host.recall = audio_host_recall;
         host.remember = audio_host_remember;

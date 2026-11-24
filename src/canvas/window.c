@@ -1943,7 +1943,7 @@ enum
         WINDOW_SYS_LSEEK = 8, WINDOW_SYS_MMAP = 9, WINDOW_SYS_MUNMAP = 11, WINDOW_SYS_IOCTL = 16,
         WINDOW_SYS_PREAD = 17, WINDOW_SYS_MADVISE = 28, WINDOW_SYS_GETPID = 39, WINDOW_SYS_FCNTL = 72,
         WINDOW_SYS_FTRUNCATE = 77, WINDOW_SYS_OPENAT = 257, WINDOW_SYS_MKDIRAT = 258, WINDOW_SYS_PPOLL = 271,
-        WINDOW_SYS_MEMFD = 319
+        WINDOW_SYS_MEMFD = 319, WINDOW_SYS_READLINKAT = 267
 };
 #else
 enum
@@ -1952,7 +1952,7 @@ enum
         WINDOW_SYS_OPENAT = 56, WINDOW_SYS_CLOSE = 57, WINDOW_SYS_LSEEK = 62, WINDOW_SYS_READ = 63,
         WINDOW_SYS_WRITE = 64, WINDOW_SYS_PREAD = 67, WINDOW_SYS_PPOLL = 73, WINDOW_SYS_FSTAT = 80,
         WINDOW_SYS_GETPID = 172, WINDOW_SYS_MUNMAP = 215, WINDOW_SYS_MMAP = 222, WINDOW_SYS_MADVISE = 233,
-        WINDOW_SYS_MEMFD = 279
+        WINDOW_SYS_MEMFD = 279, WINDOW_SYS_READLINKAT = 78
 };
 #endif
 
@@ -3092,6 +3092,112 @@ fail:
 }
 
 static struct windows *windows_board_map(void) { return windows_board_at(WINDOWS_TABLE); }
+
+/*
+        The table for a program that trusts what it says (the capture engine's sinks, the sound server's shares): a bowl's program is
+        the machine's root to the file system and can write in /run/moonwater, so the table's link is followed only to a process
+        that is the compositor, of this program's own user namespace; the table is opened by that /proc path, which no program can
+        replace, and the link is looked at again every second or when it fails. Null when it is not the compositor's.
+*/
+#define WINDOWS_UID_BOWL 0x40000000u // a bowl's program, to the sound server and the shares: this and its user namespace's inode
+
+/*
+        The user namespace a process is of, as a bowl: the inode of the outermost namespace under this program's own that holds it (the
+        bowl's, whatever a sandbox inside the bowl made under it: Chromium's processes are each in one of their own), this program's own
+        when the process is of it, 0 when it cannot be read. Walked up with NS_GET_PARENT, at most 32 levels (the kernel's own most).
+*/
+static unsigned long windows_userns(const char *pid)
+{
+        char path[48];
+        unsigned long st[18], own = 0, inode = 0;
+        long fd;
+
+        memory_copy(path, "/proc/self/ns/user", 19);
+        if ((fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0)) < 0)
+                return 0;
+        if (window_call(WINDOW_SYS_FSTAT, fd, (long)st, 0, 0, 0, 0) >= 0)
+                own = st[1];
+        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+        memory_copy(path, "/proc/", 7);
+        string_append_bounded((string_address)path, (string_address)pid, sizeof path);
+        string_append_bounded((string_address)path, (string_address) "/ns/user", sizeof path);
+        if (!own || (fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0)) < 0)
+                return 0;
+        for (int depth = 0; depth < 32; depth++)
+        {
+                long parent;
+
+                if (window_call(WINDOW_SYS_FSTAT, fd, (long)st, 0, 0, 0, 0) < 0)
+                        break;
+                inode = st[1];
+                if (inode == own)
+                        break;
+                parent = window_call(WINDOW_SYS_IOCTL, fd, 0xb702, 0, 0, 0, 0); // NS_GET_PARENT
+                if (parent < 0)
+                        break;
+                if (window_call(WINDOW_SYS_FSTAT, parent, (long)st, 0, 0, 0, 0) < 0 || st[1] == own)
+                {
+                        window_call(WINDOW_SYS_CLOSE, parent, 0, 0, 0, 0, 0);
+                        break;
+                }
+                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                fd = parent;
+        }
+        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+        return inode;
+}
+
+/*
+        A program's id as the sound server and the shares know it: for a process of another user namespace (a bowl's, whatever uid it
+        says it is: the session bus is told its uid inside the bowl), that bowl's; else its uid.
+*/
+static unsigned int windows_peer_uid(unsigned int pid, unsigned int uid)
+{
+        char text[24];
+        unsigned long own = windows_userns("self"), theirs;
+
+        windows_num_path(text, sizeof text, "", pid, "");
+        theirs = windows_userns(text);
+        return !theirs || theirs == own ? uid : WINDOWS_UID_BOWL | (unsigned int)(theirs & 0x3fffffffu);
+}
+
+static struct windows *windows_board_trusted(void)
+{
+        static char verified[64];
+        static unsigned long long looked;
+        unsigned long long now = clock_monotonic_nanoseconds();
+        struct windows *table;
+        char link[64], pid[16], path[48], comm[32];
+        long got, fd, n = 0;
+
+        if (verified[0] && now - looked < 1000000000ull && (table = windows_board_at(verified)))
+                return table;
+        verified[0] = 0, looked = now;
+        got = window_call(WINDOW_SYS_READLINKAT, -100, (long)WINDOWS_TABLE, (long)link, sizeof link - 1, 0, 0);
+        if (got <= 10 || got >= (long)sizeof link)
+                return null;
+        link[got] = 0;
+        if (memory_compare(link, "/proc/", 6))
+                return null;
+        while (n < 15 && link[6 + n] >= '0' && link[6 + n] <= '9')
+                pid[n] = link[6 + n], n++;
+        pid[n] = 0;
+        if (!n || memory_compare(link + 6 + n, "/fd/", 4))
+                return null;
+        memory_copy(path, "/proc/", 7);
+        string_append_bounded((string_address)path, (string_address)pid, sizeof path);
+        string_append_bounded((string_address)path, (string_address) "/comm", sizeof path);
+        fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0); // O_RDONLY | O_CLOEXEC
+        got = fd >= 0 ? system_read_retry((positive)fd, comm, sizeof comm - 1) : -1;
+        if (fd >= 0)
+                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+        if (got != 11 || memory_compare(comm, "compositor\n", 11) || !windows_userns("self") || windows_userns(pid) != windows_userns("self"))
+                return null;
+        string_copy_bounded((p8 *)verified, (string_address)link, sizeof verified);
+        if (!(table = windows_board_at(verified)))
+                verified[0] = 0;
+        return table;
+}
 
 static long windows_take(struct window_row *own)
 {

@@ -113,68 +113,10 @@ static unsigned castbus_cookie(void *context)
 static const struct pwire_host castbus_pwire = {0, sessionbus_alloc, sessionbus_release, castbus_now_ns, castbus_eventfd, castbus_signal,
                                                 castbus_memfd, castbus_unmap, castbus_close, castbus_cookie};
 
-/*
-        The compositor's table, or null. Its path is a link to the compositor's memfd (/proc/PID/fd/N), and a bowl's program can
-        write in /run/moonwater (it is the machine's root in a user namespace of its own), so the link is followed only to a
-        process that is the compositor, of this process's own user namespace; the table is opened by that /proc path, which no
-        program can replace, and the path is looked at again every second or when it fails.
-*/
-static unsigned long castbus_userns(const char *pid)
-{
-        char path[48], link[64];
-        unsigned long inode = 0;
-        long got;
-
-        memory_copy(path, "/proc/", 7);
-        string_append_bounded((string_address)path, (string_address)pid, sizeof path);
-        string_append_bounded((string_address)path, (string_address) "/ns/user", sizeof path);
-        got = sessionbus_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)link, sizeof link - 1, 0, 0);
-        for (long at = 0; at < got; at++)
-                if (link[at] >= '0' && link[at] <= '9')
-                        inode = inode * 10 + (unsigned long)(link[at] - '0');
-        return got > 0 ? inode : 0;
-}
-
+// The compositor's table, followed only to the compositor (window.c's windows_board_trusted), or null.
 static struct windows *castbus_table(void)
 {
-        static char verified[64];
-        static long looked;
-        long now = sessionbus_now(0);
-        struct windows *table;
-
-        if (verified[0] && now - looked < 1000 && (table = windows_board_at(verified)))
-                return table;
-        verified[0] = 0, looked = now;
-        {
-                char link[64], pid[16], path[48], comm[32];
-                long got = sessionbus_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, (positive)link, sizeof link - 1, 0, 0), fd;
-                long n = 0;
-
-                if (got <= 6 || got >= (long)sizeof link)
-                        return null;
-                link[got] = 0;
-                if (memory_compare(link, "/proc/", 6))
-                        return null;
-                while (n < 15 && link[6 + n] >= '0' && link[6 + n] <= '9')
-                        pid[n] = link[6 + n], n++;
-                pid[n] = 0;
-                if (!n || memory_compare(link + 6 + n, "/fd/", 4))
-                        return null;
-                memory_copy(path, "/proc/", 7);
-                string_append_bounded((string_address)path, (string_address)pid, sizeof path);
-                string_append_bounded((string_address)path, (string_address) "/comm", sizeof path);
-                fd = sessionbus_call(syscall(openat), (positive)AT_FDCWD, (positive)path, O_RDONLY | O_CLOEXEC, 0, 0, 0);
-                got = fd >= 0 ? system_read_retry((positive)fd, comm, sizeof comm - 1) : -1;
-                if (fd >= 0)
-                        system_close((int)fd);
-                if (got != 11 || memory_compare(comm, "compositor\n", 11) || castbus_userns(pid) != castbus_userns("self") || !castbus_userns("self"))
-                        return null;
-                string_copy_bounded((p8 *)verified, (string_address)link, sizeof verified);
-        }
-        table = windows_board_at(verified);
-        if (!table)
-                verified[0] = 0;
-        return table;
+        return windows_board_trusted();
 }
 
 // The compositor rung: it looks at the casts again (the clipboard's door is its doorbell for them).
@@ -317,7 +259,9 @@ static int castbus_pick(void *context, const struct dbus_cast_ask *ask)
                 for (int k = 0; k < CASTBUS_PER; k++)
                         s->link[k].pw = -1, s->link[k].fd = -1;
                 memory_zero(row, sizeof(*row));
-                row->ticket = (unsigned int)ask->ticket, row->pid = (unsigned int)ask->pid, row->uid = (unsigned int)ask->uid;
+                // the uid as the sound server knows it (a bowl's program, uid 0 here, by its user namespace): what a share's sound is for
+                row->ticket = (unsigned int)ask->ticket, row->pid = (unsigned int)ask->pid;
+                row->uid = windows_peer_uid((unsigned int)ask->pid, (unsigned int)ask->uid);
                 row->types = ask->types, row->cursor = ask->cursor, row->ring_fd = -1, row->latest = ~0u;
                 castbus_name(ask->pid, row->app, sizeof row->app);
                 __atomic_store_n(&row->state, WINDOWS_CAST_ASKED, __ATOMIC_RELEASE);

@@ -7013,6 +7013,7 @@ LANGUAGE_ID(share_screen_of, "Screen %1$d, %2$s") \
 LANGUAGE_ID(share_stop, "Stop sharing %1$s with %2$s") \
 LANGUAGE_ID(share_stop_all, "Stop all sharing") \
 LANGUAGE_ID(share_the_screen, "the screen") \
+LANGUAGE_ID(share_with_sound, "%s, with its sound") \
 LANGUAGE_ID(software_automatic, "Automatic") \
 LANGUAGE_ID(software_cannot_start, "The command could not start") \
 LANGUAGE_ID(software_confirm_remove, "remove %s") \

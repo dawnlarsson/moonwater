@@ -13,7 +13,7 @@
         (STOPPED: the compositor drops the ring, the bus closes the session and the program is told it ended).
 
             share [-a] [-f FONT.ttf] [-b BOLD.ttf]
-            share --pick screen N | --pick scene N | --pick window ROW|WORD | --refuse | --stop     the same, without the window: the oldest ask
+            share --pick screen N [sound] | --pick scene N [sound] | --pick window ROW|WORD | --refuse | --stop     the same, without the window: the oldest ask
                                                                              answered, or every share stopped (for the keys and checks)
 
         Dawn Larsson - Apache-2.0 license
@@ -26,7 +26,8 @@
 #define SHARE_ID_SCREEN 1                          // a screen is id SHARE_ID_SCREEN + its index
 #define SHARE_ID_WINDOW (SHARE_ID_SCREEN + WINDOWS_OUTPUTS) // a window is SHARE_ID_WINDOW + its place in the list
 #define SHARE_ID_SCENE (SHARE_ID_WINDOW + UI_MENU_ITEMS)   // a Scene is SHARE_ID_SCENE + its place in the table's list
-#define SHARE_ID_REFUSE (SHARE_ID_SCENE + WINDOWS_CAST_SCENES)
+#define SHARE_ID_SOUND (SHARE_ID_SCENE + WINDOWS_CAST_SCENES) // a screen with its sound is SHARE_ID_SOUND + its index
+#define SHARE_ID_REFUSE (SHARE_ID_SOUND + WINDOWS_OUTPUTS)
 #define SHARE_ID_STOP (SHARE_ID_REFUSE + 1)        // a share is SHARE_ID_STOP + its row
 #define SHARE_ID_STOP_ALL (SHARE_ID_STOP + WINDOWS_CASTS)
 
@@ -79,7 +80,8 @@ static b32 share_offered(const struct windows address_to table, unsigned int row
 }
 
 // An ask answered: the pick (kind and target, the window's program with it) or the refusal, if the row still asks with that ticket.
-static b32 share_answer(struct windows address_to table, int at, unsigned int ticket, unsigned int kind, unsigned int target, unsigned int target_pid)
+static b32 share_answer(struct windows address_to table, int at, unsigned int ticket, unsigned int kind, unsigned int target, unsigned int target_pid,
+                        unsigned int sound)
 {
         struct windows_cast address_to row;
         unsigned int asked = WINDOWS_CAST_ASKED;
@@ -89,7 +91,7 @@ static b32 share_answer(struct windows address_to table, int at, unsigned int ti
         row = &table->casts[at];
         if (row->ticket != ticket)
                 return false;
-        row->kind = kind, row->target = target, row->target_pid = target_pid;
+        row->kind = kind, row->target = target, row->target_pid = target_pid, row->sound = kind ? sound : 0;
         if (!__atomic_compare_exchange_n(&row->state, &asked, kind ? WINDOWS_CAST_PICKED : WINDOWS_CAST_REFUSED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
                 return false;
         share_ring(table);
@@ -134,6 +136,9 @@ static void share_build(void)
                         else
                                 language_format(share.text[n], SHARE_TEXT, WORDS(share_screen_of), (long)(k + 1), (long)table->output_name[k]);
                         ui_popmenu_add(&share.menu, share.text[n], null, UI_MENU_LITERAL, SHARE_ID_SCREEN + (int)k), n++;
+                        // and with what plays: the program may then record the sound's mix while the share lasts, and no longer
+                        language_format(share.text[n], SHARE_TEXT, WORDS(share_with_sound), (long)share.text[n - 1]);
+                        ui_popmenu_add(&share.menu, share.text[n], null, UI_MENU_LITERAL, SHARE_ID_SOUND + (int)k), n++;
                 }
                 // a Scene is a screen's worth of windows, so it is offered where a screen is: shown here whichever Scene the person is on
                 for (unsigned int k = 0; (row->types & WINDOWS_CAST_MONITOR) && k < table->cast_scenes && k < WINDOWS_CAST_SCENES && n < UI_MENU_ITEMS - 4; k++)
@@ -215,14 +220,16 @@ static b32 share_event(const struct window_event address_to event)
         {
                 // a press anywhere but on it, or Escape, is Don't share: nothing is shared without a pick
                 if (answer >= SHARE_ID_SCREEN && answer < SHARE_ID_WINDOW)
-                        share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCREEN, (unsigned int)(answer - SHARE_ID_SCREEN), 0);
+                        share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCREEN, (unsigned int)(answer - SHARE_ID_SCREEN) % WINDOWS_OUTPUTS, 0, 0);
                 else if (answer >= SHARE_ID_SCENE && answer < SHARE_ID_SCENE + WINDOWS_CAST_SCENES)
-                        share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[answer - SHARE_ID_SCENE], 0);
+                        share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[answer - SHARE_ID_SCENE], 0, 0);
                 else if (answer >= SHARE_ID_WINDOW && answer < SHARE_ID_WINDOW + share.count)
                         share_answer(table, share.asked, share.ticket, WINDOWS_CAST_WINDOW, (unsigned int)share.window[answer - SHARE_ID_WINDOW],
-                                     share.window_pid[answer - SHARE_ID_WINDOW]);
+                                     share.window_pid[answer - SHARE_ID_WINDOW], 0);
+                else if (answer >= SHARE_ID_SOUND && answer < SHARE_ID_SOUND + WINDOWS_OUTPUTS)
+                        share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCREEN, (unsigned int)(answer - SHARE_ID_SOUND), 0, 1);
                 else
-                        share_answer(table, share.asked, share.ticket, 0, 0, 0);
+                        share_answer(table, share.asked, share.ticket, 0, 0, 0, 0);
                 share.answered = true;
                 return false;
         }
@@ -294,21 +301,21 @@ static b32 share_command(positive at)
                 return log_flush(), 1;
         }
         if (string_equals(verb, (string_address) "--refuse"))
-                return share_answer(table, asked, table->casts[asked].ticket, 0, 0, 0) ? 0 : 1;
+                return share_answer(table, asked, table->casts[asked].ticket, 0, 0, 0, 0) ? 0 : 1;
         if (string_equals(verb, (string_address) "--pick") && at + 2 < (positive)program_argument_count())
         {
                 string_address what = program_argument(at + 1), number = program_argument(at + 2);
-                unsigned int n = 0;
+                unsigned int n = 0, sound = at + 3 < (positive)program_argument_count() && string_equals(program_argument(at + 3), (string_address) "sound");
 
                 for (positive k = 0; number[k] >= '0' && number[k] <= '9' && n < 1000000; k++)
                         n = n * 10 + (unsigned int)(number[k] - '0');
                 if (string_equals(what, (string_address) "screen"))
-                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCREEN, n, 0) ? 0 : 1;
+                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCREEN, n, 0, sound) ? 0 : 1;
                 // a Scene by its place among the first screen's (1 the first)
                 if (string_equals(what, (string_address) "scene"))
                         for (unsigned int k = 0; k < table->cast_scenes && k < WINDOWS_CAST_SCENES; k++)
                                 if (table->cast_scene_screen[k] == 0 && table->cast_scene_place[k] == n)
-                                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[k], 0) ? 0 : 1;
+                                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[k], 0, sound) ? 0 : 1;
                 // a window by its row, or the first offered whose app id or title holds the word
                 if (string_equals(what, (string_address) "window") && !(number[0] >= '0' && number[0] <= '9'))
                         for (unsigned int r = 0; r < windows_rows(table); r++)
@@ -319,9 +326,9 @@ static b32 share_command(positive at)
                                         break;
                                 }
                 if (string_equals(what, (string_address) "window") && n < windows_rows(table) && share_offered(table, n, ~0u))
-                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_WINDOW, n, table->pid[n]) ? 0 : 1;
+                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_WINDOW, n, table->pid[n], 0) ? 0 : 1;
         }
-        string_format(log, (string_address) "share: --pick screen N | --pick scene N | --pick window ROW|WORD | --refuse | --stop\n");
+        string_format(log, (string_address) "share: --pick screen N [sound] | --pick scene N [sound] | --pick window ROW|WORD | --refuse | --stop\n");
         return log_flush(), 2;
 }
 
@@ -346,7 +353,7 @@ static b32 share_main()
         }
         ui_app_run(&share_app);
         if (share.asked >= 0 && !share.answered)
-                share_answer(share.own.table, share.asked, share.ticket, 0, 0, 0);
+                share_answer(share.own.table, share.asked, share.ticket, 0, 0, 0, 0);
         return 0;
 }
 
