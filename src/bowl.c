@@ -3995,6 +3995,7 @@ enum
         BOWL_OPT_LANGUAGE,
         BOWL_OPT_MAILBOX,
         BOWL_OPT_GLTHREAD,
+        BOWL_OPT_UNASKED,
         BOWL_OPT_GATES
 };
 
@@ -4034,6 +4035,9 @@ static string_address address_to bowl_environment(
             {"MESA_VK_WSI_PRESENT_MODE", "MESA_VK_WSI_PRESENT_MODE=mailbox",
              BOWL_OPT_MAILBOX, false},
             {"mesa_glthread", "mesa_glthread=true", BOWL_OPT_GLTHREAD, false},
+            // Nobody to ask (no terminal on standard input: an install from the software window, a profile's, a script's):
+            // debconf is told so, rather than trying Dialog, Readline and Teletype in turn and saying each one failed.
+            {"DEBIAN_FRONTEND", "DEBIAN_FRONTEND=noninteractive", BOWL_OPT_UNASKED, false},
         };
         bool have[BOWL_VARS] = {false};
         bool have_opt[array_count(optional_env)] = {false};
@@ -4051,6 +4055,7 @@ static string_address address_to bowl_environment(
         offer[BOWL_OPT_LANGUAGE] = language != null;
         offer[BOWL_OPT_MAILBOX] = bowl_wa_mailbox;
         offer[BOWL_OPT_GLTHREAD] = bowl_wa_glthread;
+        offer[BOWL_OPT_UNASKED] = !stream_is_terminal(0);
 
         bowl_session_fill();
 
