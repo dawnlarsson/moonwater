@@ -1,0 +1,35 @@
+#!/bin/sh
+# On a boot from the stick (session.rover's stick-debug rule): the session's story copied onto the stick every five seconds for ten
+# minutes, as moonwater-debug/BOOT/ on the stick's FAT partition, so the stick carries it to another machine (plug it into a Mac and
+# read it there). compositor.log (the compositor's input probe is in it), the kernel's log, the input devices, moonwater debug and
+# moonwater device list. Only a partition on a USB device that holds EFI/BOOT/BOOTX64.EFI is written: a machine's own disks are never
+# mounted (their system partitions hold the same file). Mounted for each copy and let go after it, so the stick can be pulled at any
+# time.
+(
+  m=/run/moonwater/stick-debug
+  mkdir -p $m || exit 0
+  boot=$(cut -c1-8 /proc/sys/kernel/random/boot_id 2>/dev/null)
+  [ -n "$boot" ] || boot=boot
+  i=0
+  while [ $i -lt 120 ]; do
+    for p in /sys/class/block/*; do
+      [ -e "$p/partition" ] || continue
+      case $(readlink -f "$p") in */usb*) ;; *) continue ;; esac
+      mount -t vfat -o rw,noatime "/dev/${p##*/}" $m 2>/dev/null || continue
+      if [ -e $m/EFI/BOOT/BOOTX64.EFI ]; then
+        o=$m/moonwater-debug/$boot
+        mkdir -p $o
+        cp /run/moonwater/compositor.log $o/compositor.log 2>/dev/null
+        dmesg > $o/dmesg.txt 2>&1
+        cat /proc/bus/input/devices > $o/input-devices.txt 2>&1
+        moonwater debug > $o/debug.txt 2>&1
+        moonwater device list > $o/devices.txt 2>&1
+        date > $o/written-at.txt
+        sync
+      fi
+      umount $m 2>/dev/null
+    done
+    sleep 5
+    i=$((i + 1))
+  done
+) < /dev/null > /dev/null 2>&1 &

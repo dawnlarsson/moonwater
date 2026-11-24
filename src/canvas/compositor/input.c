@@ -1911,6 +1911,15 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         return;
         if (bit)
                 compositor.held[at] = value ? (unsigned char)(compositor.held[at] | bit) : (unsigned char)(compositor.held[at] & ~bit);
+        if (compositor_probe_keys < COMPOSITOR_PROBE && value != 2)
+        {
+                compositor_probe_keys++;
+                string_format(log, "compositor: probe key %p %s device %p held %p modifiers %p focus %b keys to %b grab %b drag %b\n", (positive)code,
+                              value ? "down" : "up", (positive)at, (positive)compositor.held[at < COMPOSITOR_INPUTS ? at : COMPOSITOR_INPUTS],
+                              (positive)compositor_modifiers(), (bipolar)compositor.focus, (bipolar)compositor.keys_to, (bipolar)compositor.grab,
+                              (bipolar)compositor.drag);
+                log_flush();
+        }
         if (compositor_logo_tap(&compositor.logo_alone, bit, value,
                                 (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_ALTGR)) != 0))
                 compositor_logo_act();
@@ -2815,6 +2824,19 @@ static void compositor_button(unsigned int code, int down)
         }
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+        int probed = down && compositor_probe_presses < COMPOSITOR_PROBE;
+
+        if (probed)
+        {
+                compositor_probe_presses++;
+                string_format(log, "compositor: probe press %p at %b,%b under %b tab %b alt %b modifiers %p focus %b grab %b drag %b resize %b "
+                                   "wayland held %b\n",
+                              (positive)code, (bipolar)compositor.pointer_x, (bipolar)compositor.pointer_y, (bipolar)under, (bipolar)tab, (bipolar)alt,
+                              (positive)compositor_modifiers(), (bipolar)compositor.focus, (bipolar)compositor.grab, (bipolar)compositor.drag,
+                              (bipolar)compositor.resize, (bipolar)compositor_wl_held());
+                compositor_probe_held();
+                log_flush();
+        }
         if (compositor_band_hand(code, down))
                 return;
         if (!down) { compositor_release(code, 1); return; }
@@ -2833,8 +2855,18 @@ static void compositor_button(unsigned int code, int down)
         if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
             !compositor_in_row(compositor.focus, compositor.pointer_x, compositor.pointer_y))
                 compositor_close(compositor.focus);
-        if (compositor_button_band(tab, code, up) || under < 0 || compositor_button_window(under, code, alt))
-                return;
+        {
+                //      Which hand took the press, for the probe: 1 the panel, 2 nothing under it, 3 the window's frame (a move, a resize,
+                //      the close box), 0 the window's program.
+                int taken = compositor_button_band(tab, code, up) ? 1 : under < 0 ? 2 : compositor_button_window(under, code, alt) ? 3 : 0;
+
+                if (probed)
+                        string_format(log, "compositor: probe   press went to %s; drag %b resize %b grab %b\n",
+                                      taken == 1 ? "the panel" : taken == 2 ? "nothing" : taken == 3 ? "the frame (move, resize or close)" : "the program",
+                                      (bipolar)compositor.drag, (bipolar)compositor.resize, (bipolar)compositor.grab), log_flush();
+                if (taken)
+                        return;
+        }
         if (compositor_in_row(under, compositor.pointer_x, compositor.pointer_y))
                 compositor_button_deliver(under, code, 1, 1);
 }
@@ -4347,7 +4379,12 @@ static void compositor_input_dropped(unsigned int at, positive now)
                 }
                 for (unsigned int code = 0; code < 256; code++)
                         if (compositor_held_bit(code) && compositor_input_down(one, code))
+                        {
+                                if (!(compositor.held[device] & compositor_held_bit(code)))
+                                        string_format(log, "compositor: probe held seeded: device %p key %p (its state says down, no press read)\n",
+                                                      (positive)device, (positive)code);
                                 compositor.held[device] |= (unsigned char)compositor_held_bit(code);
+                        }
         }
         for (unsigned int code = 0; code < 256; code++)
                 if ((compositor.keys_down[code >> 3] >> (code & 7) & 1) && !compositor_input_down(any, code))
