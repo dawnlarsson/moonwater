@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language es
 @name Español
 @translated machine
@@ -322,9 +323,9 @@ settings_card_back	db52	Escape o un clic vuelve atrás
 settings_card_stopped	e24d	detenido: Escape o un clic vuelve atrás
 settings_column_access	ae0b	Acceso
 settings_column_files	1b30	Archivos
+settings_column_input	e11b	Entrada
 settings_column_log	7bf1	Registro
 settings_column_on	7df0	Activo
-settings_column_pad	ff4a	Mando
 settings_column_run	e66a	Ejecutar
 settings_column_security	21db	Seguridad
 settings_column_shell	69a1	Shell
@@ -381,6 +382,8 @@ settings_link_disabled	08dd	Desactivado globalmente en esta máquina
 settings_link_files	b058	Acceso al sistema de archivos
 settings_link_files_about	a65e	Explorar, subir y descargar archivos
 settings_link_group	902c	Grupo
+settings_link_input	b954	Dispositivos de entrada
+settings_link_input_about	4f2f	Usar sus mandos aquí, como si estuvieran conectados
 settings_link_latency	5ef9	Latencia
 settings_link_log	e57a	Registro del kernel
 settings_link_log_about	f0d9	Transmitir los registros del sistema
@@ -388,8 +391,6 @@ settings_link_mismatch	5778	La clave no coincide
 settings_link_no_key	9963	aún sin clave
 settings_link_offline	37c8	Sin conexión
 settings_link_online	88aa	En línea
-settings_link_pad	09db	Mandos
-settings_link_pad_about	4f2f	Usar sus mandos aquí, como si estuvieran conectados
 settings_link_run	9874	Ejecutar comandos
 settings_link_run_about	ba14	Ejecutar comandos remotos individuales
 settings_link_self	bc70	esta máquina

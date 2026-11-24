@@ -327,15 +327,17 @@ static const link_grant link_grants[] = {
     {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0, 0},
     {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_FS},
     {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0, 0},
-    {"pad", WATERLINK_MAY_PAD, LINK_ASK_PAD, 0, 0},
+    {"input", WATERLINK_MAY_PAD, LINK_ASK_PAD, 0, 0},
 };
 
-// The grant a word names, or 0.
+// The grant a word names, or 0. pad is input's old word, still taken.
 static p32 link_grant_bit(string_address word)
 {
         positive at = string_table_find(word, link_grants, sizeof link_grants[0],
                                         array_count(link_grants));
 
+        if (at == array_count(link_grants) && string_equals(word, "pad"))
+                return WATERLINK_MAY_PAD;
         return at < array_count(link_grants) ? link_grants[at].bit : 0;
 }
 
@@ -617,8 +619,7 @@ static bipolar link_peers_save(link_peers address_to peers)
                                  true);
 }
 
-#define LINK_POLICY_ALL (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG | \
-                         WATERLINK_MAY_PAD)
+#define LINK_POLICY_ALL WATERLINK_MAY_ALL
 
 static p32 link_policy_load(void)
 {

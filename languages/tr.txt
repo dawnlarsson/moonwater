@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language tr
 @name Türkçe
 @translated machine
@@ -322,9 +323,9 @@ settings_card_back	db52	Escape veya bir tıklama geri döner
 settings_card_stopped	e24d	durduruldu: Escape veya bir tıklama geri döner
 settings_column_access	ae0b	Erişim
 settings_column_files	1b30	Dosyalar
+settings_column_input	e11b	Giriş
 settings_column_log	7bf1	Günlük
 settings_column_on	7df0	Açık
-settings_column_pad	ff4a	Kumanda
 settings_column_run	e66a	Çalıştır
 settings_column_security	21db	Güvenlik
 settings_column_shell	69a1	Kabuk
@@ -381,6 +382,8 @@ settings_link_disabled	08dd	Bu makinede genel olarak devre dışı
 settings_link_files	b058	Dosya sistemi erişimi
 settings_link_files_about	a65e	Dosyalara göz atma, yükleme ve indirme
 settings_link_group	902c	Grup
+settings_link_input	b954	Giriş aygıtları
+settings_link_input_about	4f2f	Oyun kumandalarını burada, takılıymış gibi kullanın
 settings_link_latency	5ef9	Gecikme
 settings_link_log	e57a	Çekirdek günlüğü
 settings_link_log_about	f0d9	Sistem günlüklerini canlı aktarma
@@ -388,8 +391,6 @@ settings_link_mismatch	5778	Anahtar uyuşmuyor
 settings_link_no_key	9963	henüz anahtar yok
 settings_link_offline	37c8	Çevrim dışı
 settings_link_online	88aa	Çevrim içi
-settings_link_pad	09db	Oyun kumandaları
-settings_link_pad_about	4f2f	Oyun kumandalarını burada, takılıymış gibi kullanın
 settings_link_run	9874	Komut çalıştırma
 settings_link_run_about	ba14	Tek tek uzak komutlar çalıştırma
 settings_link_self	bc70	bu makine

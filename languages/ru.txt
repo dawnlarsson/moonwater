@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language ru
 @name Русский
 @translated machine
@@ -322,9 +323,9 @@ settings_card_back	db52	Escape или щелчок — назад
 settings_card_stopped	e24d	остановлено: Escape или щелчок — назад
 settings_column_access	ae0b	Доступ
 settings_column_files	1b30	Файлы
+settings_column_input	e11b	Ввод
 settings_column_log	7bf1	Журнал
 settings_column_on	7df0	Вкл.
-settings_column_pad	ff4a	Геймпад
 settings_column_run	e66a	Запуск
 settings_column_security	21db	Защита
 settings_column_shell	69a1	Оболочка
@@ -381,6 +382,8 @@ settings_link_disabled	08dd	Отключено глобально на этом 
 settings_link_files	b058	Доступ к файловой системе
 settings_link_files_about	a65e	Просмотр, отправка и загрузка файлов
 settings_link_group	902c	Группа
+settings_link_input	b954	Устройства ввода
+settings_link_input_about	4f2f	Играть его геймпадами здесь, как будто они подключены
 settings_link_latency	5ef9	Задержка
 settings_link_log	e57a	Журнал ядра
 settings_link_log_about	f0d9	Потоковая передача системных журналов
@@ -388,8 +391,6 @@ settings_link_mismatch	5778	Ключ не совпадает
 settings_link_no_key	9963	ключа ещё нет
 settings_link_offline	37c8	Не в сети
 settings_link_online	88aa	В сети
-settings_link_pad	09db	Геймпады
-settings_link_pad_about	4f2f	Играть его геймпадами здесь, как будто они подключены
 settings_link_run	9874	Выполнение команд
 settings_link_run_about	ba14	Выполнение отдельных удалённых команд
 settings_link_self	bc70	этот компьютер

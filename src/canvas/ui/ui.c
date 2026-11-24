@@ -6770,9 +6770,9 @@ LANGUAGE_ID(settings_card_back, "Escape or a press goes back") \
 LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
 LANGUAGE_ID(settings_column_access, "Access") \
 LANGUAGE_ID(settings_column_files, "Files") \
+LANGUAGE_ID(settings_column_input, "Input") \
 LANGUAGE_ID(settings_column_log, "Log") \
 LANGUAGE_ID(settings_column_on, "On") \
-LANGUAGE_ID(settings_column_pad, "Pad") \
 LANGUAGE_ID(settings_column_run, "Run") \
 LANGUAGE_ID(settings_column_security, "Security") \
 LANGUAGE_ID(settings_column_shell, "Shell") \
@@ -6829,6 +6829,8 @@ LANGUAGE_ID(settings_link_disabled, "Disabled globally on this machine") \
 LANGUAGE_ID(settings_link_files, "Filesystem access") \
 LANGUAGE_ID(settings_link_files_about, "Browse, upload, and download files") \
 LANGUAGE_ID(settings_link_group, "Group") \
+LANGUAGE_ID(settings_link_input, "Input devices") \
+LANGUAGE_ID(settings_link_input_about, "Play its game pads here, as if plugged in") \
 LANGUAGE_ID(settings_link_latency, "Latency") \
 LANGUAGE_ID(settings_link_log, "Kernel log") \
 LANGUAGE_ID(settings_link_log_about, "Stream system logs") \
@@ -6836,8 +6838,6 @@ LANGUAGE_ID(settings_link_mismatch, "Key mismatch") \
 LANGUAGE_ID(settings_link_no_key, "no key yet") \
 LANGUAGE_ID(settings_link_offline, "Offline") \
 LANGUAGE_ID(settings_link_online, "Online") \
-LANGUAGE_ID(settings_link_pad, "Game pads") \
-LANGUAGE_ID(settings_link_pad_about, "Play its game pads here, as if plugged in") \
 LANGUAGE_ID(settings_link_run, "Run commands") \
 LANGUAGE_ID(settings_link_run_about, "Execute single remote commands") \
 LANGUAGE_ID(settings_link_self, "this machine") \

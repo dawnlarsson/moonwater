@@ -272,18 +272,22 @@ struct waterlink_frame {
         refuse. The price of being right here is known and small: an urgent
         frame costs 2516 cycles where a bulk one costs 461. */
 
-/*      What a peer may do, granted one at a time and starting at none: each
-        is a decision somebody made, by the name `moonwater link allow` takes,
-        and a request asks for the one it needs. The values are what the peers
+/*      What a peer may do, each grant by the name `moonwater link allow` and
+        `link deny` take, and a request asks for the one it needs. A machine
+        linked starts with every grant (the owner's call, 2026-11-24: a
+        pairing is the decision, and a grant left off was one more step for
+        nothing), and is denied one by name. The values are what the peers
         file holds, which a bit nobody grants any more (1, 8, 64) may still
-        have set: nothing reads it. */
+        have set: nothing reads it. The input grant is the bit that was pad's,
+        so a peer granted pad keeps it. */
 #define WATERLINK_MAY_RUN 0x0002u   // one command, no terminal
 #define WATERLINK_MAY_SHELL 0x0004u // a terminal
 #define WATERLINK_MAY_FILES 0x0010u // push and pull
 #define WATERLINK_MAY_LOG 0x0020u   // follow the kernel log
-#define WATERLINK_MAY_PAD 0x0080u   // a game pad of its, made here (pad.c)
+#define WATERLINK_MAY_PAD 0x0080u   // input: a game pad of its, made here (pad.c)
+#define WATERLINK_MAY_ALL (WATERLINK_MAY_RUN | WATERLINK_MAY_SHELL | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG | WATERLINK_MAY_PAD)
 
-#define WATERLINK_MAY_DEFAULT 0u
+#define WATERLINK_MAY_DEFAULT WATERLINK_MAY_ALL
 
 /*      AES-128-GCM, and not 256: it is the key size lib.c carries in assembly
         on all three machines, with a bitsliced floor that a kernel build

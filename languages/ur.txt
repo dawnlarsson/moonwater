@@ -24,6 +24,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language ur
 @name اردو
 @translated machine
@@ -323,9 +324,9 @@ settings_card_back	db52	Escape یا کلک واپسی کے لیے
 settings_card_stopped	e24d	رک گیا: Escape یا کلک واپسی کے لیے
 settings_column_access	ae0b	رسائی
 settings_column_files	1b30	فائلیں
+settings_column_input	e11b	ان پٹ
 settings_column_log	7bf1	لاگ
 settings_column_on	7df0	آن
-settings_column_pad	ff4a	کنٹرولر
 settings_column_run	e66a	چلائیں
 settings_column_security	21db	سکیورٹی
 settings_column_shell	69a1	شیل
@@ -382,6 +383,8 @@ settings_link_disabled	08dd	اس کمپیوٹر پر عمومی طور پر غی
 settings_link_files	b058	فائل سسٹم تک رسائی
 settings_link_files_about	a65e	فائلیں براؤز، اپ لوڈ اور ڈاؤن لوڈ کریں
 settings_link_group	902c	گروپ
+settings_link_input	b954	ان پٹ ڈیوائسز
+settings_link_input_about	4f2f	اس کے کنٹرولرز یہاں ایسے استعمال کریں جیسے وہ لگے ہوں
 settings_link_latency	5ef9	تاخیر
 settings_link_log	e57a	کرنل لاگ
 settings_link_log_about	f0d9	سسٹم لاگز اسٹریم کریں
@@ -389,8 +392,6 @@ settings_link_mismatch	5778	کلید مطابقت نہیں رکھتی
 settings_link_no_key	9963	ابھی کوئی کلید نہیں
 settings_link_offline	37c8	آف لائن
 settings_link_online	88aa	آن لائن
-settings_link_pad	09db	کنٹرولرز
-settings_link_pad_about	4f2f	اس کے کنٹرولرز یہاں ایسے استعمال کریں جیسے وہ لگے ہوں
 settings_link_run	9874	کمانڈز چلائیں
 settings_link_run_about	ba14	الگ الگ ریموٹ کمانڈز چلائیں
 settings_link_self	bc70	یہ کمپیوٹر

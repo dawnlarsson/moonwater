@@ -9407,7 +9407,7 @@ static fn greetings(bipolar listener, p16 port)
                       !memory_compare(peers.peer[0].key, wls_client.public, 32) &&
                       string_equals(peers.peer[0].name, "machine-a") &&
                       peers.peer[0].group == wls_office.mark &&
-                      peers.peer[0].may == WATERLINK_MAY_DEFAULT &&
+                      peers.peer[0].may == link_nearby.groups.record[0].may &&
                       !memory_compare(peers.peer[0].address, wls_loopback, 16) &&
                       peers.peer[0].port == port);
         check("and greets it back, from this machine's key, as a member",
@@ -10441,7 +10441,7 @@ static fn renamed_greetings(bipolar listener, p16 port)
               peers.count == 1 && string_equals(peers.peer[0].name, "lab-pc") &&
                       !memory_compare(peers.peer[0].key, wls_client.public, 32) &&
                       peers.peer[0].group == wls_office.mark &&
-                      peers.peer[0].may == WATERLINK_MAY_DEFAULT &&
+                      peers.peer[0].may == link_nearby.groups.record[0].may &&
                       !memory_compare(peers.peer[0].address, wls_loopback, 16) &&
                       peers.peer[0].port == port);
         check("and the rename waits to be said by the turn that does",

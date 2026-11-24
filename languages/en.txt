@@ -297,9 +297,9 @@ settings_card_back	db52	Escape or a press goes back
 settings_card_stopped	e24d	stopped: Escape or a press goes back
 settings_column_access	ae0b	Access
 settings_column_files	1b30	Files
+settings_column_input	e11b	Input
 settings_column_log	7bf1	Log
 settings_column_on	7df0	On
-settings_column_pad	ff4a	Pad
 settings_column_run	e66a	Run
 settings_column_security	21db	Security
 settings_column_shell	69a1	Shell
@@ -356,6 +356,8 @@ settings_link_disabled	08dd	Disabled globally on this machine
 settings_link_files	b058	Filesystem access
 settings_link_files_about	a65e	Browse, upload, and download files
 settings_link_group	902c	Group
+settings_link_input	b954	Input devices
+settings_link_input_about	4f2f	Play its game pads here, as if plugged in
 settings_link_latency	5ef9	Latency
 settings_link_log	e57a	Kernel log
 settings_link_log_about	f0d9	Stream system logs
@@ -363,8 +365,6 @@ settings_link_mismatch	5778	Key mismatch
 settings_link_no_key	9963	no key yet
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
-settings_link_pad	09db	Game pads
-settings_link_pad_about	4f2f	Play its game pads here, as if plugged in
 settings_link_run	9874	Run commands
 settings_link_run_about	ba14	Execute single remote commands
 settings_link_self	bc70	this machine

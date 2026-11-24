@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language sv
 @name Svenska
 @translated machine
@@ -322,9 +323,9 @@ settings_card_back	db52	Escape eller ett klick går tillbaka
 settings_card_stopped	e24d	stoppad: Escape eller ett klick går tillbaka
 settings_column_access	ae0b	Åtkomst
 settings_column_files	1b30	Filer
+settings_column_input	e11b	Ingång
 settings_column_log	7bf1	Logg
 settings_column_on	7df0	På
-settings_column_pad	ff4a	Handkontroll
 settings_column_run	e66a	Kör
 settings_column_security	21db	Säkerhet
 settings_column_shell	69a1	Skal
@@ -381,6 +382,8 @@ settings_link_disabled	08dd	Avstängt globalt på den här maskinen
 settings_link_files	b058	Åtkomst till filsystemet
 settings_link_files_about	a65e	Bläddra, ladda upp och ladda ned filer
 settings_link_group	902c	Grupp
+settings_link_input	b954	Ingångsenheter
+settings_link_input_about	4f2f	Använd dess handkontroller här, som om de vore anslutna
 settings_link_latency	5ef9	Latens
 settings_link_log	e57a	Kärnlogg
 settings_link_log_about	f0d9	Strömma systemloggar
@@ -388,8 +391,6 @@ settings_link_mismatch	5778	Nyckeln stämmer inte
 settings_link_no_key	9963	ingen nyckel än
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
-settings_link_pad	09db	Handkontroller
-settings_link_pad_about	4f2f	Använd dess handkontroller här, som om de vore anslutna
 settings_link_run	9874	Köra kommandon
 settings_link_run_about	ba14	Köra enstaka fjärrkommandon
 settings_link_self	bc70	den här maskinen

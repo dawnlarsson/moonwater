@@ -450,7 +450,7 @@ static const struct { const char address_to word; unsigned int label, note; } se
     {"run",   LANGUAGE_settings_link_run,   LANGUAGE_settings_link_run_about},
     {"shell", LANGUAGE_settings_link_shell, LANGUAGE_settings_link_shell_about},
     {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
-    {"pad",   LANGUAGE_settings_link_pad,   LANGUAGE_settings_link_pad_about},
+    {"input", LANGUAGE_settings_link_input, LANGUAGE_settings_link_input_about},
 };
 // A machine linked is a row of columns: its name, its address, latency, traffic and group, and from SETTINGS_LINK_GRANT_COLUMN a check of each
 // grant in the order above. No fold: all it says is in its row, and its state is its dot (online) and its words (an offline one dim).
@@ -3157,7 +3157,7 @@ static struct ui_columns address_to settings_columns_for(int list)
             {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52, 52, 52},
              {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_traffic,
               LANGUAGE_settings_link_group, LANGUAGE_settings_column_on, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log,
-              LANGUAGE_settings_column_pad}},
+              LANGUAGE_settings_column_input}},
             // The startup list's: a program (or a command), its command, and a check that starts it; its order is the person's (no sort).
             {SETTINGS_STARTUP_COLUMNS, 0, {0, 220, 52}, {LANGUAGE_settings_startup_program, LANGUAGE_settings_startup_command, LANGUAGE_settings_column_on}},
         };

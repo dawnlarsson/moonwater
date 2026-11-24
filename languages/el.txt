@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language el
 @name Ελληνικά
 @translated machine
@@ -322,9 +323,9 @@ settings_card_back	db52	Το Escape ή ένα κλικ επιστρέφει
 settings_card_stopped	e24d	διακόπηκε: το Escape ή ένα κλικ επιστρέφει
 settings_column_access	ae0b	Πρόσβαση
 settings_column_files	1b30	Αρχεία
+settings_column_input	e11b	Είσοδος
 settings_column_log	7bf1	Καταγραφή
 settings_column_on	7df0	Ενεργό
-settings_column_pad	ff4a	Χειριστήριο
 settings_column_run	e66a	Εκτέλεση
 settings_column_security	21db	Ασφάλεια
 settings_column_shell	69a1	Κέλυφος
@@ -381,6 +382,8 @@ settings_link_disabled	08dd	Απενεργοποιημένο καθολικά σ
 settings_link_files	b058	Πρόσβαση στο σύστημα αρχείων
 settings_link_files_about	a65e	Περιήγηση, μεταφόρτωση και λήψη αρχείων
 settings_link_group	902c	Ομάδα
+settings_link_input	b954	Συσκευές εισόδου
+settings_link_input_about	4f2f	Χρήση των χειριστηρίων του εδώ, σαν να ήταν συνδεδεμένα
 settings_link_latency	5ef9	Καθυστέρηση
 settings_link_log	e57a	Αρχείο καταγραφής πυρήνα
 settings_link_log_about	f0d9	Ροή αρχείων καταγραφής συστήματος
@@ -388,8 +391,6 @@ settings_link_mismatch	5778	Το κλειδί δεν ταιριάζει
 settings_link_no_key	9963	δεν υπάρχει ακόμη κλειδί
 settings_link_offline	37c8	Εκτός σύνδεσης
 settings_link_online	88aa	Σε σύνδεση
-settings_link_pad	09db	Χειριστήρια
-settings_link_pad_about	4f2f	Χρήση των χειριστηρίων του εδώ, σαν να ήταν συνδεδεμένα
 settings_link_run	9874	Εκτέλεση εντολών
 settings_link_run_about	ba14	Εκτέλεση μεμονωμένων απομακρυσμένων εντολών
 settings_link_self	bc70	αυτό το μηχάνημα

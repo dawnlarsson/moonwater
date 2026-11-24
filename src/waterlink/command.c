@@ -39,9 +39,9 @@
 
         Linking is by key and both ways, as WireGuard's is: each machine is
         told the other's key, and a machine answers only a key it was told.
-        A new machine may do nothing until it is allowed something by name:
-        a code gives the two that used it a terminal, a command, files and
-        the log, in both directions.
+        A new machine may do everything a grant names until it is denied one
+        by name: a code, a key added and a group give the two a terminal, a
+        command, files, the log and input, in both directions.
 
         A machine is known by the name it gave when it was paired, and what
         the record is, is its key. Renamed (`moonwater name NEW`, or the
@@ -663,9 +663,13 @@ static b32 link_add_locked(string_address name, string_address text,
         if (link_peers_save(address_of peers) < 0)
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
 
-        host_say(log, host_label "added %s; it may do nothing yet: "
-                                 "moonwater link allow %s run\n",
-                 name, name);
+        {
+                p8 grants[96];
+
+                link_grants_text(peer.may, grants, sizeof grants);
+                host_say(log, host_label "added %s; it may %s\n", name,
+                         (string_address)grants);
+        }
         return 0;
 }
 
@@ -796,7 +800,7 @@ static b32 link_grant_locked(string_address name, p8 allow,
 
         if (!link_grants_parse(words, count, address_of change, address_of bad))
                 return host_refuse("%s is not a grant: shell run files "
-                                   "log pad\n",
+                                   "log input\n",
                                    bad);
         if (allow)
                 found->may |= change;
@@ -1283,7 +1287,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         key and forgets the machines the old one paired: sticks that carry
         the old key are in a group nobody else is in, until they are stamped
         again (`link group stamp IMAGE`). Members trust each other by the
-        key and by nothing else, and the grants are the group's: all four
+        key and by nothing else, and the grants are the group's: every one
         for a group made or added here unless `allow` names fewer.
 
         Why the image and not a file on the stick, and why a key of the
@@ -1295,8 +1299,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         the stick writes in place and reads back whole (host_settings_*), so
         nothing here writes the stick's file system.
 */
-#define LINK_GROUP_MAY (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | \
-                        WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+#define LINK_GROUP_MAY WATERLINK_MAY_ALL
 #define LINK_GROUP_TEXT 96
 #define LINK_GROUP_ENTRY_KEY 32
 #define LINK_GROUP_ENTRY_NAME 36
@@ -1806,7 +1809,7 @@ static b32 link_group_pick(string_address namespace,
 }
 
 //      The grants a verb of the group's was given after its words, or what
-//      a carried group gives: all four. 0, or a refusal.
+//      a carried group gives: every one. 0, or a refusal.
 static b32 link_group_allowed(string_address address_to words, positive count,
                               p32 address_to may)
 {
@@ -1816,7 +1819,7 @@ static b32 link_group_allowed(string_address address_to words, positive count,
         if (!string_equals(words[0], "allow") || count == 1)
                 return host_usage();
         if (!link_grants_parse(words + 1, count - 1, may, null))
-                return host_refuse("a grant is one of shell run files log\n");
+                return host_refuse("a grant is one of shell run files log input\n");
         return 0;
 }
 
@@ -2101,8 +2104,7 @@ static b32 link_group_stamp(string_address address_to words, positive count)
 */
 static const char link_code_alphabet[] = "0123456789abcdefghjkmnpqrstvwxyz";
 #define LINK_CODE_LENGTH 6
-#define LINK_PAIR_MAY (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | \
-                       WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+#define LINK_PAIR_MAY WATERLINK_MAY_ALL
 
 static p8 link_code_make(p8 address_to code)
 {
@@ -3209,7 +3211,7 @@ static b32 link_policy_verb(p8 allow, string_address address_to words, positive 
         if (!count)
                 return host_usage();
         if (!link_grants_parse(words, count, address_of change, address_of bad))
-                return host_refuse("unknown grant %s (expected shell, run, files, log, pad, or all)\n",
+                return host_refuse("unknown grant %s (expected shell, run, files, log, input, or all)\n",
                                    bad);
         mask = allow ? (mask | change) : (mask & ~change);
         if (!link_policy_save(mask))

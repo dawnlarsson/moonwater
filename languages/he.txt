@@ -24,6 +24,7 @@
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
+# machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
 @language he
 @name עברית
 @translated machine
@@ -323,9 +324,9 @@ settings_card_back	db52	Escape או לחיצה לחזרה
 settings_card_stopped	e24d	נעצר: Escape או לחיצה לחזרה
 settings_column_access	ae0b	גישה
 settings_column_files	1b30	קבצים
+settings_column_input	e11b	קלט
 settings_column_log	7bf1	יומן
 settings_column_on	7df0	פעיל
-settings_column_pad	ff4a	בקר
 settings_column_run	e66a	הרצה
 settings_column_security	21db	אבטחה
 settings_column_shell	69a1	מעטפת
@@ -382,6 +383,8 @@ settings_link_disabled	08dd	מושבת באופן כללי במחשב הזה
 settings_link_files	b058	גישה למערכת הקבצים
 settings_link_files_about	a65e	עיון בקבצים, העלאה והורדה שלהם
 settings_link_group	902c	קבוצה
+settings_link_input	b954	התקני קלט
+settings_link_input_about	4f2f	שימוש בבקרים שלו כאן, כאילו הם מחוברים
 settings_link_latency	5ef9	זמן השהיה
 settings_link_log	e57a	יומן הליבה
 settings_link_log_about	f0d9	הזרמת יומני המערכת
@@ -389,8 +392,6 @@ settings_link_mismatch	5778	המפתח לא תואם
 settings_link_no_key	9963	אין עדיין מפתח
 settings_link_offline	37c8	לא מקוון
 settings_link_online	88aa	מקוון
-settings_link_pad	09db	בקרים
-settings_link_pad_about	4f2f	שימוש בבקרים שלו כאן, כאילו הם מחוברים
 settings_link_run	9874	הרצת פקודות
 settings_link_run_about	ba14	הרצת פקודות מרוחקות בודדות
 settings_link_self	bc70	המחשב הזה
