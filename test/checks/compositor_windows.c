@@ -3007,6 +3007,7 @@ static void assist_fresh(void)
     layout_show(1, 60, 60, 120, 80);
     layout_show(2, 150, 150, 60, 60);
     layout_show(3, 10, 10, 50, 50);
+    compositor.asks[2] &= ~WINDOW_NO_TAB, compositor.asks[3] &= ~WINDOW_NO_TAB; /* the assist offers the windows that have a tab */
     compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stack[2] = 3, compositor.stacked = 3;
 }
 
@@ -3149,6 +3150,14 @@ static void check_compositor_assist(void)
     compositor.showing[2] = compositor.showing[3] = 0;
     layout_drop(1, 20, 4, 0, 100);
     check("assist: a drop with no other window floating arms nothing", !compositor.assist_armed && compositor.assist_count == 0);
+
+    /* A window that is a part of another has no tab (an X window's menu or tooltip, xwm's compositor_xwm_part) and is never
+       offered: the assist offers what the cycle takes. Aseprite's open File menu was offered to fill the other side. */
+    assist_fresh();
+    compositor.asks[3] |= WINDOW_NO_TAB;
+    layout_drop(1, 20, 4, 0, 100);
+    check("assist: a window with no tab, a part of another window, is not offered",
+          compositor.assist_armed && compositor.assist_count == 1 && assist_row_at(2) == 0 && assist_row_at(3) < 0);
 
     /* The grid: the pointer resting in the top band brings it up after its time, and the pointer in its row keeps it. */
     assist_fresh();

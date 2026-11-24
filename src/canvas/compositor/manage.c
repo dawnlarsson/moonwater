@@ -1155,10 +1155,13 @@ static void compositor_assist_refresh(void)
         free = COMPOSITOR_CELLS & ~(compositor_region_cells(compositor.assist_how) | compositor_occupied(compositor.assist_row, compositor.assist_screen));
         if (!(zc = compositor_zones(free, zones)))
                 return;
+        // The windows the cycle takes (compositor_cycles): never a popup, a menu or a window that is a part of another (no tab), nor
+        // one closing. Aseprite's open menus, their items and a Wine tooltip were offered to fill the other side.
         for (int at = compositor.stacked - 1; at >= 0 && found < COMPOSITOR_ASSIST_MAX; at--)
         {
                 int row = compositor.stack[at];
                 if (row != compositor.assist_row && compositor_visible(row) && compositor.arranged[row] == COMPOSITOR_FLOATING &&
+                    compositor_cycles(row) && compositor_popup_parent[row] < 0 && !(compositor.state[row] & WINDOW_CLOSING) &&
                     compositor_screen_of(row) == compositor.assist_screen && compositor.w[row] && compositor.h[row])
                         cand[found++] = (unsigned int)row;
         }
@@ -1512,6 +1515,26 @@ static void compositor_layer_set(int row, signed char layer, int screen)
         }
         compositor_raise(row);
         compositor_tabs_changed();
+}
+
+/*
+        A window's tab given or taken away after it opened: a window that is a part of another (an X window's menu or tool window,
+        xwm's compositor_xwm_part) has none, so no button on the band, no place in the cycle or the snap assist's picker
+        (compositor_cycles) and no minimise. Kept in the table as well, for a row the compositor has not taken yet.
+*/
+static void compositor_row_tabbed(int row, int tabbed)
+{
+        int had;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.table)
+                return;
+        had = !(compositor.asks[row] & WINDOW_NO_TAB);
+        if (tabbed)
+                compositor.table->glass[row] &= ~WINDOW_NO_TAB, compositor.asks[row] &= ~WINDOW_NO_TAB;
+        else
+                compositor.table->glass[row] |= WINDOW_NO_TAB, compositor.asks[row] |= WINDOW_NO_TAB;
+        if (had != (tabbed != 0) && compositor.showing[row])
+                compositor_damage_row(row), compositor_tabs_changed();
 }
 
 static void compositor_fullscreen_off(int row)

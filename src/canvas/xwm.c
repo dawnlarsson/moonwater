@@ -149,6 +149,7 @@ static const struct { const char *name; unsigned char len; } xwm_ext_spec[] = {
 #define COMPOSITOR_XWM_HIDDEN 131072u
 #define COMPOSITOR_XWM_FOCUSED 262144u
 #define COMPOSITOR_XWM_BORDERLESS 524288u
+#define COMPOSITOR_XWM_UTILITY 1048576u // _NET_WM_WINDOW_TYPE lists UTILITY: a tool window, or laf's menus and tooltips
 #define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
 // Where a window's place came from (compositor_xwm_window.placed): its WM_NORMAL_HINTS (USPosition or PPosition), or before they
 // are read a place it asked before its map; and a place it asked after its map, before Canvas has the window, which the hints
@@ -172,6 +173,7 @@ struct compositor_xwm_window
         int row, x, y, sent_x, sent_y;
         unsigned int width, height, sent_w, sent_h, restore_w, restore_h, min_w, min_h, max_w, max_h;
         unsigned char closes, placed, no_input;
+        unsigned char tabless; // xwm took the row's tab away: the window is a part of another (compositor_xwm_part)
         unsigned char left_fullscreen; // the person took it out of fullscreen (F11, Super+F11): its own asks to go back are refused till they put it back
         // The monitor as the window's own client sees it under Xwayland's resolution emulation (_XWAYLAND_RANDR_EMU_MONITOR_RECTS): a game
         // that set a mode of 1600x900 on a 1920x1080 screen is made fullscreen at 1600x900, and Xwayland scales its surface to the screen
@@ -974,6 +976,7 @@ static void xwm_fullscreen_place(const struct compositor_xwm_window *w, struct x
 }
 
 static int compositor_xwm_framed(const struct compositor_xwm_window *w);
+static void xwm_tab_class(struct compositor_xwm *x, struct compositor_xwm_window *w);
 static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *p)
 {
         struct compositor_xwm_window *w;
@@ -1078,6 +1081,7 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
         }
         case COMPOSITOR_XWM_PROP_TRANSIENT:
                 w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
+                xwm_tab_class(x, w);
                 break;
         case COMPOSITOR_XWM_PROP_STATE:
         {
@@ -1105,7 +1109,7 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
         {
                 int was_desktop = !!(w->state & COMPOSITOR_XWM_DESKTOP);
 
-                w->state &= ~(COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_DESKTOP);
+                w->state &= ~(COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_UTILITY);
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
                         unsigned int atom = xwm_get32(r.value + at);
@@ -1115,12 +1119,15 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                                         w->state |= COMPOSITOR_XWM_POPUPTYPE;
                         if (x->atoms[COMPOSITOR_XWM_A_TYPE_DESKTOP] && atom == x->atoms[COMPOSITOR_XWM_A_TYPE_DESKTOP])
                                 w->state |= COMPOSITOR_XWM_DESKTOP;
+                        if (x->atoms[COMPOSITOR_XWM_A_TYPE_UTILITY] && atom == x->atoms[COMPOSITOR_XWM_A_TYPE_UTILITY])
+                                w->state |= COMPOSITOR_XWM_UTILITY;
                 }
                 w->state |= COMPOSITOR_XWM_PROPS_READ;
                 if ((w->state & COMPOSITOR_XWM_DESKTOP) && !was_desktop && (w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0)
                         compositor_layer_set(w->row, WINDOW_LAYER_BACKGROUND, -1);
                 if (w->row >= 0 && w->row < COMPOSITOR_ROWS)
                         compositor_controls_want(w->row, compositor_xwm_framed(w));
+                xwm_tab_class(x, w);
                 break;
         }
         case COMPOSITOR_XWM_PROP_PROTOCOLS:
@@ -1150,6 +1157,7 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                         w->state &= ~COMPOSITOR_XWM_BORDERLESS;
                 if (w->row >= 0 && w->row < COMPOSITOR_ROWS)
                         compositor_controls_want(w->row, compositor_xwm_framed(w));
+                xwm_tab_class(x, w);
                 break;
         case COMPOSITOR_XWM_PROP_EMU:
         {
@@ -1230,7 +1238,7 @@ static void xwm_row_unbind(const struct compositor_xwm *x, struct compositor_xwm
         if (w->row >= 0 && w->row < WINDOWS && xwm_row_map[w->row].slot_plus1 == xwm_slot_tag(x) &&
             x->window && xwm_row_map[w->row].win == (int)(w - x->window))
                 xwm_row_map[w->row].slot_plus1 = 0;
-        w->row = -1;
+        w->row = -1, w->tabless = 0;
 }
 
 static void xwm_row_bind(const struct compositor_xwm *x, struct compositor_xwm_window *w, int row)
@@ -1406,6 +1414,41 @@ static int compositor_xwm_framed(const struct compositor_xwm_window *w)
                !compositor_xwm_is_popup(w);
 }
 
+/*
+        A window that is a part of another has no tab of its own: no button on the band, no place in the cycle or in the snap
+        assist's picker, no Space of its own (it shows with its owner's). A part is a popup (an override-redirect window or a menu,
+        tooltip or notification by its type), or a window transient for a window Canvas shows that is a utility or draws no frame:
+        laf's menus and their items (UTILITY and NORMAL, borderless by Motif, WM_TRANSIENT_FOR their owner), a Wine tool window.
+        Aseprite's open File menu was a window of its own in the picker, the tabs and the cycle. A dialog with its frame keeps its
+        tab, and so does a transient whose owner is not shown (a hidden leader would leave it out of reach).
+*/
+static int compositor_xwm_part(struct compositor_xwm *x, const struct compositor_xwm_window *w)
+{
+        const struct compositor_xwm_window *owner;
+
+        if (compositor_xwm_is_popup(w))
+                return 1;
+        if (!w->transient || !(w->state & (COMPOSITOR_XWM_UTILITY | COMPOSITOR_XWM_BORDERLESS)) ||
+            (w->state & (COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_DESKTOP)))
+                return 0;
+        owner = xwm_find(x, w->transient, 0);
+        return owner && owner != w && owner->row >= 0 && owner->row < COMPOSITOR_ROWS;
+}
+
+// The row's tab as the window's class says (compositor_xwm_part): taken away from a part, and given back only where xwm took it.
+static void xwm_tab_class(struct compositor_xwm *x, struct compositor_xwm_window *w)
+{
+        int part;
+
+        if (w->row < 0 || w->row >= COMPOSITOR_ROWS || !(w->state & COMPOSITOR_XWM_ADOPTED))
+                return;
+        part = compositor_xwm_part(x, w);
+        if (!part && !w->tabless)
+                return;
+        w->tabless = (unsigned char)part;
+        compositor_row_tabbed(w->row, !part);
+}
+
 static void compositor_xwm_hints_push(const struct compositor_xwm_window *w)
 {
         unsigned int scale;
@@ -1504,6 +1547,7 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
         compositor_xwm_owned(w);
         compositor_xwm_hints_push(w);
         compositor_controls_want((int)row, compositor_xwm_framed(w));
+        xwm_tab_class(x, w);
         if (w->state & COMPOSITOR_XWM_DESKTOP)
                 compositor_layer_set((int)row, WINDOW_LAYER_BACKGROUND, -1);
         else
@@ -3403,7 +3447,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         int was_managed = !(w->state & COMPOSITOR_XWM_OVERRIDE) && (w->state & (COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_ADOPTED));
                         w->state &= ~(COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL | COMPOSITOR_XWM_FULLSCREEN |
                                       COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_PROPS_READ |
-                                      COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE | COMPOSITOR_XWM_FOCUSED);
+                                      COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE | COMPOSITOR_XWM_FOCUSED | COMPOSITOR_XWM_UTILITY);
                         w->placed &= (unsigned char)~COMPOSITOR_XWM_PLACED_ASKED;
                         if (was_managed && !e->from_configure)
                                 compositor_xwm_wm_state(x, w->id, COMPOSITOR_XWM_STATE_WITHDRAWN);
@@ -4004,6 +4048,7 @@ static void xwm_window_turn(struct compositor_xwm *x, struct compositor_xwm_wind
                 {
                         w->state |= COMPOSITOR_XWM_RAISED;
                         compositor_owner[w->row] = parent->row + 1;
+                        xwm_tab_class(x, w); // its owner has a row now: a part of it has no tab
                         compositor_raise(w->row);
                         if ((int)compositor.focus == parent->row && !w->no_input && !compositor_xwm_is_popup(w))
                                 compositor_focus(w->row);
