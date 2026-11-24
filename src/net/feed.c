@@ -50,11 +50,21 @@
 
 /*
         Pinned 65-byte uncompressed SEC1 public key (0x04 || X || Y) generated
-        inside the Cloudflare FeedSigner Durable Object.
-        Populate by running `npm run pin-pubkey` in dawning-feed after the first
-        cron publish. All-zero fails closed in mwfd_verify (pubkey[0] != 0x04).
+        inside the Cloudflare FeedSigner Durable Object: key id
+        dawning-p256-2ff843ad9188, fingerprint (the first 8 bytes of its SHA-256)
+        2ff843ad9188fe11, as `npm run pin-pubkey` in dawning-feed printed it from
+        keys.mwf after the first cron publish (2026-11-24 18:00:33 UTC, sequence 1),
+        and keys.mwf, wallpapers.mwf and manifest.mwf each verified against it then.
+        A key turned over is a new pin here: an all-zero one fails closed in
+        mwfd_verify (pubkey[0] != 0x04).
 */
-static const p8 mwfd_pinned_pubkey[65] = {0};
+static const p8 mwfd_pinned_pubkey[65] = {
+        0x04, 0x0b, 0x00, 0x6d, 0x92, 0xa4, 0xf0, 0x1a, 0x9c, 0xfe, 0x5e, 0x54, 0x58,
+        0x10, 0x14, 0x3c, 0x93, 0x05, 0x43, 0x3c, 0xc1, 0xe9, 0x88, 0x2e, 0x50, 0xbb,
+        0x37, 0xc7, 0x33, 0x5f, 0xf3, 0x70, 0x1c, 0x6d, 0x89, 0x42, 0x4e, 0x3c, 0xf4,
+        0xec, 0x19, 0xa6, 0x2a, 0x9a, 0x7f, 0x79, 0x76, 0x4f, 0x5b, 0x74, 0xba, 0x09,
+        0xbe, 0x83, 0x9e, 0xe5, 0xc7, 0x29, 0xfb, 0x7f, 0xc2, 0xe0, 0x96, 0xc5, 0xf6,
+};
 
 /* NIST P-256 half-order floor(n / 2), big-endian, for canonical low-S checks. */
 static const p8 mwfd_p256_half_order_be[32] = {
