@@ -926,9 +926,10 @@ static int compositor_cursor_size(void)
         int base = (compositor_px1(compositor.scale) * 256 * (compositor.cursor.size ? compositor.cursor.size : 100) + 50) / 100;
         return compositor.cursor.magnified ? 3 * base : base;
 }
+static int compositor_cast_pointer(void); // compositor/cast.c: a screen is shared with the pointer drawn in
 static int compositor_cursor_in_scene(void)
 {
-        return compositor.cursor.soft || compositor_turning() ||
+        return compositor.cursor.soft || compositor_turning() || compositor_cast_pointer() ||
                (compositor.cursor.handle[0] && !compositor_picture.worn && compositor_cursor_size() > CP_PLANE / CP_DYN_CELL * 256);
 }
 

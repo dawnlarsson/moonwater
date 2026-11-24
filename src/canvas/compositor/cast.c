@@ -34,10 +34,18 @@ static struct compositor_cast compositor_casts[WINDOWS_CASTS];
 static unsigned int compositor_cast_seen = ~0u; // the table's cast_serial looked at last
 static unsigned int compositor_cast_screens_live; // shares of a screen with a ring
 static unsigned int compositor_cast_rings;      // shares with a ring
+static unsigned int compositor_cast_pointers;   // shares of a screen with the pointer drawn in (WINDOWS_CAST_CURSOR_EMBEDDED)
 static int compositor_cast_wake = -1;           // the sink's door, open while a ring is
 
 static void compositor_script_say(const char *name); // input.c
 static int taskbar_share_set(int present);           // ui/taskbar.c: the tray's share cell there or not
+
+// Whether a screen is shared with the pointer in it: the pointer is then drawn in the scene, not on its plane, so its moves are
+// presents and the capture has it where the screen does.
+static int compositor_cast_pointer(void)
+{
+        return compositor_cast_pointers != 0;
+}
 
 // Whether a screen is shared: then every present is composed (no window straight, no plane), so the capture is what is shown.
 static int compositor_cast_screens(void)
@@ -155,7 +163,7 @@ static int compositor_cast_make(unsigned int at, struct windows_cast *row)
 static void compositor_cast_look(int always)
 {
         struct windows *table = compositor.table;
-        unsigned int serial, screens = 0, rings = 0, changed = 0;
+        unsigned int serial, screens = 0, rings = 0, changed = 0, pointers = 0;
 
         if (!table)
                 return;
@@ -196,11 +204,14 @@ static void compositor_cast_look(int always)
                 if ((state != WINDOWS_CAST_LIVE || c->ticket != row->ticket) && c->ticket)
                         compositor_cast_drop(c);
                 if (c->ticket)
-                        rings++, screens += c->kind == WINDOWS_CAST_SCREEN;
+                        rings++, screens += c->kind == WINDOWS_CAST_SCREEN,
+                            pointers += c->kind == WINDOWS_CAST_SCREEN && (row->cursor & WINDOWS_CAST_CURSOR_EMBEDDED);
         }
         if (screens != compositor_cast_screens_live)
                 compositor_damage(0, 0, compositor.width, compositor.height); // shown straight or composed, the screen made again
         compositor_cast_screens_live = screens, compositor_cast_rings = rings;
+        if (pointers != compositor_cast_pointers)
+                compositor_cast_pointers = pointers, compositor_cursor_move(); // to the scene, or back to its plane
         {
                 unsigned int shown = 0;
 
@@ -300,7 +311,7 @@ static void compositor_cast_present(const struct compositor_frame *frames, unsig
                         compositor_scene_banded(&t, drawn, drawn_count, 0, done);
                         if (c->kind == WINDOWS_CAST_SCREEN && compositor_spots_any(0))
                                 compositor_spots_compose(&t, drawn, drawn_count);
-                        if (c->kind == WINDOWS_CAST_SCREEN)
+                        if (c->kind == WINDOWS_CAST_SCREEN && (row->cursor & WINDOWS_CAST_CURSOR_EMBEDDED))
                                 compositor_cursor_compose(&t, drawn, drawn_count);
                         // opaque, as the sink says the frames are (BGRA as well as BGRx)
                         for (int py = s[1]; py < s[3]; py++)
