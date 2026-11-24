@@ -6795,6 +6795,71 @@ static fn check_kit_graph(void)
                                 near += pixels[(70 + dy) * 300 + 150 + dx] == ink;
                 check("graph: a curved edge runs between its ports through the middle of them", near > 0 && pixels[70 * 300 + 110] != ink);
         }
+        // A node's words: the label is always set and centred in the face, at its role's size where it fits, stepped down where it does not
+        // and cut with an ellipsis at the least size, at a large zoom and a small one, and the same read from the right.
+        {
+                static const char *const said[4] = {"Main", "The program that has the longest name of every program here", "\xd7\xa9\xd7\x9c\xd7\x95\xd7\x9d \xd7\xa2\xd7\x95\xd7\x9c\xd7\x9d", "Speakers"};
+                static const struct ui_graph_edge none[1] = {{0, 0, 0, 0, 0}};
+                unsigned int face = ui_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+                struct ui_graph_words words;
+                int first[4][2], last[4][2], inked[4][2];
+                b32 sized, cut, short_node, lines;
+                // The layout alone: a label that fits is at its role's size with its line under it; a long one steps down and is cut.
+                node[0] = (struct ui_graph_node){0, 0, 200, 56, 0, said[0], {"Playing", null}, 0, 0};
+                ui_graph_words(&ui, &node[0], 50, 42, 250, 98, &words);
+                sized = words.shown == 2 && words.size[0] == ui_types[UI_TITLE_LARGE].size && words.size[1] == ui_types[UI_LABEL_MEDIUM].size &&
+                        ui_graph_far(2 * words.left[0] + ui_kit_measure(&ui, (string_address)said[0], UI_TITLE_LARGE), 300) <= 1;
+                node[0].label = said[1];
+                ui_graph_words(&ui, &node[0], 50, 42, 250, 98, &words);
+                cut = words.size[0] == UI_GRAPH_LEAST && words.text[0] != said[1] && string_length((string_address)words.text[0]) > 3 &&
+                      !memory_compare(words.text[0] + string_length((string_address)words.text[0]) - 3, "...", 3) &&
+                      ui_kit_measure_at(&ui, (string_address)words.text[0], UI_TITLE_LARGE, UI_GRAPH_LEAST) <= 200 - 2 * 6;
+                // A node a quarter of the size: the label stays, smaller, and the line under it gives way.
+                node[0].label = said[0];
+                ui_graph_words(&ui, &node[0], 125, 63, 175, 77, &words);
+                short_node = words.shown == 1 && words.size[0] >= UI_GRAPH_LEAST && words.size[0] < ui_types[UI_TITLE_LARGE].size;
+                ui_graph_words(&ui, &node[0], 0, 0, 200, 80, &words);
+                lines = words.shown == 2 && words.top[0] == (80 - words.used) / 2;
+                check("graph: a node's label is at its role's size where it fits, centred, its line under it, the block in the node's middle", sized && lines);
+                check("graph: a label wider than its node steps down to the least size and is cut there with an ellipsis that fits", cut);
+                check("graph: a node at a quarter of the size keeps its label, smaller, and lets its line go", short_node);
+                // Drawn: the ink of the label is inside the face less its pad, its middle the node's middle, at one to one and at a quarter, a
+                // label wider than the node too, and a label of a language read from the right.
+                g.nodes = 1, g.edge = none, g.edges = 0, g.rules = 0, g.top = 0, g.grid = -1, g.h = 100;
+                for (int which = 0; which < 4; which++)
+                        for (int small = 0; small < 2; small++)
+                        {
+                                int x0 = small ? 125 : 50, x1 = small ? 175 : 250, y0 = small ? 63 : 42, y1 = small ? 77 : 98;
+                                node[0] = (struct ui_graph_node){0, 0, 200, 56, 0, said[which], {null, null}, 0, 0};
+                                ui_kit.rtl = which == 2;
+                                ui_graph_start(&g);
+                                g.homed = 1, g.zoom = small ? UI_GRAPH_ONE / 4 : UI_GRAPH_ONE;
+                                g.pan_x = small ? -25 * 256 : -100 * 256, g.pan_y = small ? -7 * 256 : -28 * 256;
+                                for (int at = 0; at < 300 * 200; at++)
+                                        pixels[at] = 0xff123456u;
+                                ui_graph_draw(&ui, &g);
+                                first[which][small] = 300, last[which][small] = -1, inked[which][small] = 0;
+                                // The middle half of its rows, in from its sides: the face there is flat, so anything else is the words' ink.
+                                for (int py = y0 + (y1 - y0) / 4; py < y1 - (y1 - y0) / 4; py++)
+                                        for (int px = x0 + 2; px < x1 - 2; px++)
+                                                if (pixels[py * 300 + px] != face)
+                                                {
+                                                        inked[which][small]++;
+                                                        first[which][small] = px < first[which][small] ? px : first[which][small];
+                                                        last[which][small] = px > last[which][small] ? px : last[which][small];
+                                                }
+                        }
+                ui_kit.rtl = 0;
+                ok = 1;
+                for (int which = 0; which < 4; which++)
+                        for (int small = 0; small < 2; small++)
+                        {
+                                int x0 = small ? 125 : 50, x1 = small ? 175 : 250, margin = small ? 1 : 6;
+                                ok = ok && inked[which][small] > 0 && first[which][small] >= x0 + margin - 1 && last[which][small] <= x1 - margin &&
+                                     ui_graph_far(first[which][small] + last[which][small], x0 + x1) <= 4;
+                        }
+                check("graph: a node's label is drawn centred inside its pad at one to one and a quarter, a long one cut, one read from the right", ok);
+        }
 }
 
 // The taskbar globe's press (ui.c taskbar_globe_*): a tap opens on release, a drag away past the slop drives the scenes and opens nothing,

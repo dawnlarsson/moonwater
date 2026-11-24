@@ -17509,6 +17509,8 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_KNOB_RUN 160 // logical pixels the hand moves up a knob for the whole of its range
 #define UI_GRAPH_REACH 3   // a port is taken by a press within this many of its radii
 #define UI_GRAPH_AGAIN_NS 400000000ll // a second press on a knob within this puts it at its whole
+#define UI_GRAPH_LEAST 7   // points: the least size a node's words step down to (a label wider than the node there is cut with an ellipsis)
+#define UI_GRAPH_CUT 160   // bytes of a node's line cut short
 
 // The rules of a graph (ui_graph.rules).
 #define UI_GRAPH_SIDES 1u // a node dragged is pulled to the others' sides and middles
@@ -18321,15 +18323,99 @@ static fn ui_graph_knob(struct ui address_to ui, const struct ui_graph address_t
 }
 
 // A node drawn where it is shown:
+/*
+        A node's words set in its face, x0, y0 to x1, y1 (device pixels): the label, and under it the lines that fit, as one block in its middle.
+        The block is the label's role (a title) over the lines' (a label), all of it scaled down by one factor until it is as tall as the
+        face less its pad, a line dropped from the foot while that would put the lines under the least size; then the label alone steps down
+        until it is as wide as the face, and at the least size a label still wider is cut short with an ellipsis, as a line wider than the
+        face is. The label is always set, at every size of the node: a node too short for it has it cut by the node's own edges, centred.
+        Each line is centred across the face (a run that reads from the right is measured as it is drawn, so it is centred the same).
+*/
+struct ui_graph_words
+{
+        int shown, used;                // the lines set, and the rows of the block (device pixels)
+        int size[3], line[3], left[3], top[3]; // each one's size (points), its line's rows, its left end, its line's top
+        const char address_to text[3];
+        char cut[3][UI_GRAPH_CUT];
+};
+
+static const int ui_graph_types[3] = {UI_TITLE_LARGE, UI_LABEL_MEDIUM, UI_LABEL_MEDIUM};
+static string_address ui_fit_at(struct ui address_to ui, string_address text, int type, int size, int room, char address_to fitted, positive capacity);
+
+// The rows of a role's line at a size of its own (device pixels): the role's leading kept to its size.
+static int ui_graph_line(const struct ui address_to ui, int type, int size)
+{
+        return (int)((b64)ui_types[type].line * size * ui->scale / ((b64)ui_types[type].size * 100));
+}
+
+// The baseline of a role's text at a size of its own in a line box of rows whose top is top: ui_kit_baseline at any size.
+static int ui_graph_baseline(const struct ui address_to ui, int top, int type, int size, int rows)
+{
+        const struct ui_type address_to t = &ui_types[type];
+        const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
+        font_metrics metrics = font_metrics_at(face, ui_em(ui, size));
+        return top + (rows - metrics.cell_height) / 2 + metrics.baseline;
+}
+
+static fn ui_graph_words(struct ui address_to ui, const struct ui_graph_node address_to n, int x0, int y0, int x1, int y1, struct ui_graph_words address_to w)
+{
+        const char address_to words[3] = {n->label, n->line[0], n->line[1]};
+        int pad = ui_dev(ui, 6), wide, tall, room_w, room_h, lines = 0, scale = 256;
+        pad = pad > (y1 - y0) / 8 ? (y1 - y0) / 8 : pad;
+        pad = pad > (x1 - x0) / 16 ? (x1 - x0) / 16 : pad;
+        pad = pad < 0 ? 0 : pad;
+        room_w = x1 - x0 - 2 * pad, room_h = y1 - y0 - 2 * pad;
+        w->shown = w->used = 0;
+        if (!n->label)
+                return;
+        w->text[0] = n->label;
+        for (int at = 1; at < 3; at++)
+                if (words[at])
+                        w->text[1 + lines++] = words[at];
+        // The block's scale (256ths): the most lines whose size it keeps at the least or more.
+        for (;; lines--)
+        {
+                tall = ui_graph_line(ui, UI_TITLE_LARGE, ui_types[UI_TITLE_LARGE].size) + lines * ui_graph_line(ui, UI_LABEL_MEDIUM, ui_types[UI_LABEL_MEDIUM].size);
+                scale = tall <= room_h ? 256 : room_h > 0 ? (int)((b64)room_h * 256 / tall) : 0;
+                if (!lines || ui_types[UI_LABEL_MEDIUM].size * scale >= UI_GRAPH_LEAST * 256)
+                        break;
+        }
+        w->shown = 1 + lines;
+        for (int at = 0; at < w->shown; at++)
+        {
+                int type = ui_graph_types[at], size = ui_types[type].size * scale / 256;
+                size = size < UI_GRAPH_LEAST ? UI_GRAPH_LEAST : size > ui_types[type].size ? ui_types[type].size : size;
+                wide = ui_kit_measure_at(ui, (string_address)w->text[at], type, size);
+                // The label steps down to the face's width: first by the measure's ratio (a run's width goes with its size), then a point at a
+                // time where the hinting made it wider than that.
+                if (!at && wide > room_w && room_w > 0)
+                {
+                        int fits = (int)((b64)size * room_w / wide);
+                        size = fits < UI_GRAPH_LEAST ? UI_GRAPH_LEAST : fits;
+                        wide = ui_kit_measure_at(ui, (string_address)w->text[at], type, size);
+                        while (wide > room_w && size > UI_GRAPH_LEAST)
+                                wide = ui_kit_measure_at(ui, (string_address)w->text[at], type, --size);
+                }
+                if (wide > room_w)
+                {
+                        w->text[at] = (const char address_to)ui_fit_at(ui, (string_address)w->text[at], type, size, room_w > 0 ? room_w : 0, w->cut[at], UI_GRAPH_CUT);
+                        wide = ui_kit_measure_at(ui, (string_address)w->text[at], type, size);
+                }
+                w->size[at] = size, w->line[at] = ui_graph_line(ui, type, size), w->left[at] = x0 + (x1 - x0 - wide) / 2;
+                w->used += w->line[at];
+        }
+        for (int at = 0, top = y0 + (y1 - y0 - w->used) / 2; at < w->shown; at++)
+                w->top[at] = top, top += w->line[at];
+}
+
 static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, int k)
 {
         const struct ui_graph_node address_to n = &g->node[k];
-        int x, y, x0, y0, x1, y1, radius = ui_dev(ui, UI_RADIUS), pad = ui_dev(ui, 6), top = ui->top, bottom = ui->bottom, rows[3], used = 0, shown = 0;
+        int x, y, x0, y0, x1, y1, radius = ui_dev(ui, UI_RADIUS), pad = ui_dev(ui, 6), top = ui->top, bottom = ui->bottom;
         b32 lit = k == g->chosen || k == g->held || (n->flags & UI_GRAPH_PICKED);
         unsigned int face = ui_role(lit ? UI_PRIMARY_CONTAINER : UI_SURFACE_HIGHEST) | 0xff000000u;
         unsigned int ink = ui_text_colour(ui, lit ? UI_ON_PRIMARY_CONTAINER : UI_ON_SURFACE), quiet = ui_text_colour(ui, lit ? UI_ON_PRIMARY_CONTAINER : UI_ON_SURFACE_VARIANT);
-        const char address_to words[3] = {n->label, n->line[0], n->line[1]};
-        static const int types[3] = {UI_TITLE_LARGE, UI_LABEL_MEDIUM, UI_LABEL_MEDIUM};
+        struct ui_graph_words words;
         struct ui_box box;
         ui_graph_shown(g, k, &x, &y);
         ui_graph_box(g, k, x, y, &x0, &y0, &x1, &y1);
@@ -18379,32 +18465,18 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
                         dot = (struct ui_box){(b32)(qx - r), (b32)(qy - r), (b32)(qx + r), (b32)(qy + r), (b32)r, (b32)r};
                         ui_kit_fill(ui, &dot, ui_role(UI_OUTLINE) | 0xff000000u, panel);
                 }
-        // The words: as many of them, from the label down, as fit inside the node's height.
-        for (int at = 0; at < 3; at++)
-        {
-                rows[at] = words[at] ? ui_dev(ui, ui_types[types[at]].line) : 0;
-                if (used + rows[at] > y1 - y0 - 2 * pad)
-                        break;
-                used += rows[at], shown = at + 1;
-        }
+        // The words: the label always, centred, stepped down to fit (ui_graph_words), and the lines under it that fit with it.
+        ui_graph_words(ui, n, x0, y0, x1, y1, &words);
         ui->top = y0 > top ? y0 : top, ui->bottom = y1 < bottom ? y1 : bottom;
         // Over a picture the words are on a piece of the face, so they read whatever the picture is.
-        if (n->picture && shown && x1 - x0 > 4 * pad)
+        if (n->picture && words.shown && x1 - x0 > 4 * pad)
         {
-                int line0 = y0 + (y1 - y0 - used) / 2;
-                struct ui_box scrim = ui_graph_rect(x0 + pad, line0 - pad / 2, x1 - pad, line0 + used + pad / 2, radius);
+                struct ui_box scrim = ui_graph_rect(x0 + pad, words.top[0] - pad / 2, x1 - pad, words.top[0] + words.used + pad / 2, radius);
                 ui_kit_fill(ui, &scrim, (face & 0xffffffu) | 0xc8000000u, &box);
         }
-        for (int at = 0, line = y0 + (y1 - y0 - used) / 2; at < shown; at++)
-        {
-                int wide, low = x0 > g->x ? x0 : g->x, high = x1 < g->x + g->w ? x1 : g->x + g->w, left;
-                if (!rows[at])
-                        continue;
-                wide = ui_kit_measure(ui, (string_address)words[at], types[at]);
-                left = wide <= x1 - x0 - 2 * pad ? x0 + (x1 - x0 - wide) / 2 : x0 + pad;
-                ui_kit_text_in(ui, left, ui_kit_baseline(ui, line, types[at]), (string_address)words[at], types[at], at ? quiet : ink, 0, low, high);
-                line += rows[at];
-        }
+        for (int at = 0, low = x0 > g->x ? x0 : g->x, high = x1 < g->x + g->w ? x1 : g->x + g->w; at < words.shown; at++)
+                ui_kit_text_in_at(ui, words.left[at], ui_graph_baseline(ui, words.top[at], ui_graph_types[at], words.size[at], words.line[at]), (string_address)words.text[at],
+                                  ui_graph_types[at], words.size[at], at ? quiet : ink, 0, low, high);
         ui->top = top, ui->bottom = bottom;
         if (g->keys && k == g->chosen && x0 >= g->x && x1 <= g->x + g->w)
         {
