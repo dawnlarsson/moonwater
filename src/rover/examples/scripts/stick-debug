@@ -19,7 +19,7 @@
       if [ -e $m/EFI/BOOT/BOOTX64.EFI ]; then
         o=$m/moonwater-debug/$boot
         mkdir -p $o
-        cp /run/moonwater/compositor.log $o/compositor.log 2>/dev/null
+        cat /run/moonwater/compositor.log > $o/compositor.log 2>/dev/null  # cat: cp cannot make a 0600 file on FAT
         dmesg > $o/dmesg.txt 2>&1
         cat /proc/bus/input/devices > $o/input-devices.txt 2>&1
         moonwater debug > $o/debug.txt 2>&1
