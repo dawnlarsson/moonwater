@@ -3718,6 +3718,16 @@ static void check_compositor_outputs(void) {
       co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_MAXIMIZED && touch==COMPOSITOR_SNAP_TOP);
       box[0] = 0, box[1] = 0, box[2] = 2560;
       co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_MAXIMIZED);
+      /* A window as wide as the screen less the dead zone spans it: its box drifted past a side (the clamp holds the window)
+         takes no half and no quarter, only the top's whole screen (Substance Designer went to a quarter on every drag). */
+      box[0] = -249, box[1] = 0, box[2] = 2556, box[3] = 300;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_MAXIMIZED && touch==COMPOSITOR_SNAP_TOP);
+      box[1] = 300;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_FLOATING && touch==0);
+      box[2] = 2551;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_LEFT && touch==COMPOSITOR_SNAP_LEFT);
+      box[0] = 300, box[1] = -20, box[2] = 400, box[3] = 1075;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_FLOATING && touch==0);
       box[0] = 2160, box[1] = 1020, box[2] = 400, box[3] = 60;
       co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_BOTTOM_RIGHT && touch==(COMPOSITOR_SNAP_RIGHT|COMPOSITOR_SNAP_BOTTOM));
       /* The bottom is a seam: the corner is no corner, and the right side alone is that half. */

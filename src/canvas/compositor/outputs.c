@@ -301,7 +301,11 @@ static unsigned int compositor_snap_side(unsigned int touch, unsigned int near, 
         none. This reads the window's rectangle only. An edge is touched when the window's edge is at the screen's edge or
         past it (a gap of 0 or less): the first frame it is, and that frame's target is shown. A touched edge holds until it
         is edge pixels inside the screen's (the dead zone), which is held (the touched edges of the last frame). An axis the
-        window spans, with both its edges touched, takes no snap. A corner is the quarter of its two edges when one of them
+        window spans takes no snap, neither its sides nor their corners: both its edges touched, or the window as long on it as
+        the screen less the dead zone. Such a window is held on the screen (compositor_screen_keep_window) and cannot be moved
+        along that axis, so its box, which is the hand's and not the clamp's, crossed a side as soon as the hand drifted that
+        way: a window opened nearly maximized (a Wine program's, Substance Designer) went to a half or a quarter, with the snap
+        assist up, on every drag of its bar, and back to its full width on the next. A corner is the quarter of its two edges when one of them
         is touched and the other is within corner pixels of the screen's corner: it wins over the edge that is touched. Else a
         touched top is the whole screen, and a left or right side that half. The bottom alone is no target: only its two
         corners are, so a tall window set low is not taken by the edge it rests on. free is the edges that may be snapped to
@@ -325,10 +329,10 @@ static unsigned int compositor_snap_rule(const int *box, const int *screen, unsi
                 if (gap[each] < corner)
                         near |= bit;
         }
-        if ((contact & (COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT)) == (COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT))
-                contact &= ~(COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT);
-        if ((contact & (COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM)) == (COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM))
-                contact &= ~(COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM);
+        if ((contact & (COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT)) == (COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT) || box[2] >= screen[2] - edge)
+                contact &= ~(COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT), near &= ~(COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT);
+        if ((contact & (COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM)) == (COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM) || box[3] >= screen[3] - edge)
+                contact &= ~(COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM), near &= ~(COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM);
         *touch = contact;
         side_h = compositor_snap_side(contact, near, COMPOSITOR_SNAP_LEFT, COMPOSITOR_SNAP_RIGHT);
         side_v = compositor_snap_side(contact, near, COMPOSITOR_SNAP_TOP, COMPOSITOR_SNAP_BOTTOM);
