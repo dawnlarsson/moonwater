@@ -76,7 +76,7 @@ enum
         PWIRE_FORMAT_SIZE = 0x20003, PWIRE_FORMAT_RATE = 0x20004, PWIRE_FORMAT_MAX_RATE = 0x20005,
         PWIRE_MEDIA_VIDEO = 2, PWIRE_SUBTYPE_RAW = 1, PWIRE_VIDEO_BGRX = 8, PWIRE_VIDEO_BGRA = 12,
         PWIRE_BUFFERS_BUFFERS = 1, PWIRE_BUFFERS_DATA_TYPE = 6, PWIRE_META_TYPE = 1, PWIRE_META_SIZE = 2,
-        PWIRE_META_HEADER = 1, PWIRE_META_CROP = 2, PWIRE_META_DAMAGE = 3, PWIRE_META_CURSOR = 5,
+        PWIRE_META_HEADER = 1, PWIRE_META_CROP = 2, PWIRE_META_DAMAGE = 3, PWIRE_META_CURSOR = 5, PWIRE_META_BUSY = 7,
         PWIRE_DATA_MEMFD = 2, PWIRE_DATA_MEMID = 4, PWIRE_IO_CLOCK = 3, PWIRE_IO_POSITION = 7, PWIRE_IO_BUFFERS = 1,
         PWIRE_COMMAND_START = 2, PWIRE_COMMAND_PAUSE = 1,
         PWIRE_STATUS_NEED_DATA = 1, PWIRE_STATUS_HAVE_DATA = 2,
@@ -143,7 +143,7 @@ struct pwire_connection
         unsigned char active, port, format_sent, buffers_sent, started, want_crop, want_damage, want_cursor;
         struct pwire_format format;
         unsigned buffers, buffers_least, buffers_most, header_size, crop_size, damage_size, cursor_size, meta_size;
-        unsigned char meta_order[4];     // the metas the client asked for, in its order (PWIRE_META_*), meta_count of them
+        unsigned char meta_order[5];     // the metas of a buffer: Busy, then those the client asked for in its order (PWIRE_META_*)
         unsigned meta_count;
         // the session's memory: [0, act) the client's activation, [act, 2 act) the driver's, then the io area; the metadata apart
         int mem_fd, meta_fd;
@@ -909,7 +909,7 @@ static void pwire_buffers_asked(struct pwire_connection *c, const struct pwire_p
                                 size = pwire_value32(&v, 0, 0); // a range's default
                 }
         // the metas the source fills: their sizes are its own, but for the damage, of which the client says how many rectangles
-        if (c->meta_count >= 4)
+        if (c->meta_count >= 5)
                 return;
         for (unsigned k = 0; k < c->meta_count; k++)
                 if (c->meta_order[k] == type)
@@ -929,7 +929,7 @@ static void pwire_buffers_asked(struct pwire_connection *c, const struct pwire_p
 
 static unsigned pwire_meta_size(const struct pwire_connection *c, unsigned type)
 {
-        return type == PWIRE_META_HEADER ? c->header_size : type == PWIRE_META_CROP ? c->crop_size : type == PWIRE_META_DAMAGE ? c->damage_size
+        return type == PWIRE_META_BUSY ? 8 : type == PWIRE_META_HEADER ? c->header_size : type == PWIRE_META_CROP ? c->crop_size : type == PWIRE_META_DAMAGE ? c->damage_size
                                                                                      : type == PWIRE_META_CURSOR ? c->cursor_size : 0;
 }
 
@@ -1048,7 +1048,8 @@ static void pwire_port_update(struct pwire_connection *c, struct pwire_members *
         c->port = 1;
         if (!c->format_sent)
                 c->format.video = 0;
-        c->meta_count = 0, c->header_size = c->crop_size = c->damage_size = c->cursor_size = 0;
+        // Busy first, always: the consumer's stream counts in it the buffers its program has and has not given back
+        c->meta_order[0] = PWIRE_META_BUSY, c->meta_count = 1, c->header_size = c->crop_size = c->damage_size = c->cursor_size = 0;
         for (unsigned k = 0; k < count && !m->bad; k++)
         {
                 struct pwire_pod param = pwire_p_member(m);
@@ -1291,20 +1292,33 @@ PWIRE_API int pwire_wake_fd(long slot)
         return c && c->started ? c->done_fd : -1;
 }
 
-// The buffers the client holds now, by bit: the host's ring keeps them from being written.
+// Where buffer b's Busy meta is in the metadata (the first of its metas), or null.
+static unsigned char *pwire_busy(const struct pwire_connection *c, unsigned b)
+{
+        return c->meta && b < c->buffers && c->meta_count && c->meta_order[0] == PWIRE_META_BUSY ? c->meta + (long)b * c->meta_size : 0;
+}
+
+/*
+        The buffers the client holds now, by bit: the host's ring keeps them from being written. The one told last is held until
+        another is told (the client may be reading it, its count not yet raised); any other while its Busy count is up (the client's
+        stream raises it as it hands its program the buffer and lowers it when the program gives it back; it is the client's to
+        write, so it only ever keeps a buffer held, never frees one that is the newest).
+*/
 PWIRE_API unsigned long long pwire_held(long slot)
 {
         struct pwire_connection *c = pwire_of(slot);
-        unsigned status, id;
+        unsigned long long held = 0;
 
         if (!c || !c->started)
                 return 0;
-        // what the client gave back since: the io area's buffer when it asks for more (it is the client's to write: only an id in range counts)
-        status = __atomic_load_n((unsigned *)(c->mem + c->io_at), __ATOMIC_ACQUIRE);
-        id = __atomic_load_n((unsigned *)(c->mem + c->io_at + 4), __ATOMIC_ACQUIRE);
-        if (status == PWIRE_STATUS_NEED_DATA && id < c->buffers && id != c->last)
-                c->held &= ~(1ull << id);
-        return c->held;
+        for (unsigned b = 0; b < c->buffers; b++)
+        {
+                const unsigned char *busy = pwire_busy(c, b);
+
+                if (b == c->last || (busy && __atomic_load_n((const unsigned *)(busy + 4), __ATOMIC_ACQUIRE)))
+                        held |= 1ull << b;
+        }
+        return c->held = held;
 }
 
 // Whether a frame may be told now: the client is streaming, done with the last one, and the rate allows (ns since the last).
@@ -1331,7 +1345,6 @@ PWIRE_API int pwire_frame(long slot, unsigned buffer, long long pts, unsigned lo
         struct pwire_connection *c = pwire_of(slot);
         unsigned char *meta, *act, *driver, *pos;
         long long now;
-        unsigned status;
 
         if (!c || buffer >= c->buffers)
                 return -1;
@@ -1341,16 +1354,16 @@ PWIRE_API int pwire_frame(long slot, unsigned buffer, long long pts, unsigned lo
                 c->drops++;
                 return 0;
         }
-        // the frame before, never taken (the io area still has it): the source's again
-        status = __atomic_load_n((unsigned *)(c->mem + c->io_at), __ATOMIC_ACQUIRE);
-        if (status == PWIRE_STATUS_HAVE_DATA && c->last < c->buffers)
-                c->held &= ~(1ull << c->last);
-        pwire_held(slot);
         meta = c->meta + (long)buffer * c->meta_size;
         for (unsigned k = 0; k < c->meta_count; k++)
         {
                 unsigned type = c->meta_order[k], size = pwire_meta_size(c, type);
 
+                if (type == PWIRE_META_BUSY)
+                {
+                        meta += 8; // the client's count, never written here
+                        continue;
+                }
                 pwire_zero(meta, size);
                 if (type == PWIRE_META_HEADER)
                         pwire_put64(meta + 8, (unsigned long long)pts), pwire_put64(meta + 24, seq);
@@ -1377,7 +1390,8 @@ PWIRE_API int pwire_frame(long slot, unsigned buffer, long long pts, unsigned lo
         }
         // the chunk: the whole slot, the source's stride
         pwire_put32(meta, 0), pwire_put32(meta + 4, c->source.stride * c->source.height), pwire_put32(meta + 8, c->source.stride), pwire_put32(meta + 12, 0);
-        c->held |= 1ull << buffer, c->last = buffer;
+        c->last = buffer;
+        pwire_held(slot);
         // the driver's activation, for the client's word that it is done; its position, which the client's node reads
         act = c->mem + c->act_at, driver = c->mem + c->driver_at, pos = driver + PWIRE_ACT_POSITION;
         pwire_put32(driver + PWIRE_ACT_STATE_REQUIRED, 1), pwire_put32(driver + PWIRE_ACT_STATE_PENDING, 1);
@@ -1413,6 +1427,16 @@ PWIRE_API int pwire_frame(long slot, unsigned buffer, long long pts, unsigned lo
         pwire.host->signal(pwire.host->context, c->trigger_fd);
         c->last_frame = now, c->frames++;
         return 1;
+}
+
+// What the client's side says now: its activation's status, and the io area's status and buffer (for the host's trace).
+PWIRE_API void pwire_state(long slot, unsigned *activation, unsigned *status, unsigned *buffer)
+{
+        struct pwire_connection *c = pwire_of(slot);
+
+        *activation = c && c->mem ? pwire_get32(c->mem + c->act_at) : ~0u;
+        *status = c && c->mem ? pwire_get32(c->mem + c->io_at) : ~0u;
+        *buffer = c && c->mem ? pwire_get32(c->mem + c->io_at + 4) : ~0u;
 }
 
 // The frames told and let go.

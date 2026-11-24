@@ -13,7 +13,7 @@
         (STOPPED: the compositor drops the ring, the bus closes the session and the program is told it ended).
 
             share [-a] [-f FONT.ttf] [-b BOLD.ttf]
-            share --pick screen N | --pick window ROW | --refuse | --stop     the same, without the window: the oldest ask
+            share --pick screen N | --pick window ROW|WORD | --refuse | --stop     the same, without the window: the oldest ask
                                                                              answered, or every share stopped (for the keys and checks)
 
         Dawn Larsson - Apache-2.0 license
@@ -282,10 +282,19 @@ static b32 share_command(positive at)
                         n = n * 10 + (unsigned int)(number[k] - '0');
                 if (string_equals(what, (string_address) "screen"))
                         return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCREEN, n, 0) ? 0 : 1;
-                if (string_equals(what, (string_address) "window") && n < windows_rows(table))
+                // a window by its row, or the first offered whose app id or title holds the word
+                if (string_equals(what, (string_address) "window") && !(number[0] >= '0' && number[0] <= '9'))
+                        for (unsigned int r = 0; r < windows_rows(table); r++)
+                                if (share_offered(table, r, ~0u) &&
+                                    (string_find((string_address)table->app_id[r], number) || string_find((string_address)table->title[r], number)))
+                                {
+                                        n = r;
+                                        break;
+                                }
+                if (string_equals(what, (string_address) "window") && n < windows_rows(table) && share_offered(table, n, ~0u))
                         return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_WINDOW, n, table->pid[n]) ? 0 : 1;
         }
-        string_format(log, (string_address) "share: --pick screen N | --pick window ROW | --refuse | --stop\n");
+        string_format(log, (string_address) "share: --pick screen N | --pick window ROW|WORD | --refuse | --stop\n");
         return log_flush(), 2;
 }
 

@@ -315,22 +315,24 @@ static void cn_test_stream(void)
                 CNCHECK(pwire_get32(c->mem + c->io_at) == PWIRE_STATUS_HAVE_DATA && pwire_get32(c->mem + c->io_at + 4) == 0,
                         "the io area has the buffer");
                 CNCHECK(pwire_get32(c->mem + c->act_at) == PWIRE_ACT_TRIGGERED, "the client's activation is triggered");
-                CNCHECK(pwire_get32(c->meta + 8) == 5555 && pwire_get32(c->meta + 24) == 1, "the header has its stamp and its number");
-                CNCHECK(pwire_get32(c->meta + 32) == 10 && pwire_get32(c->meta + 44) == 40, "the damage meta has its rectangle");
+                CNCHECK(pwire_get32(c->meta + 8 + 8) == 5555 && pwire_get32(c->meta + 8 + 24) == 1, "the header has its stamp and its number (after Busy)");
+                CNCHECK(pwire_get32(c->meta + 40) == 10 && pwire_get32(c->meta + 52) == 40, "the damage meta has its rectangle");
                 CNCHECK(!pwire_ready(slot, cn_time + 100000000ll), "not ready while the client has not run");
                 CNCHECK(pwire_frame(slot, 1, 6666, 2, 0, 0) == 0, "and a frame then is let go");
-                // the client runs: its activation finished, the buffer before given back (none yet)
+                // the client runs: its activation finished, and its stream counts the buffer its program has in the Busy meta
                 pwire_put32(c->mem + c->act_at, PWIRE_ACT_FINISHED);
-                pwire_put32(c->mem + c->io_at, PWIRE_STATUS_NEED_DATA), pwire_put32(c->mem + c->io_at + 4, ~0u);
+                pwire_put32(c->mem + c->io_at, PWIRE_STATUS_NEED_DATA);
+                pwire_put32(c->meta + 4, 1);
                 CNCHECK(pwire_held(slot) == 1, "it holds the buffer it was told");
                 cn_time += 20000000ll;
                 CNCHECK(pwire_frame(slot, 1, 7777, 3, 0, 0) == 1, "the next frame is told");
                 pwire_put32(c->mem + c->act_at, PWIRE_ACT_FINISHED);
-                pwire_put32(c->mem + c->io_at, PWIRE_STATUS_NEED_DATA), pwire_put32(c->mem + c->io_at + 4, 0);
-                CNCHECK(pwire_held(slot) == 2, "the buffer it gave back is the source's again");
-                pwire_put32(c->mem + c->io_at + 4, 77);
-                CNCHECK(pwire_held(slot) == 2, "a buffer id out of range in the io area (the client's to write) is not taken");
-                CNCHECK(pwire_get32(c->meta + c->meta_size + 32) == 0 && pwire_get32(c->meta + c->meta_size + 40) == 640,
+                CNCHECK(pwire_held(slot) == 3, "a buffer its program has not given back stays held");
+                pwire_put32(c->meta + 4, 0);
+                CNCHECK(pwire_held(slot) == 2, "given back (its count down), it is the source's again; the newest stays held");
+                pwire_put32(c->meta + c->meta_size + 4, 0);
+                CNCHECK(pwire_held(slot) == 2, "the newest told is held whatever its count says (the client's to write)");
+                CNCHECK(pwire_get32(c->meta + c->meta_size + 40) == 0 && pwire_get32(c->meta + c->meta_size + 48) == 640,
                         "a frame told without damage says the whole frame changed");
         }
         CNCHECK(pwire_frame(slot, 4, 1, 4, 0, 0) == -1, "a buffer past the source's slots is not one");

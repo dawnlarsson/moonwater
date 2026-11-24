@@ -614,6 +614,8 @@ static void castbus_event(long base, long owner, short returned)
                 castbus_deliver(table);
 }
 
+static void castbus_trace(struct windows *table);
+
 // A turn of the loop: the answers of the share app and the compositor read from the rows, sessions of programs gone let go,
 // frames that waited told, every connection's output sent.
 static void castbus_tick(void)
@@ -674,6 +676,42 @@ static void castbus_tick(void)
         }
         if (table && castbus.waiting)
                 castbus_deliver(table);
+        castbus_trace(table);
+}
+
+// With the bus traced (-t), each live share's state once a second: the compositor's frames, the ring's slots, each connection's.
+static void castbus_trace(struct windows *table)
+{
+        static long last;
+        long now = sessionbus_now(0);
+
+        if (!sessionbus_host.trace || !table || now - last < 1000)
+                return;
+        last = now;
+        for (unsigned int at = 0; at < WINDOWS_CASTS; at++)
+        {
+                struct castbus_share *s = &castbus.share[at];
+                struct windows_cast *row = &table->casts[s->row];
+
+                if (!s->ticket)
+                        continue;
+                string_format(log, (string_address) "sessionbus: share %p state %p frames %p latest %p held %p%p%p%p seq %p %p %p %p\n", (positive)s->ticket,
+                              (positive)row->state, (positive)row->frames, (positive)row->latest, (positive)row->held[0], (positive)row->held[1],
+                              (positive)row->held[2], (positive)row->held[3], (positive)row->seq[0], (positive)row->seq[1], (positive)row->seq[2], (positive)row->seq[3]);
+                for (int k = 0; k < CASTBUS_PER; k++)
+                        if (s->link[k].pw >= 0)
+                        {
+                                unsigned activation, status, buffer;
+                                unsigned long frames, drops;
+
+                                pwire_state(s->link[k].pw, &activation, &status, &buffer);
+                                pwire_counts(s->link[k].pw, &frames, &drops);
+                                string_format(log, (string_address) "sessionbus:   stream told %p (at %p) holding %p pw-held %p activation %p io %p buffer %p ready %p\n",
+                                              (positive)frames, (positive)s->link[k].told, (positive)s->link[k].holding, (positive)pwire_held(s->link[k].pw),
+                                              (positive)activation, (positive)status, (positive)buffer, (positive)pwire_ready(s->link[k].pw, castbus_now_ns(0)));
+                        }
+                log_flush();
+        }
 }
 
 // How long the loop may wait: shorter while the person picks or a frame waits for its consumer.
