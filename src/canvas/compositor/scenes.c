@@ -587,12 +587,11 @@ static int compositor_scenes_shown(void)
 
 // Whether the overview draws a row in its own place or not at all: a window on its screen, but the desktop's ground (a
 // background layer) and the keyboard on the screen, which stay where they are.
-// A window dragged to the band, which opened the overview, stays where the hand has it, over the overview.
+// A window dragged to the band, which opened the overview, is the overview's to draw too: under the hand, at a Scene card's scale.
 static int compositor_scenes_hides(int row)
 {
         return compositor_scenes_shown() && row >= 0 && row < COMPOSITOR_ROWS && compositor.layer[row] != WINDOW_LAYER_BACKGROUND &&
-               !(compositor.asks[row] & WINDOW_KEYBOARD) && compositor_screen_of(row) == compositor.scenes.screen &&
-               !(compositor_scenes_kept.auto_opened && row == compositor.drag);
+               !(compositor.asks[row] & WINDOW_KEYBOARD) && compositor_screen_of(row) == compositor.scenes.screen;
 }
 
 // Whether a point is the overview's while it is drawn: on its screen and not on the band, so no window under it takes it.
@@ -878,7 +877,9 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
         const unsigned int *wall = 0;
         b64 t = compositor_scenes_t();
         unsigned int accent = compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu;
-        int held = compositor.scenes.open && compositor_scenes_kept.held ? compositor.scenes.press_row : COMPOSITOR_NONE, lit_w;
+        // The window the hand has: a miniature picked up in the overview, or a window dragged by its title to the band, which opened it.
+        int dragged = compositor.scenes.open && compositor_scenes_kept.auto_opened && compositor.drag >= 0 && compositor.drag < COMPOSITOR_ROWS;
+        int held = compositor.scenes.open && compositor_scenes_kept.held ? compositor.scenes.press_row : dragged ? compositor.drag : COMPOSITOR_NONE, lit_w;
 
         if (screen < 0 || (unsigned int)screen >= count || !compositor.row_space)
                 return 0;
@@ -1000,7 +1001,7 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
         if (held != COMPOSITOR_NONE && at < room)
         {
                 unsigned int own = at, made = 0;
-                int from[4], to[4], press_card = compositor_scenes_card_at(compositor.scenes.press_x, compositor.scenes.press_y), big = -1;
+                int from[4], to[4], press_card = dragged ? -1 : compositor_scenes_card_at(compositor.scenes.press_x, compositor.scenes.press_y), big = -1;
 
                 for (unsigned int i = 0; i < compositor.scenes.windows; i++)
                         if (compositor.scenes.row[i] == held)
@@ -1021,10 +1022,27 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                                 int r[4] = {compositor.x[held], compositor.y[held], (int)compositor.w[held], (int)compositor.h[held]};
 
                                 compositor_scenes_in_card(s, compositor.scenes.card[press_card], r, to);
+                                to[0] += compositor.pointer_x - compositor.scenes.press_x, to[1] += compositor.pointer_y - compositor.scenes.press_y;
                         }
                         else
-                                memory_copy(to, compositor.scenes.rect[big], sizeof(to));
-                        to[0] += compositor.pointer_x - compositor.scenes.press_x, to[1] += compositor.pointer_y - compositor.scenes.press_y;
+                        {
+                                // At a Scene card's scale, as it will be in the card it is dropped on: the screen and the cards one measure,
+                                // so where it lands is seen. The point the hand holds stays under it: the press's place in its rect, or for
+                                // a window dragged by its title, the hand's place on the window.
+                                int r[4] = {compositor.x[held], compositor.y[held], (int)compositor.w[held], (int)compositor.h[held]};
+                                int card = compositor_spaces_active_index(screen), grab[4];
+                                long long fx, fy;
+
+                                if (dragged || big < 0)
+                                        memory_copy(grab, r, sizeof(grab));
+                                else
+                                        memory_copy(grab, compositor.scenes.rect[big], sizeof(grab));
+                                fx = grab[2] > 0 ? ((long long)((dragged ? compositor.pointer_x : compositor.scenes.press_x) - grab[0]) << 16) / grab[2] : 0;
+                                fy = grab[3] > 0 ? ((long long)((dragged ? compositor.pointer_y : compositor.scenes.press_y) - grab[1]) << 16) / grab[3] : 0;
+                                card = card >= 0 && (unsigned int)card + 1 < compositor.scenes.cards ? card : 0;
+                                compositor_scenes_in_card(s, compositor.scenes.card[card], r, to);
+                                to[0] = compositor.pointer_x - (int)((fx * to[2]) >> 16), to[1] = compositor.pointer_y - (int)((fy * to[3]) >> 16);
+                        }
                         made = compositor_scenes_put(&frames[own], made, from, to, clip, press_card >= 0 ? 0 : radius, press_card >= 0 ? 0 : line);
                         if (made)
                                 frames[own].lit = COMPOSITOR_LIT_ALL, frames[own].lit_ink = accent, frames[own].lit_w = lit_w;
