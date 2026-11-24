@@ -7056,6 +7056,162 @@ static fn check_editor_lines_put(void)
         check("editor colours: three lines written over three, the third a comment's opener, make the lines after them the comment's", written);
         check("editor colours: and an undo that puts such three lines back over three of code does too, as a document opened with that text has it", undone);
 }
+
+static fn check_editor_save_as_and_disk(void)
+{
+        p8 root[128], p_a[EDITOR_PATH], p_ro[EDITOR_PATH], p_dir[EDITOR_PATH];
+        bipolar pid = (bipolar)system_call_1(syscall(getpid), 0), fd;
+        struct editor_tab address_to tab;
+        int orig_folder;
+
+        string_copy_bounded((string_address)root, (string_address) "/tmp/mw_teamf_ed_", sizeof(root));
+        positive rlen = string_length((string_address)root);
+        root[rlen + positive_into(root + rlen, (positive)pid)] = 0;
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)root, 0755);
+
+        string_copy_bounded((string_address)p_a, (string_address)root, sizeof(p_a));
+        string_append_bounded((string_address)p_a, (string_address) "/a.txt", sizeof(p_a));
+        string_copy_bounded((string_address)p_ro, (string_address)root, sizeof(p_ro));
+        string_append_bounded((string_address)p_ro, (string_address) "/existing.txt", sizeof(p_ro));
+        string_copy_bounded((string_address)p_dir, (string_address)root, sizeof(p_dir));
+        string_append_bounded((string_address)p_dir, (string_address) "/adir", sizeof(p_dir));
+
+        fd = (bipolar)system_call_4(syscall(openat), (positive)AT_FDCWD, (positive)p_a, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd >= 0) system_write_all_checked((b32)fd, "hello", 5), system_close(fd);
+        fd = (bipolar)system_call_4(syscall(openat), (positive)AT_FDCWD, (positive)p_ro, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0444);
+        if (fd >= 0) system_write_all_checked((b32)fd, "keep", 4), system_close(fd);
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)p_dir, 0755);
+
+        editor.count = 0, editor.tab = 0;
+        memory_zero(&editor.confirm, sizeof(editor.confirm));
+        check("EDITOR-001: open a.txt", editor_open((string_address)p_a) && editor.count == 1);
+        tab = &editor.tabs[0];
+        orig_folder = tab->folder;
+
+        /* Save As over existing read-only file must require confirmation and preserve existing content & tab state */
+        b32 overwrote = editor_save_as(tab, (const char address_to)p_ro);
+        check("EDITOR-001: save_as over existing read-only file asks confirmation first", !overwrote);
+        {
+                p8 buf[16] = {0};
+                bipolar rfd = (bipolar)system_call_4(syscall(openat), (positive)AT_FDCWD, (positive)p_ro, O_RDONLY | O_CLOEXEC, 0);
+                bipolar got = rfd >= 0 ? system_read_retry((positive)rfd, buf, sizeof(buf) - 1) : -1;
+                if (rfd >= 0) system_close(rfd);
+                check("EDITOR-001: existing read-only file content untouched before confirmation",
+                      got == 4 && !memory_compare(buf, "keep", 4));
+        }
+        check("EDITOR-001: tab path and pinned folder preserved after refused save_as",
+              string_equals((string_address)tab->path, (string_address)p_a) && tab->folder == orig_folder);
+
+        /* Save As to an existing directory fails; tab path and pinned folder must remain intact so Ctrl+S still works */
+        memory_zero(&editor.confirm, sizeof(editor.confirm));
+        (void)editor_save_as(tab, (const char address_to)p_dir);
+        b32 dir_ok = editor_save_as(tab, (const char address_to)p_dir);
+        check("EDITOR-001: save_as to directory fails", !dir_ok);
+        check("EDITOR-001: tab path and pinned folder preserved after failed save_as",
+              string_equals((string_address)tab->path, (string_address)p_a) && tab->folder == orig_folder);
+        check("EDITOR-001: subsequent editor_save to original file still succeeds", editor_save(tab));
+
+        /* EDITOR-002: externally deleting the file sets changed_on_disk (fresh tab isolated from EDITOR-001) */
+        editor_tab_release(tab, true);
+        editor.count = 0;
+        {
+                p8 p_b[EDITOR_PATH];
+                string_copy_bounded((string_address)p_b, (string_address)root, sizeof(p_b));
+                string_append_bounded((string_address)p_b, (string_address) "/b.txt", sizeof(p_b));
+                fd = (bipolar)system_call_4(syscall(openat), (positive)AT_FDCWD, (positive)p_b, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                if (fd >= 0) system_write_all_checked((b32)fd, "world", 5), system_close(fd);
+                check("EDITOR-002: open b.txt", editor_open((string_address)p_b) && editor.count == 1);
+                tab = &editor.tabs[0];
+                tab->changed_on_disk = false;
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)p_b, 0);
+                editor_check_disk(tab);
+                check("EDITOR-002: editor_check_disk detects externally deleted file", tab->changed_on_disk);
+                editor_tab_release(tab, true);
+                editor.count = 0;
+        }
+}
+#endif
+
+static int tf_tb_glass_cb(void *ctx, int gx, int gy, int gw, int gh)
+{
+        int *got = (int *)ctx;
+        got[0] = gx, got[1] = gy, got[2] = gw, got[3] = gh;
+        return gw;
+}
+
+static fn check_taskbar_glass_offset(void)
+{
+        static unsigned int band_pixels[BAND_W * 128];
+        static const unsigned char lengths[2] = {6, 8};
+        static const unsigned char marks[2] = {0, 0};
+        struct taskbar_view view;
+        int rect[4] = {0, 0, 0, 0}, got[4] = {0, 0, 0, 0};
+        int bx, by, bw, bh;
+        positive pagesz = 4096;
+        positive glass_bytes = (positive)BAND_W * 128 * 4;
+        positive glass_pages = (glass_bytes + pagesz - 1) / pagesz;
+        p8 *guard_map = (p8 *)memory((glass_pages + 2) * pagesz);
+
+        check("TASKBAR-001: guard mapping allocated", (bipolar)(positive)guard_map > 0);
+        if ((bipolar)(positive)guard_map <= 0)
+                return;
+        /* Place a PROT_NONE guard page immediately before AND after view->glass */
+        system_call_3(syscall(mprotect), (positive)guard_map, pagesz, 0);
+        system_call_3(syscall(mprotect), (positive)(guard_map + (glass_pages + 1) * pagesz), pagesz, 0);
+        memory_fill(guard_map + pagesz, 0x40, glass_pages * pagesz);
+
+        compositor_zero();
+        compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        taskbar_scale_set(100);
+        taskbar.edge_in = 10; /* shifts bottom bar up: taskbar_off(view, 0) == -10 < 0 */
+
+        memory_zero(&view, sizeof(view));
+        view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM;
+        view.count = 2, view.lengths = lengths, view.marks = marks;
+        view.pixels = band_pixels, view.band_bytes = sizeof(band_pixels);
+        view.glass = (unsigned int *)(guard_map + pagesz);
+        taskbar_band(&view, &bx, &by, &bw, &bh);
+
+        int drew = taskbar_draw(&view, ~0ul, tf_tb_glass_cb, got, rect);
+        check("TASKBAR-001: taskbar_draw with negative offset (edge_in=10) succeeds without OOB read", drew == 1);
+        check("TASKBAR-001: glass rect matches shifted band y", got[1] == by && rect[1] == by);
+
+        taskbar.edge_in = 0;
+        system_call_2(syscall(munmap), (positive)guard_map, (glass_pages + 2) * pagesz);
+}
+
+#if MOONWATER_UI_NOTICES
+static fn check_notices_alert_hidpi(void)
+{
+        static unsigned int alert_pixels[1024 * 512];
+        static struct windows *table;
+
+        windows_scratch_zero(windows_scratch_table(&table));
+        table->output_width = 1920, table->output_height = 1080, table->stride = 1024;
+        memory_zero(&notices, sizeof(notices));
+        notices.own.table = table, notices.own.row = 0;
+        notices.ui.scale = 200;
+        notices.ui.engine = terminal.ui.engine;
+        notices.ui.regular = terminal.ui.regular;
+        notices.ui.bold = terminal.ui.bold;
+        notices.alert_kind = UI_ALERT_ERROR;
+        notices.alert_title = "Error";
+        notices.alert_msg = "Something failed";
+
+        notices_open();
+        check("NOTICES-001: alert window width is scaled to device pixels at 200pct",
+              notices.width == ui_px(&notices.ui, UI_ALERT_W));
+        check("NOTICES-001: alert window height is scaled to device pixels at 200pct",
+              notices.height == ui_px(&notices.ui, UI_ALERT_H));
+
+        notices_draw(alert_pixels);
+        check("NOTICES-001: OK button fits inside window horizontally at 200pct scale",
+              notices.alert.ok.w > 0 && ui_dev(&notices.ui, notices.alert.ok.x + notices.alert.ok.w) <= notices.width);
+        check("NOTICES-001: OK button fits inside window vertically at 200pct scale",
+              notices.alert.ok.h > 0 && ui_dev(&notices.ui, notices.alert.ok.y + notices.alert.ok.h) <= notices.height);
+        notices.alert_kind = 0;
+}
 #endif
 
 #if MOONWATER_UI_ANY
@@ -11147,8 +11303,10 @@ b32 main()
         GROUP("check_scene_damage_cut", check_scene_damage_cut());
         GROUP("check_compositor_volume", check_compositor_volume()); // after the band's face is loaded: the cell is drawn with it
         GROUP("check_taskbar_scale", check_taskbar_scale());
+        GROUP("check_taskbar_glass_offset", check_taskbar_glass_offset());
 #if MOONWATER_UI_NOTICES
         GROUP("check_notices_dot", check_notices_dot());
+        GROUP("check_notices_alert_hidpi", check_notices_alert_hidpi());
 #endif
 #endif
 #if MOONWATER_UI_SETTINGS
@@ -11202,6 +11360,7 @@ b32 main()
 #if MOONWATER_UI_EDITOR
         GROUP("check_editor_comments", check_editor_comments());
         GROUP("check_editor_lines_put", check_editor_lines_put());
+        GROUP("check_editor_save_as_and_disk", check_editor_save_as_and_disk());
 #endif
 
         // What the terminal says its paper and ink are is what it paints them with: the theme's pair, and the palette's.

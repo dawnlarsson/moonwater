@@ -1042,7 +1042,8 @@ enum { FILES_JOB_IDLE, FILES_JOB_RUNNING, FILES_JOB_DONE, FILES_JOB_FAILED, FILE
 struct files_job
 {
         int state, depth;
-        bipolar error, stack[FILES_JOB_DEEP];
+        b32 has_info;
+        bipolar error, info_dir, stack[FILES_JOB_DEEP];
         p8 at[FILES_NAME], inside[FILES_JOB_DEEP][FILES_NAME], address_to names;
         p32 removed, count, next, address_to offsets;
         file_facts address_to facts;
@@ -1073,7 +1074,13 @@ static int files_model_rename(struct files_model address_to m, p32 place, const 
 #define FILES_JOB_NAMES ((positive)FILES_MOST * FILES_NAME / 8)
 #define FILES_JOB_BYTES (FILES_JOB_NAMES + (positive)FILES_MOST / 8 * (sizeof(file_facts) + sizeof(p32)))
 
-static inline fn files_job_close(struct files_job address_to job) { while (job->depth > 0) system_close(job->stack[--job->depth]); }
+static inline fn files_job_close(struct files_job address_to job)
+{
+        while (job->depth > 0)
+                system_close(job->stack[--job->depth]);
+        if (job->has_info)
+                system_close(job->info_dir), job->has_info = false, job->info_dir = -1;
+}
 static inline fn files_job_end(struct files_job address_to job) { files_job_close(job), files_unmap(job->names, FILES_JOB_BYTES), memory_fill(job, 0, sizeof(*job)); }
 static inline fn files_job_cancel(struct files_job address_to job) { if (job->state == FILES_JOB_RUNNING) files_job_close(job), job->state = FILES_JOB_CANCELLED; }
 
@@ -1168,6 +1175,18 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
                                         job->depth ? null : &job->facts[job->next], &job->removed, &err);
                 if (step < 0)
                         return files_job_close(job), job->state = FILES_JOB_FAILED, job->error = err, false;
+                if (step > 0 && job->has_info)
+                {
+                        p8 info_name[FILES_NAME];
+                        const p8 address_to top = job->names + job->offsets[job->next];
+                        positive len = string_length((string_address)top);
+                        if (len + 10 < FILES_NAME)
+                        {
+                                memory_copy(info_name, top, len);
+                                memory_copy(info_name + len, ".trashinfo", 11);
+                                system_remove_at(job->info_dir, (string_address)info_name, 0);
+                        }
+                }
                 job->next += step;
         }
         return job->state == FILES_JOB_RUNNING;
@@ -2813,22 +2832,59 @@ static inline int files_hex_nibble(p8 c)
         return -1;
 }
 
-static int files_bin_put(const p8 address_to bin, const p8 address_to path, const char address_to when, p8 address_to named)
+static int files_bin_put_at(const p8 address_to bin, bipolar src_dir, const p8 address_to src_name, const p8 address_to path, const char address_to when, p8 address_to named)
 {
-        p8 files_dir[FILES_PATH], into[FILES_PATH], info[FILES_PATH], text[FILES_PATH * 3 + 96];
-        positive used = 18;
-        b32 numbered;
-        bipolar folder, moved, out = -1;
+        p8 files_dir[FILES_PATH], info_dir[FILES_PATH], parent[FILES_PATH], base[FILES_NAME], info_name[FILES_NAME], text[FILES_PATH * 3 + 96];
+        positive used = 18, base_len, dot;
+        bipolar folder = -1, info_fd = -1, own_src = -1, moved, out = -1;
         int res = FILES_DID_FAILED;
-        if (!files_bin_join(files_dir, bin, "/files", null, null) || !files_bin_folders(files_dir) ||
-            !files_bin_join(info, bin, "/info", null, null) || !files_bin_folders(info) ||
-            (folder = files_open_dir(AT_FDCWD, files_dir, O_NOFOLLOW)) < 0)
-                return FILES_DID_FAILED;
-        for (int tries = 0; tries < 8 && out < 0; tries++)
+        if (src_dir < 0)
         {
-                if (!files_move_free_name(folder, files_base_name(path), named, &numbered) || !files_bin_join(info, bin, "/info", named, ".trashinfo"))
+                if (!files_path_parent(path, parent, base) || !files_name_good(base) ||
+                    (own_src = files_open_dir(AT_FDCWD, parent, 0)) < 0)
+                        return FILES_DID_FAILED;
+                src_dir = own_src, src_name = base;
+        }
+        else if (!src_name || !files_name_good(src_name))
+                return FILES_DID_FAILED;
+        if (!files_bin_join(files_dir, bin, "/files", null, null) || !files_bin_folders(files_dir) ||
+            !files_bin_join(info_dir, bin, "/info", null, null) || !files_bin_folders(info_dir) ||
+            (folder = files_open_dir(AT_FDCWD, files_dir, O_NOFOLLOW)) < 0 ||
+            (info_fd = files_open_dir(AT_FDCWD, info_dir, O_NOFOLLOW)) < 0)
+                goto done;
+        base_len = string_length((string_address)src_name);
+        dot = files_name_dot(src_name, base_len);
+        for (positive number = 0; number < 1000 && out < 0; number++)
+        {
+                file_facts there;
+                positive cand_len;
+                if (number == 0)
+                {
+                        if (base_len + 10 >= FILES_NAME)
+                                break;
+                        memory_copy(named, src_name, base_len + 1);
+                        cand_len = base_len;
+                }
+                else
+                {
+                        p8 digits[8];
+                        positive count = number > 1 ? positive_into(digits, number) : 0;
+                        cand_len = base_len + 5 + count;
+                        if (cand_len + 10 >= FILES_NAME)
+                                break;
+                        memory_copy(named, src_name, dot);
+                        memory_copy(named + dot, ".copy", 5);
+                        memory_copy(named + dot + 5, digits, count);
+                        memory_copy(named + dot + 5 + count, src_name + dot, base_len - dot + 1);
+                }
+                memory_copy(info_name, named, cand_len);
+                memory_copy(info_name + cand_len, ".trashinfo", 11);
+                if (files_look_at(folder, named, &there) != -ERROR_NO_ENTRY ||
+                    files_look_at(info_fd, info_name, &there) != -ERROR_NO_ENTRY)
+                        continue;
+                out = system_open_at_mode(info_fd, (string_address)info_name, FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
+                if (out < 0 && out != -ERROR_EXISTS)
                         goto done;
-                out = system_open_at_mode(AT_FDCWD, (string_address)info, FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
         }
         if (out < 0)
                 goto done;
@@ -2839,14 +2895,32 @@ static int files_bin_put(const p8 address_to bin, const p8 address_to path, cons
         for (const char address_to c = when; *c && used + 2 < sizeof(text); c++)
                 text[used++] = (p8)*c;
         text[used++] = '\n';
-        system_write_once((b32)out, text, used), system_close(out);
-        files_bin_join(into, bin, "/files", named, null);
-        if ((moved = files_rename_nr(AT_FDCWD, path, AT_FDCWD, into)) < 0)
-                system_remove_at(AT_FDCWD, (string_address)info, 0), res = moved == -ERROR_CROSS_DEVICE ? FILES_DID_CROSS : FILES_DID_FAILED;
+        {
+                system_write_result wrote = system_write_all_checked((b32)out, text, used);
+                b32 closed = system_close(out) == 0;
+                if (wrote.error != 0 || wrote.bytes != used || !closed)
+                {
+                        system_remove_at(info_fd, (string_address)info_name, 0);
+                        goto done;
+                }
+        }
+        if ((moved = files_rename_nr(src_dir, src_name, folder, named)) < 0)
+                system_remove_at(info_fd, (string_address)info_name, 0), res = moved == -ERROR_CROSS_DEVICE ? FILES_DID_CROSS : FILES_DID_FAILED;
         else
                 res = FILES_DID;
 done:
-        return system_close(folder), res;
+        if (info_fd >= 0)
+                system_close(info_fd);
+        if (folder >= 0)
+                system_close(folder);
+        if (own_src >= 0)
+                system_close(own_src);
+        return res;
+}
+
+static int files_bin_put(const p8 address_to bin, const p8 address_to path, const char address_to when, p8 address_to named)
+{
+        return files_bin_put_at(bin, -1, null, path, when, named);
 }
 
 static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 address_to path)

@@ -730,7 +730,7 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
                      ? TASKBAR_HIT_NONE : which;
 }
 
-static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *w, int *h)
+static int taskbar_slot_band(const struct taskbar_view *view, int which, int *x, int *y, int *w, int *h)
 {
         const struct ui_node address_to n = taskbar_node(view, which), address_to band = &taskbar_tree(view)->node[1];
 
@@ -741,6 +741,13 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
                 *x = band->x, *w = band->w;
         else
                 *y = band->y, *h = band->h;
+        return 1;
+}
+
+static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *w, int *h)
+{
+        if (!taskbar_slot_band(view, which, x, y, w, h))
+                return 0;
         // Where the slot is with the band shown: a band slid away over a fullscreen window has its slots off the screen, and the
         // launcher the logo key opens there (the band comes back while it is up, compositor_taskbar_slide) would be anchored off it.
         if (taskbar_vertical(view->position))
@@ -777,7 +784,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
         for (int which = TASKBAR_STRIP_ON; which < (int)view->count; which++)
         {
                 int reach[4];
-                if (!taskbar_slot_own(which) || !taskbar_anchor(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
+                if (!taskbar_slot_own(which) || !taskbar_slot_band(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
                         continue;
                 reach[2] += reach[0] + COMPOSITOR_GLASS_REACH, reach[3] += reach[1] + COMPOSITOR_GLASS_REACH;
                 reach[0] -= COMPOSITOR_GLASS_REACH, reach[1] -= COMPOSITOR_GLASS_REACH;
@@ -857,27 +864,46 @@ static const struct ui_node address_to taskbar_ui(struct ui *ui, const struct ta
         return mark;
 }
 
-static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, int gy, int gw, int bx, int by, int bw, int x, int y, int width, int height)
+static unsigned int taskbar_glass_tab_clamped(const struct taskbar_view *view, int gx, int gy, int gw, int gh, int bx, int by, int bw, int x, int y, int width, int height)
 {
+        unsigned int amount = 179, target = compositor_tab_target(0);
+        int mx, my, c0, c1;
+
         if (view->scene)
                 view->scene->lost = UI_LOST_GLASS;
-        unsigned int middle = compositor_vivid(view->glass[(long)(y + height / 2 - gy) * gw + x - gx + width / 2]);
-        unsigned int amount = 179, target = compositor_tab_target(0);
+        if (gw <= 0 || width <= 0 || height <= 0)
+                return target;
+        mx = x - gx + width / 2, my = y + height / 2 - gy;
+        if (mx < 0) mx = 0;
+        else if (mx >= gw) mx = gw - 1;
+        if (my < 0) my = 0;
+        else if (gh > 0 && my >= gh) my = gh - 1;
+        unsigned int middle = compositor_vivid(view->glass[(long)my * gw + mx]);
 
-        for (int row = y; row < y + height; row++)
-        {
-                const unsigned int *from = view->glass + (long)(row - gy) * gw + (x - gx);
-                unsigned int *into = view->pixels + (long)(row - by) * bw + (x - bx);
-                for (int at = 0; at < width; at += TASKBAR_TAB_CHUNK)
+        c0 = x < gx ? gx - x : 0;
+        c1 = x + width > gx + gw ? gx + gw - x : width;
+        if (c0 < c1)
+                for (int row = y; row < y + height; row++)
                 {
-                        int count = width - at < TASKBAR_TAB_CHUNK ? width - at : TASKBAR_TAB_CHUNK;
-                        memory_saturate_u32(taskbar_tint, from + at, (positive)count);
-                        memory_tint_u32(taskbar_tint, taskbar_tint, (positive)count, target, amount, 255, 0);
-                        memory_glass_over_u32(into + at, taskbar_clear, taskbar_tint, (positive)count,
-                                              compositor_grain_row(target != 0, (x - bx) + at, row - by));
+                        if (row < gy || (gh > 0 && row >= gy + gh))
+                                continue;
+                        const unsigned int *from = view->glass + (long)(row - gy) * gw + (x - gx);
+                        unsigned int *into = view->pixels + (long)(row - by) * bw + (x - bx);
+                        for (int at = c0; at < c1; at += TASKBAR_TAB_CHUNK)
+                        {
+                                int count = c1 - at < TASKBAR_TAB_CHUNK ? c1 - at : TASKBAR_TAB_CHUNK;
+                                memory_saturate_u32(taskbar_tint, from + at, (positive)count);
+                                memory_tint_u32(taskbar_tint, taskbar_tint, (positive)count, target, amount, 255, 0);
+                                memory_glass_over_u32(into + at, taskbar_clear, taskbar_tint, (positive)count,
+                                                      compositor_grain_row(target != 0, (x - bx) + at, row - by));
+                        }
                 }
-        }
         return window_mix(middle, target, amount);
+}
+
+static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, int gy, int gw, int bx, int by, int bw, int x, int y, int width, int height)
+{
+        return taskbar_glass_tab_clamped(view, gx, gy, gw, 0, bx, by, bw, x, y, width, height);
 }
 
 static fn taskbar_glass_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t, unsigned int ground)
@@ -1679,7 +1705,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 return 0;
         for (int which = TASKBAR_STRIP_ON; which < (int)view->count; which++)
                 if (taskbar_slot_own(which) && (redo & taskbar_bit(which)) &&
-                    taskbar_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
+                    taskbar_slot_band(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
                 {
                         if (which == TASKBAR_LAUNCHER)
                         {
@@ -1724,7 +1750,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         struct ui ui;
                         struct ui_box clip = taskbar_face(t, n, 0, 0);
 
-                        ground = taskbar_glass_tab(view, rect[0], rect[1], gw, band->x, band->y, band->w, n->x, n->y, n->w, n->h);
+                        ground = taskbar_glass_tab_clamped(view, rect[0], rect[1], gw, rect[3], band->x, band->y, band->w, n->x, n->y, n->w, n->h);
                         taskbar_glass_ui(&ui, view, t, ground);
                         if (which >= 0)
                         {
@@ -1779,7 +1805,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                 unsigned int sg = ground, si = ink;
 
                                 if (!time_ok)
-                                        sg = taskbar_glass_tab(view, rect[0], rect[1], gw, band->x, band->y, band->w, n->x, n->y, n->w, n->h),
+                                        sg = taskbar_glass_tab_clamped(view, rect[0], rect[1], gw, rect[3], band->x, band->y, band->w, n->x, n->y, n->w, n->h),
                                         si = window_contrast(sg);
                                 if (which == TASKBAR_SPACE_ADD)
                                         label[0] = '+';
@@ -1809,7 +1835,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                 const struct ui_node address_to mark = n->first >= 0 ? &t->node[n->first] : null;
                                 const unsigned int *px = taskbar_tray_items_pixels(TASKBAR_TRAY_ITEM_BASE - which);
                                 if (!time_ok)
-                                        ground = taskbar_glass_tab(view, rect[0], rect[1], gw, band->x, band->y, band->w, n->x, n->y, n->w, n->h),
+                                        ground = taskbar_glass_tab_clamped(view, rect[0], rect[1], gw, rect[3], band->x, band->y, band->w, n->x, n->y, n->w, n->h),
                                         ink = window_contrast(ground);
                                 if (mark && px && mark->w > 0 && mark->h > 0)
                                 {

@@ -815,7 +815,7 @@ static fn files_move_deed(const struct files_move address_to job)
         for (p32 k = 0; k < job->count; k++)
         {
                 const p8 address_to landed = files_move_landed(job, k);
-                if (landed[0] && job->copied[k] && files_path_join(to, FILES_PATH, files.move_into, landed))
+                if (landed[0] && job->copied[k] == 2 && files_path_join(to, FILES_PATH, files.move_into, landed))
                         files_deed_add(d, files_move_path(job, k), to);
         }
         files_deed_keep(d);
@@ -946,6 +946,16 @@ static fn files_delete(void)
                 files.armed = false, files.big->note[0] = 0;
                 if (!files_delete_begin(m, &files.big->job))
                         files.said = LANGUAGE_files_changed, files_model_reload(m);
+                else if (files_in_bin())
+                {
+                        p8 bin[FILES_PATH], info_dir[FILES_PATH];
+                        if (files_bin_root(bin, null) && files_bin_join(info_dir, bin, "/info", null, null))
+                        {
+                                bipolar fd = files_open_dir(AT_FDCWD, info_dir, O_NOFOLLOW);
+                                if (fd >= 0)
+                                        files.big->job.info_dir = fd, files.big->job.has_info = true;
+                        }
+                }
                 files.dirty = true;
                 return;
         }
@@ -1009,9 +1019,9 @@ static fn files_bin_act(b32 restore)
                         if (files_bin_restore(bin, files_model_name(m, e), path) == FILES_DID)
                                 done++, files_deed_add(d, path, where);
                 }
-                else if (files_path_join(path, FILES_PATH, m->path, files_model_name(m, e)))
+                else if (files_model_check(m, at, null) == FILES_SAME && files_path_join(path, FILES_PATH, m->path, files_model_name(m, e)))
                 {
-                        int did = files_bin_put(bin, path, when, named);
+                        int did = files_bin_put_at(bin, m->handle, files_model_name(m, e), path, when, named);
                         cross |= did == FILES_DID_CROSS;
                         if (did == FILES_DID)
                                 files_bin_join(where, bin, "/files", named, null), files_deed_add(d, path, where);
@@ -1029,20 +1039,13 @@ static fn files_bin_act(b32 restore)
 static fn files_bin_empty(void)
 {
         struct files_model address_to m = &files.big->model;
-        p8 bin[FILES_PATH], info[FILES_PATH];
+        p8 bin[FILES_PATH];
         if (!files_in_bin() || !files_model_count(m) || !files_bin_root(bin, null))
                 return;
         b32 sure = files.armed && files.armed_at == m->revision;
         if (!sure)
                 files_select_all(m);
         files.emptying = sure;
-        if (sure)
-                for (p32 at = 0; at < files_model_count(m); at++)
-                {
-                        const struct files_entry address_to e = files_model_entry(m, at);
-                        if (e && files_bin_join(info, bin, "/info", files_model_name(m, e), ".trashinfo"))
-                                system_remove_at(AT_FDCWD, (string_address)info, 0);
-                }
         files_delete();
 }
 
@@ -1491,7 +1494,7 @@ static fn files_moved(void)
         struct files_model address_to m = &files.big->model;
         if (files.editing == FILES_EDIT_PATH)
                 ui_tokens_focus(&files.big->path, false, false);
-        files.editing = 0, files.armed = false, files_clear_msg();
+        files.editing = 0, files.armed = false, files_pick_armed = false, files_clear_msg();
         files_trail_note(&files.trail, m->path, m->handle >= 0 ? &m->folder : null);
         files_keep_trim(m, &files.trail), files_tree_follow();
         files.big->list.last_clicked = 0, files.reseat = true, files.next_look = (b64)ui_kit.now + (m->restored ? 0 : FILES_LOOK_NS), files.dirty = true;
@@ -1931,8 +1934,17 @@ static b32 files_pick_act(int which)
         if (!name[0] || string_first_of((string_address)name, '/') || string_equals((string_address)name, (string_address) ".") ||
             string_equals((string_address)name, (string_address) "..") || !files_path_join(path, sizeof(path), m->path, name))
                 return files.focus = FILES_FOCUS_PICK, files.dirty = true, true;
-        if (!files_pick_armed && system_access_at(AT_FDCWD, (string_address)path, 0) >= 0)
-                return files_pick_armed = true, files.said = LANGUAGE_files_pick_replace, files.dirty = true, true;
+        {
+                file_facts facts;
+                bipolar looked = m->handle >= 0 ? files_look_at(m->handle, name, &facts) : -ERROR_NO_ENTRY;
+                if (looked >= 0)
+                {
+                        if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                return files.focus = FILES_FOCUS_PICK, files.dirty = true, true;
+                        if (!files_pick_armed)
+                                return files_pick_armed = true, files.said = LANGUAGE_files_pick_replace, files.dirty = true, true;
+                }
+        }
         files_picked = files_pick_say(path);
         return true;
 }

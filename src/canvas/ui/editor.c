@@ -455,15 +455,24 @@ static b32 editor_save(struct editor_tab address_to tab)
 
 static fn editor_check_disk(struct editor_tab address_to tab)
 {
-        bipolar handle = tab->path[0] ? system_open_at(AT_FDCWD, (string_address)tab->path, O_PATH | O_CLOEXEC) : -1;
         error_stat facts;
+        bipolar res;
 
-        if (handle < 0)
+        if (!tab->path[0])
                 return;
-        if (fstat((b32)handle, address_of facts) == 0 &&
-            ((p64)facts.st_size != tab->size || (p64)facts.st_mtime != tab->mtime || (p64)facts.st_mtime_nsec != tab->mtime_nsec))
+        res = tab->folder >= 0
+                  ? (bipolar)system_call_4(syscall(newfstatat), (positive)tab->folder,
+                                           (positive)(tab->path + editor_dir_len(tab->path)),
+                                           (positive)address_of facts, AT_SYMLINK_NOFOLLOW)
+                  : (bipolar)system_call_4(syscall(newfstatat), (positive)AT_FDCWD,
+                                           (positive)tab->path, (positive)address_of facts, AT_SYMLINK_NOFOLLOW);
+        if (res == 0)
+        {
+                if ((p64)facts.st_size != tab->size || (p64)facts.st_mtime != tab->mtime || (p64)facts.st_mtime_nsec != tab->mtime_nsec)
+                        tab->changed_on_disk = true;
+        }
+        else if (res == -2 && (tab->size || tab->mtime))
                 tab->changed_on_disk = true;
-        system_close(handle);
 }
 
 static fn editor_reload(void)
@@ -492,24 +501,54 @@ static fn editor_reload(void)
         }
 }
 
+static b32 editor_confirm_check(p32 what, b32 guard, const char address_to msg);
+
 static b32 editor_save_as(struct editor_tab address_to tab, const char address_to path)
 {
-        int folder;
+        int folder, old_folder;
+        char old_path[EDITOR_PATH];
+        unsigned int old_mode;
+        p32 old_owner, old_group;
+        positive slash;
+        error_stat existing;
+        bipolar existed;
 
         if (!path || !path[0] || string_length((string_address)path) >= EDITOR_PATH)
                 return editor_status_set(WORDS(editor_save_failed)), false;
+        slash = editor_dir_len(path);
+        if (!path[slash])
+                return editor_status_set(WORDS(editor_save_failed)), false;
         if ((folder = editor_folder(path, null)) < 0)
                 return editor_status_set(WORDS(editor_write_beside)), false;
-        if (tab->folder >= 0)
-                system_close(tab->folder);
+        existed = (bipolar)system_call_4(syscall(newfstatat), (positive)folder, (positive)(path + slash),
+                                         (positive)address_of existing, AT_SYMLINK_NOFOLLOW);
+        if (existed == 0)
+        {
+                if ((existing.st_mode & 0170000) == 0040000)
+                        return system_close(folder), editor_status_set(WORDS(editor_save_failed)), false;
+                if (!editor_confirm_check(DOC_CMD_SAVE_AS, true,
+                                          !(existing.st_mode & 0222) ? WORDS(editor_writes_over_readonly) : WORDS(editor_writes_over_changed)))
+                        return system_close(folder), false;
+        }
+        old_folder = tab->folder;
+        string_copy_bounded((string_address)old_path, (string_address)tab->path, EDITOR_PATH);
+        old_mode = tab->mode, old_owner = tab->owner, old_group = tab->group;
         tab->folder = folder;
         string_copy_bounded((string_address)tab->path, (string_address)path, EDITOR_PATH);
         if (!tab->mode)
                 tab->mode = 0644;
         tab->owner = tab->group = (p32)-1;
-        editor_tab_language(tab, path, null, 0);
         if (!editor_save(tab))
+        {
+                system_close(folder);
+                tab->folder = old_folder;
+                string_copy_bounded((string_address)tab->path, (string_address)old_path, EDITOR_PATH);
+                tab->mode = old_mode, tab->owner = old_owner, tab->group = old_group;
                 return false;
+        }
+        if (old_folder >= 0)
+                system_close(old_folder);
+        editor_tab_language(tab, path, null, 0);
         editor_title_sync();
         return true;
 }

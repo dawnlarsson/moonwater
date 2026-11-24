@@ -113,7 +113,10 @@ static void notices_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, notices.own.table->stride, notices.width, notices.height);
         if (notices.alert_kind)
-                ui_alert_draw(ui, &notices.alert, notices.width, notices.height);
+        {
+                int scale = ui->scale ? ui->scale : 100;
+                ui_alert_draw(ui, &notices.alert, notices.width * 100 / scale, notices.height * 100 / scale);
+        }
         else
                 ui_popmenu_draw(ui, &notices.menu);
 }
@@ -139,8 +142,9 @@ static b32 notices_event(const struct window_event address_to event)
 
         if (notices.alert_kind)
         {
+                int scale = notices.ui.scale ? notices.ui.scale : 100;
                 ui_kit.now = (b64)ui_kit_clock();
-                ui_alert_event(&notices.ui, &notices.alert, event, notices.width, notices.height, &notices.dirty);
+                ui_alert_event(&notices.ui, &notices.alert, event, notices.width * 100 / scale, notices.height * 100 / scale, &notices.dirty);
                 return notices.alert.open;
         }
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE)
@@ -188,7 +192,7 @@ static int notices_open(void)
                         canvas_jingle_play(&ctl, &jingle, CTL_SOCKET, CANVAS_JINGLE_NOTICE, CTL_NONE, (long)(ui_kit_clock() / 1000000ll), 0);
                         ctl_disconnect(&ctl);
                 }
-                ui_app_place(&notices_app, UI_ALERT_W, UI_ALERT_H);
+                ui_app_place(&notices_app, ui_px(&notices.ui, UI_ALERT_W), ui_px(&notices.ui, UI_ALERT_H));
                 return -1;
         }
         if (ui_lift_other(&notices.own, (string_address) "notices", false))

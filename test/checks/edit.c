@@ -494,3 +494,230 @@ b32 main(void)
 }
 #endif
 
+#ifdef CHECK_files_teamf
+/*
+        Regression checks for Files (FILES-001, FILES-002, FILES-003, FILES-004):
+        - FILES-001: orphaned .trashinfo does not wedge trashing; empty bin does not prematurely unlink .trashinfo;
+          deleting a top-level Trash/files entry unlinks its .trashinfo only after deletion succeeds.
+        - FILES-002: files_bin_act uses pinned m->handle + files_model_check and does not follow an ancestor symlink swap.
+        - FILES-003: files_moved resets files_pick_armed; save pick rejects directories and detects dangling symlinks.
+        - FILES-004: files_move_deed records only completed items (copied[k] == 2), not partial/cancelled items (copied[k] == 1).
+*/
+#define FILES_MOST 4096u
+#include "../../src/lib.util.c"
+#include "../../src/moonwater/spark.c"
+#include "../../src/sh/shell.c"
+#define SHARED_counted
+#include "../checks.c"
+#undef SHARED_counted
+
+static p8 tf_root[128];
+
+static fn tf_path(p8 address_to into, const char address_to rel)
+{
+        string_copy_bounded((string_address)into, (string_address)tf_root, FILES_PATH);
+        if (rel && rel[0])
+        {
+                string_append_bounded((string_address)into, (string_address) "/", FILES_PATH);
+                string_append_bounded((string_address)into, (string_address)rel, FILES_PATH);
+        }
+}
+
+static fn tf_mkdir(const char address_to rel)
+{
+        p8 p[FILES_PATH];
+        tf_path(p, rel);
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)p, 0755);
+}
+
+static fn tf_write(const char address_to rel, const char address_to data)
+{
+        p8 p[FILES_PATH];
+        bipolar fd;
+        tf_path(p, rel);
+        fd = (bipolar)system_call_4(syscall(openat), (positive)AT_FDCWD, (positive)p, FILE_CREATE | FILE_WRITE | O_TRUNC, 0644);
+        if (fd >= 0)
+        {
+                system_write_all_checked((b32)fd, data, string_length((string_address)data));
+                system_close(fd);
+        }
+}
+
+static b32 tf_exists(const char address_to rel)
+{
+        p8 p[FILES_PATH];
+        file_facts f;
+        tf_path(p, rel);
+        return files_look_at(AT_FDCWD, p, &f) >= 0;
+}
+
+static fn tf_model_open(struct files_model address_to m, const char address_to rel)
+{
+        p8 p[FILES_PATH];
+        tf_path(p, rel);
+        files_model_go(m, p);
+        while (files_model_step(m, 1000))
+                ;
+}
+
+static b32 tf_select_name(struct files_model address_to m, const char address_to want)
+{
+        for (p32 k = 0; k < files_model_count(m); k++)
+        {
+                const struct files_entry address_to e = files_model_entry(m, k);
+                if (e && string_equals((string_address)files_model_name(m, e), (string_address)want))
+                {
+                        files_model_choose(m, k, FILES_CHOOSE_ONLY);
+                        return true;
+                }
+        }
+        return false;
+}
+
+b32 main(void)
+{
+        p8 bin[FILES_PATH], path[FILES_PATH], named[FILES_NAME], named2[FILES_NAME], old_sub[FILES_PATH], new_sub[FILES_PATH], victim[FILES_PATH];
+        bipolar pid = (bipolar)system_call_1(syscall(getpid), 0);
+
+        string_copy_bounded((string_address)tf_root, (string_address) "/tmp/mw_teamf_files_", sizeof(tf_root));
+        positive len = string_length((string_address)tf_root);
+        tf_root[len + positive_into(tf_root + len, (positive)pid)] = 0;
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)tf_root, 0755);
+
+        setenv((string_address) "HOME", (string_address)tf_root, 1);
+
+        files.big = (struct files_big address_to)files_anon_map(sizeof(*files.big), null);
+        check("setup: files.big mapped", files.big != null);
+        if (!files.big)
+                return test_report(null);
+        files_model_open(&files.big->model);
+        files_bin_root(bin, null);
+
+        /* ---- FILES-001 Case A: orphaned .trashinfo must not wedge trashing ---- */
+        tf_mkdir("case1");
+        tf_write("case1/foo.txt", "first");
+        tf_path(path, "case1/foo.txt");
+        check("FILES-001A: first trash succeeds", files_bin_put(bin, path, "2026-11-24T12:00:00", named) == FILES_DID);
+        tf_path(path, ".local/share/Trash/files/foo.txt");
+        system_remove_at(AT_FDCWD, (string_address)path, 0);
+        tf_write("case1/foo.txt", "second");
+        tf_path(path, "case1/foo.txt");
+        check("FILES-001A: trashing same-named file with orphaned .trashinfo succeeds",
+              files_bin_put(bin, path, "2026-11-24T12:00:01", named2) == FILES_DID);
+
+        /* ---- FILES-001 Case B: empty bin must not prematurely unlink .trashinfo ---- */
+        tf_write("case1/a.txt", "aaa");
+        tf_write("case1/b.txt", "bbb");
+        tf_path(path, "case1/a.txt");
+        files_bin_put(bin, path, "2026-11-24T12:00:02", named);
+        tf_path(path, "case1/b.txt");
+        files_bin_put(bin, path, "2026-11-24T12:00:03", named);
+        tf_model_open(&files.big->model, ".local/share/Trash/files");
+        files_select_all(&files.big->model);
+        files.armed = true;
+        files.armed_at = files.big->model.revision;
+        files_bin_empty();
+        check("FILES-001B: a.txt.trashinfo still exists before delete job runs",
+              tf_exists(".local/share/Trash/info/a.txt.trashinfo"));
+        check("FILES-001B: b.txt.trashinfo still exists before delete job runs",
+              tf_exists(".local/share/Trash/info/b.txt.trashinfo"));
+        files_job_cancel(&files.big->job);
+        files_job_end(&files.big->job);
+        tf_model_open(&files.big->model, ".local/share/Trash/files");
+        if (tf_select_name(&files.big->model, "a.txt"))
+        {
+                files.armed = true;
+                files.armed_at = files.big->model.revision;
+                files_delete();
+                while (files_job_step(&files.big->model, &files.big->job, 16))
+                        ;
+                files_job_end(&files.big->job);
+        }
+        check("FILES-001B: deleting a.txt from Trash removes a.txt.trashinfo",
+              !tf_exists(".local/share/Trash/info/a.txt.trashinfo"));
+        check("FILES-001B: b.txt.trashinfo remains intact when only a.txt is deleted",
+              tf_exists(".local/share/Trash/info/b.txt.trashinfo"));
+
+        /* ---- FILES-002: symlink swap must not redirect files_bin_act to victim ---- */
+        tf_mkdir("work");
+        tf_mkdir("work/sub");
+        tf_mkdir("victim");
+        tf_write("work/sub/target", "original");
+        tf_write("victim/target", "victim_secret");
+        tf_model_open(&files.big->model, "work/sub");
+        check("FILES-002: selected target in work/sub", tf_select_name(&files.big->model, "target"));
+        tf_path(old_sub, "work/sub");
+        tf_path(new_sub, "work/sub_old");
+        tf_path(victim, "victim");
+        files_rename_nr(AT_FDCWD, old_sub, AT_FDCWD, new_sub);
+        system_call_3(syscall(symlinkat), (positive)victim, (positive)AT_FDCWD, (positive)old_sub);
+        files_bin_act(false);
+        check("FILES-002: victim/target is NOT moved to Trash after ancestor symlink swap",
+              tf_exists("victim/target"));
+
+        /* ---- FILES-003: save-pick overwrite confirmation resets on dir change & rejects dir/dangling symlink ---- */
+        tf_mkdir("dirA");
+        tf_mkdir("dirB");
+        tf_mkdir("dirB/subdir");
+        tf_write("dirA/out.txt", "A");
+        tf_write("dirB/out.txt", "B");
+        tf_path(path, "dirB/dangling");
+        system_call_3(syscall(symlinkat), (positive)"/nonexistent_mw_teamf_target", (positive)AT_FDCWD, (positive)path);
+
+        files_field_init(&files.pick_name, FILES_NAME - 1);
+        ui_text_set(&files.pick_name, (const p8 address_to) "out.txt", 7);
+        files_picking = true, files_pick_kind = FILES_PICK_SAVE, files_picked = false, files_pick_armed = false;
+        tf_model_open(&files.big->model, "dirA");
+        files_pick_act(1);
+        check("FILES-003: first Save on existing dirA/out.txt arms confirmation", !files_picked && files_pick_armed);
+        tf_model_open(&files.big->model, "dirB");
+        files_moved();
+        check("FILES-003: files_moved resets files_pick_armed across directory change", !files_pick_armed);
+        files_picked = false;
+        files_pick_act(1);
+        check("FILES-003: Save in dirB requires fresh confirmation instead of overwriting immediately",
+              !files_picked && files_pick_armed);
+
+        ui_text_set(&files.pick_name, (const p8 address_to) "subdir", 6);
+        files_picked = false, files_pick_armed = true;
+        files_pick_act(1);
+        check("FILES-003: Save refuses existing subdirectory even when armed", !files_picked);
+
+        ui_text_set(&files.pick_name, (const p8 address_to) "dangling", 8);
+        files_picked = false, files_pick_armed = false;
+        files_pick_act(1);
+        check("FILES-003: Save detects dangling symlink and arms confirmation", !files_picked && files_pick_armed);
+        ui_text_close(&files.pick_name);
+
+        /* ---- FILES-004: files_move_deed only records completed items (copied[k] == 2) ---- */
+        {
+                struct files_move job;
+                p8 src1[FILES_PATH], src2[FILES_PATH], joined[FILES_PATH * 2];
+                tf_mkdir("dst");
+                tf_path(src1, "dirA/out.txt");
+                tf_path(src2, "dirB/out.txt");
+                positive l1 = string_length((string_address)src1), l2 = string_length((string_address)src2);
+                memory_copy(joined, src1, l1 + 1);
+                memory_copy(joined + l1 + 1, src2, l2 + 1);
+                tf_path(path, "dst");
+                bipolar dst_fd = files_open_dir(AT_FDCWD, path, 0);
+                check("FILES-004: move job setup", files_move_begin(&job, FILES_MOVE_COPY, dst_fd, joined, 2));
+                job.copied[0] = 2;
+                string_copy_bounded((string_address)files_move_landed(&job, 0), (string_address) "ok.txt", FILES_NAME);
+                job.copied[1] = 1;
+                string_copy_bounded((string_address)files_move_landed(&job, 1), (string_address) "partial.txt", FILES_NAME);
+                string_copy_bounded((string_address)files.move_into, (string_address)path, FILES_PATH);
+                files.deed_count = files.deed_done = 0;
+                files_move_deed(&job);
+                check("FILES-004: deed records only completed item (copied == 2), not cancelled item (copied == 1)",
+                      files.deed_count == 1 && files.deed[0].count == 1);
+                files_move_end(&job);
+        }
+
+        files_model_close(&files.big->model);
+        files_unmap(files.big, sizeof(*files.big));
+        return test_report(null);
+}
+#endif
+
+
