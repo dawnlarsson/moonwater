@@ -150,6 +150,11 @@ static const struct { const char *name; unsigned char len; } xwm_ext_spec[] = {
 #define COMPOSITOR_XWM_FOCUSED 262144u
 #define COMPOSITOR_XWM_BORDERLESS 524288u
 #define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
+// Where a window's place came from (compositor_xwm_window.placed): its WM_NORMAL_HINTS (USPosition or PPosition), or before they
+// are read a place it asked before its map; and a place it asked after its map, before Canvas has the window, which the hints
+// read after it do not take away (laf rewrites them without PPosition in the same flush as the map and the move).
+#define COMPOSITOR_XWM_PLACED_HINTS 1u
+#define COMPOSITOR_XWM_PLACED_ASKED 2u
 #define COMPOSITOR_XWM_EAGAIN (-11)
 #define COMPOSITOR_XWM_MSG_DONTWAIT 0x40
 #define COMPOSITOR_XWM_MSG_NOSIGNAL 0x4000
@@ -1176,13 +1181,16 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 break;
         }
         case COMPOSITOR_XWM_PROP_NORMAL_HINTS:
-                w->min_w = w->min_h = w->max_w = w->max_h = 0, w->placed = 0;
+                // The hints' place is theirs to give and take away; a place the window asked after its map is not (it opened centred
+                // on its owner, laf's menus: the hints read after the move had already lost their PPosition).
+                w->min_w = w->min_h = w->max_w = w->max_h = 0, w->placed &= COMPOSITOR_XWM_PLACED_ASKED;
                 if (r.format == XWM_FORMAT_32 && r.value_len >= 4)
                 {
                         unsigned int flags = xwm_get32(r.value);
                         unsigned long min_off = (flags & 16u) && r.value_len >= 28 ? 20ul : 0ul;
 
-                        w->placed = (flags & 5u) != 0;
+                        if (flags & 5u)
+                                w->placed |= COMPOSITOR_XWM_PLACED_HINTS;
                         if (min_off)
                         {
                                 int mw = (int)xwm_get32(r.value + min_off), mh = (int)xwm_get32(r.value + min_off + 4);
@@ -3314,11 +3322,15 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 c.border = 0, c.sibling = e->sibling, c.stack_mode = e->detail <= 4 ? e->detail : 0;
                 if (c.mask)
                 {
+                        // A place asked before the map counts until the hints are read at the map; one asked after it counts until the
+                        // window is unmapped, whatever the hints say (COMPOSITOR_XWM_PLACED_ASKED).
+                        unsigned char asked = w && (w->state & COMPOSITOR_XWM_MAPPED) ? COMPOSITOR_XWM_PLACED_ASKED : COMPOSITOR_XWM_PLACED_HINTS;
+
                         compositor_xwm_configure(x, e->window, &c);
                         if (w && (c.mask & XWM_CONFIGURE_X))
-                                w->x = w->sent_x = c.x, w->placed = 1;
+                                w->x = w->sent_x = c.x, w->placed |= asked;
                         if (w && (c.mask & XWM_CONFIGURE_Y))
-                                w->y = w->sent_y = c.y, w->placed = 1;
+                                w->y = w->sent_y = c.y, w->placed |= asked;
                         if (w && (c.mask & XWM_CONFIGURE_WIDTH))
                                 w->width = w->sent_w = c.width;
                         if (w && (c.mask & XWM_CONFIGURE_HEIGHT))
@@ -3392,6 +3404,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         w->state &= ~(COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL | COMPOSITOR_XWM_FULLSCREEN |
                                       COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_PROPS_READ |
                                       COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE | COMPOSITOR_XWM_FOCUSED);
+                        w->placed &= (unsigned char)~COMPOSITOR_XWM_PLACED_ASKED;
                         if (was_managed && !e->from_configure)
                                 compositor_xwm_wm_state(x, w->id, COMPOSITOR_XWM_STATE_WITHDRAWN);
                         xwm_unmapped(x, w);
