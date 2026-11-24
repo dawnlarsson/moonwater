@@ -10445,7 +10445,17 @@ static long system_call_6(long number, long a, long b, long c, long d, long e, l
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
 #define memory_zero(to, size) memset((to), 0, (size))
 #include "../../src/audio/control.c"
+// The remote rows' jitter buffer on the check's clock (0: the real one), so seconds of arrivals run in a moment.
+static unsigned long long sv_remote_fake;
+static unsigned long long sv_remote_clock(void)
+{
+        return sv_remote_fake ? sv_remote_fake : clock_monotonic_nanoseconds();
+}
+#define AUDIO_REMOTE_NOW() sv_remote_clock()
 #include "../../src/audio/service.c"
+#include "../../src/audio/remote.c"
+#include <sys/mman.h>
+#include <sys/socket.h>
 
 #ifndef F_SETPIPE_SZ
 #define F_SETPIPE_SZ 1031
@@ -11290,6 +11300,433 @@ static void sv_test_game(void)
         audio_game_slice = "/run/moonwater/game-slice";
 }
 
+/* ---- the machines over Waterlink (remote.c) ---- */
+
+// A ring as the link makes one: a memfd of a ring's length (or `bytes`), mapped writable here, its size sealed (unless not).
+static struct cast_sound_ring *sv_ring(int *fd, unsigned long bytes, int seal)
+{
+        void *mapped;
+
+        *fd = memfd_create("sv-ring", 2u); // MFD_ALLOW_SEALING
+        if (*fd < 0 || ftruncate(*fd, (off_t)bytes) < 0)
+                return 0;
+        mapped = mmap(0, CAST_SOUND_RING_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, *fd, 0);
+        if (mapped == MAP_FAILED)
+                return 0;
+        if (seal)
+                fcntl(*fd, 1033, 2 | 4 | 16); // shrink, grow, future write
+        if (bytes >= CAST_SOUND_RING_BYTES)
+                cast_sound_ring_init(mapped, 1);
+        return mapped;
+}
+
+static struct audio_remote_message sv_message(unsigned char op, unsigned char kind, unsigned char heard, const char *machine)
+{
+        struct audio_remote_message m;
+
+        memset(&m, 0, sizeof m);
+        m.op = op, m.kind = kind, m.heard = heard;
+        snprintf(m.machine, sizeof m.machine, "%s", machine);
+        return m;
+}
+
+static long sv_remote_named(const char *name)
+{
+        const struct audio_remote_row *rows;
+        long n = audio_remote_rows(&rows);
+
+        for (long i = 0; i < n; i++)
+                if (strcmp(rows[i].name, name) == 0)
+                        return rows[i].dev;
+        return 0;
+}
+
+static int sv_fd_open(int fd)
+{
+        return fcntl(fd, F_GETFD) >= 0;
+}
+
+static long sv_fds_open(void)
+{
+        long n = 0;
+
+        for (int fd = 0; fd < 4096; fd++)
+                n += sv_fd_open(fd);
+        return n;
+}
+
+/* The link's records judged: the rows they make, the ones refused, every descriptor a message does not keep closed, and a fuzz. */
+static void sv_test_remote_rows(void)
+{
+        struct audio_remote_message m;
+        const struct audio_remote_row *rows;
+        int fd, pipes[2], fds[1];
+        struct cast_sound_ring *ring;
+        long dev;
+
+        audio_remote_lost();
+        m = sv_message('R', AUDIO_REMOTE_SPEAKERS, 0, "box");
+        m.flags = AUDIO_NODE_AWAY;
+        SVCHECK(audio_remote_take(&m, fds, 0), "a machine's speakers are a row");
+        dev = sv_remote_named("remote.box.speakers");
+        SVCHECK(dev && audio_remote.rows[dev - 1].way == AUDIO_NODE_REMOTE_OUTPUT && (audio_remote.rows[dev - 1].flags & AUDIO_NODE_AWAY) &&
+                    strcmp(audio_remote.rows[dev - 1].machine, "box") == 0 && strcmp(audio_remote.rows[dev - 1].description, "Speakers") == 0,
+                "remote.box.speakers is an output, AWAY, of box");
+        m = sv_message('R', AUDIO_REMOTE_MIC, 0, "box");
+        m.flags = AUDIO_NODE_DENIED;
+        snprintf(m.allow, sizeof m.allow, "moonwater link allow desk mic");
+        SVCHECK(audio_remote_take(&m, fds, 0), "a microphone not granted is a row");
+        dev = sv_remote_named("remote.box.mic");
+        SVCHECK(dev && audio_remote.rows[dev - 1].way == AUDIO_NODE_REMOTE_SOURCE && (audio_remote.rows[dev - 1].flags & AUDIO_NODE_DENIED) &&
+                    strcmp(audio_remote.rows[dev - 1].allow, "moonwater link allow desk mic") == 0,
+                "remote.box.mic is a source, DENIED, with the line that grants it");
+        m = sv_message('R', AUDIO_REMOTE_SOUND, 0, "box");
+        SVCHECK(audio_remote_take(&m, fds, 0), "what box plays is a row");
+        dev = sv_remote_named("remote.box.sound");
+        SVCHECK(dev && (audio_remote.rows[dev - 1].flags & AUDIO_NODE_MONITOR) && audio_remote.rows[dev - 1].way == AUDIO_NODE_REMOTE_SOURCE,
+                "remote.box.sound is a source, MONITOR");
+        // Refused: a heard 'R', a kind out of range, a name with no end, a control byte, a flag nobody has.
+        m = sv_message('R', AUDIO_REMOTE_MIC, 1, "box");
+        SVCHECK(!audio_remote_take(&m, fds, 0), "an 'R' of a heard row is refused");
+        m = sv_message('R', 4, 0, "box");
+        SVCHECK(!audio_remote_take(&m, fds, 0), "kind 4 is refused");
+        m = sv_message('R', AUDIO_REMOTE_MIC, 0, "box");
+        memset(m.machine, 'a', sizeof m.machine);
+        SVCHECK(!audio_remote_take(&m, fds, 0), "a machine name with no end is refused");
+        m = sv_message('R', AUDIO_REMOTE_MIC, 0, "b\033x");
+        SVCHECK(!audio_remote_take(&m, fds, 0), "a machine name with a control byte is refused");
+        m = sv_message('R', AUDIO_REMOTE_MIC, 0, "box");
+        m.flags = 0x80;
+        SVCHECK(!audio_remote_take(&m, fds, 0), "a flag that is not DENIED or AWAY is refused");
+        SVCHECK(audio_remote_rows(&rows) == 3, "the refused made no row (%ld)", audio_remote_rows(&rows));
+        // An in-ring: a pipe, an unsealed memfd and a short one are refused and closed; a sealed ring is taken.
+        if (pipe(pipes) == 0)
+        {
+                m = sv_message('I', AUDIO_REMOTE_MIC, 0, "box");
+                fds[0] = pipes[0];
+                SVCHECK(!audio_remote_take(&m, fds, 1) && !sv_fd_open(pipes[0]), "a pipe is no ring, and is closed");
+                close(pipes[1]);
+        }
+        ring = sv_ring(&fd, CAST_SOUND_RING_BYTES, 0);
+        m = sv_message('I', AUDIO_REMOTE_MIC, 0, "box");
+        fds[0] = fd;
+        SVCHECK(ring && !audio_remote_take(&m, fds, 1) && !sv_fd_open(fd), "a ring whose size is not sealed is refused, and closed");
+        if (ring)
+                munmap(ring, CAST_SOUND_RING_BYTES);
+        ring = sv_ring(&fd, 4096, 1);
+        fds[0] = fd;
+        SVCHECK(!audio_remote_take(&m, fds, 1) && !sv_fd_open(fd), "a ring shorter than a ring is refused, and closed");
+        if (ring)
+                munmap(ring, CAST_SOUND_RING_BYTES);
+        ring = sv_ring(&fd, CAST_SOUND_RING_BYTES, 1);
+        fds[0] = fd;
+        SVCHECK(ring && audio_remote_take(&m, fds, 1) && !sv_fd_open(fd), "a sealed ring is taken (its descriptor closed: the mapping is kept)");
+        dev = sv_remote_named("remote.box.mic");
+        SVCHECK(dev && audio_remote.streams[dev - 1].in && !(audio_remote.rows[dev - 1].flags & AUDIO_NODE_DENIED), "remote.box.mic has its ring");
+        m = sv_message('I', AUDIO_REMOTE_SPEAKERS, 0, "box");
+        fds[0] = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        SVCHECK(!audio_remote_take(&m, fds, 1) && !sv_fd_open(fds[0]), "an in-ring for an output is refused, and closed");
+        m = sv_message('H', AUDIO_REMOTE_MIC, 1, "desk");
+        SVCHECK(audio_remote_take(&m, fds, 0), "desk hearing the microphone is a row");
+        dev = sv_remote_named("remote.desk.hears-mic");
+        SVCHECK(dev && audio_remote.rows[dev - 1].way == AUDIO_NODE_REMOTE_OUTPUT && (audio_remote.rows[dev - 1].flags & AUDIO_NODE_HEARD),
+                "remote.desk.hears-mic is an output, HEARD");
+        m = sv_message('H', AUDIO_REMOTE_SPEAKERS, 1, "desk");
+        SVCHECK(!audio_remote_take(&m, fds, 0), "desk playing here without a ring is refused");
+        m = sv_message('X', AUDIO_REMOTE_MIC, 1, "desk");
+        SVCHECK(audio_remote_take(&m, fds, 0) && !sv_remote_named("remote.desk.hears-mic"), "'X' takes the row away");
+        if (ring)
+                munmap(ring, CAST_SOUND_RING_BYTES);
+        // The fuzz: records of random bytes, and of good shape with random fields; nothing breaks and every row made is a good one.
+        srand(7);
+        for (int k = 0; k < 20000; k++)
+        {
+                unsigned char *raw = (unsigned char *)&m;
+
+                for (unsigned long b = 0; b < sizeof m; b++)
+                        raw[b] = (unsigned char)rand();
+                if (k & 1)
+                {
+                        m.op = "RHIXW?"[rand() % 6], m.kind = (unsigned char)(rand() % 5), m.heard = (unsigned char)(rand() % 3);
+                        m.flags = (unsigned)(rand() % 4);
+                        for (int c = 0; c < 4; c++)
+                                m.machine[c] = (char)('a' + rand() % 3);
+                        m.machine[rand() % 6] = 0;
+                        m.allow[k & 2 ? 0 : rand() % 64] = 0;
+                }
+                audio_remote_take(&m, fds, 0);
+        }
+        {
+                long n = audio_remote_rows(&rows), bad = 0;
+
+                for (long i = 0; i < n; i++)
+                        bad += strncmp(rows[i].name, "remote.", 7) != 0 || !rows[i].machine[0] || strlen(rows[i].machine) > 31 ||
+                               (rows[i].way != AUDIO_NODE_REMOTE_SOURCE && rows[i].way != AUDIO_NODE_REMOTE_OUTPUT) || rows[i].dev != i + 1;
+                SVCHECK(n > 3 && n < 400 && !bad, "the fuzz made %ld rows, %ld of them bad", n, bad);
+        }
+        audio_remote_lost();
+        SVCHECK(audio_remote_rows(&rows) == 0, "the link gone takes every row");
+}
+
+/* The socket: whole records with their descriptors; a short one, a long one, three descriptors or a truncated control end the link,
+   and no descriptor is left open by anything a link sends. */
+static void sv_test_remote_socket(void)
+{
+        int pair[2];
+        long before = sv_fds_open();
+        const struct audio_remote_row *rows;
+
+        srand(11);
+        for (int k = 0; k < 3000; k++)
+        {
+                struct audio_remote_message m = sv_message('R', (unsigned char)(1 + k % 3), 0, "box");
+                unsigned char packet[256];
+                unsigned char control[CMSG_SPACE(4 * sizeof(int))];
+                struct iovec iov = {packet, sizeof m};
+                struct msghdr msg = {0};
+                int sent_fds[4], nfds = rand() % 5, bad = rand() % 4;
+
+                if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, pair) < 0)
+                        break;
+                audio_remote_lost();
+                audio_remote.link = pair[0];
+                memcpy(packet, &m, sizeof m);
+                if (bad == 1)
+                        iov.iov_len = (size_t)(rand() % (int)sizeof packet);
+                if (bad == 2)
+                        for (unsigned long b = 0; b < sizeof m; b++)
+                                packet[b] = (unsigned char)rand();
+                msg.msg_iov = &iov, msg.msg_iovlen = 1;
+                for (int f = 0; f < nfds; f++)
+                        sent_fds[f] = open("/dev/null", O_RDONLY | O_CLOEXEC);
+                if (nfds)
+                {
+                        struct cmsghdr *c;
+
+                        msg.msg_control = control, msg.msg_controllen = CMSG_SPACE((size_t)nfds * sizeof(int));
+                        c = CMSG_FIRSTHDR(&msg);
+                        c->cmsg_level = SOL_SOCKET, c->cmsg_type = SCM_RIGHTS, c->cmsg_len = CMSG_LEN((size_t)nfds * sizeof(int));
+                        memcpy(CMSG_DATA(c), sent_fds, (size_t)nfds * sizeof(int));
+                }
+                sendmsg(pair[1], &msg, 0);
+                for (int f = 0; f < nfds; f++)
+                        close(sent_fds[f]);
+                audio_remote_read();
+                if (k < 2 && nfds == 0 && bad == 0)
+                        SVCHECK(audio_remote.link == pair[0] && audio_remote_rows(&rows) == 1, "a good record over the socket is a row");
+                if (nfds)
+                        SVCHECK(audio_remote.link < 0, "an 'R' with descriptors ends the link (%d of them)", nfds);
+                if (bad == 1 && iov.iov_len != sizeof m)
+                        SVCHECK(audio_remote.link < 0, "a record of %zu bytes ends the link", iov.iov_len);
+                close(pair[1]);
+                audio_remote_read(); // the far end closed: the link is let go
+                SVCHECK(audio_remote.link < 0, "a closed link is let go");
+        }
+        SVCHECK(sv_fds_open() == before, "no descriptor a link sent is kept: %ld open before, %ld after", before, sv_fds_open());
+}
+
+/*
+        The jitter buffer, on the check's clock: a far machine writing a block every 2.5 ms of its own clock (which runs 200 ppm
+        fast), each arriving after a delay of its own; the server pulling 128 frames every 128 / 48000 s of its own. A 1 kHz tone
+        comes out whole: no resync, no block concealed, the level of what went in; the target is what the pulls and the arrivals
+        need and no more; losses are concealed and counted; a ring that lies is silence.
+*/
+static double sv_remote_run(long dev, struct cast_sound_ring *ring, double seconds, double ppm, long jitter_us, int drop_every,
+                            long *concealed, long *resyncs, double *rms)
+{
+        struct audio_remote_stream *st = audio_remote.streams + (dev - 1);
+        unsigned long long t0 = 1000000000000ull, written = __atomic_load_n(&ring->written, __ATOMIC_RELAXED), next_block = written;
+        double send_period = 2.5e6 / (1.0 + ppm * 1e-6), pull_period = 128.0 * 1e9 / 48000.0, send_at = 0, pull_at = 0;
+        double sum = 0;
+        long frames = 0;
+        float left[128], right[128];
+        unsigned long long lost0 = st->lost, resync0 = st->resyncs;
+        short pcm[CAST_SOUND_SAMPLES];
+        // Arrivals waiting: a block is in flight until its arrival time.
+        struct { unsigned long long block, stamp, arrive; } flight[64];
+        int flying = 0;
+
+        while (pull_at < seconds * 1e9)
+        {
+                if (send_at <= pull_at)
+                {
+                        unsigned long long block = next_block++;
+
+                        for (unsigned f = 0; f < CAST_SOUND_FRAMES; f++)
+                        {
+                                double t = (double)(block * CAST_SOUND_FRAMES + f) / 48000.0;
+                                short v = (short)(16384.0 * sin(2 * 3.14159265358979 * 1000.0 * t));
+
+                                pcm[2 * f] = pcm[2 * f + 1] = v;
+                        }
+                        if ((!drop_every || block % (unsigned long long)drop_every) && flying < 64)
+                        {
+                                flight[flying].block = block, flight[flying].stamp = t0 + (unsigned long long)send_at;
+                                flight[flying].arrive = t0 + (unsigned long long)send_at + 2500000ull + 200000ull + (jitter_us ? (unsigned long long)(rand() % jitter_us) * 1000ull : 0);
+                                flying++; // written when it arrives (below), as the link would
+                        }
+                        send_at += send_period;
+                        continue;
+                }
+                // Arrivals due by now, written in arrival order.
+                for (int i = 0; i < flying;)
+                        if (flight[i].arrive <= t0 + (unsigned long long)pull_at)
+                        {
+                                for (unsigned f = 0; f < CAST_SOUND_FRAMES; f++)
+                                {
+                                        double t = (double)(flight[i].block * CAST_SOUND_FRAMES + f) / 48000.0;
+                                        short v = (short)(16384.0 * sin(2 * 3.14159265358979 * 1000.0 * t));
+
+                                        pcm[2 * f] = pcm[2 * f + 1] = v;
+                                }
+                                cast_sound_write(ring, flight[i].block, flight[i].stamp, flight[i].arrive, pcm);
+                                flight[i] = flight[--flying];
+                        }
+                        else
+                                i++;
+                sv_remote_fake = t0 + (unsigned long long)pull_at;
+                remote_pull(dev, left, right, 128, 48000);
+                if (pull_at > 3e9)
+                {
+                        for (int f = 0; f < 128; f++)
+                                sum += (double)left[f] * left[f];
+                        frames += 128;
+                }
+                pull_at += pull_period;
+        }
+        sv_remote_fake = 0;
+        *concealed = (long)(st->lost - lost0), *resyncs = (long)(st->resyncs - resync0);
+        *rms = frames ? sqrt(sum / (double)frames) : 0;
+        return (double)st->target;
+}
+
+static void sv_test_remote_pull(void)
+{
+        struct audio_remote_message m = sv_message('I', AUDIO_REMOTE_MIC, 0, "box");
+        int fd, fds[1];
+        struct cast_sound_ring *ring;
+        long dev, concealed, resyncs;
+        double rms, target;
+        float left[128], right[128];
+        int silent = 1;
+
+        audio_remote_lost();
+        ring = sv_ring(&fd, CAST_SOUND_RING_BYTES, 1);
+        fds[0] = fd;
+        if (!ring || !audio_remote_take(&m, fds, 1) || !(dev = sv_remote_named("remote.box.mic")))
+        {
+                SVCHECK(0, "a source with a ring for the pull");
+                return;
+        }
+        srand(3);
+        target = sv_remote_run(dev, ring, 20, 200, 0, 0, &concealed, &resyncs, &rms);
+        SVCHECK(concealed == 0 && resyncs == 0, "20 s at 200 ppm, no jitter: %ld concealed, %ld resyncs", concealed, resyncs);
+        SVCHECK(fabs(rms - 0.5 / sqrt(2.0)) < 0.01, "the tone comes out at its level: rms %.4f (0.3536)", rms);
+        SVCHECK(target == 3, "the target is the pull, a block and no jitter: 3 blocks (%.0f)", target);
+        target = sv_remote_run(dev, ring, 20, -150, 4000, 0, &concealed, &resyncs, &rms);
+        SVCHECK(resyncs == 0 && concealed < 20, "20 s at -150 ppm, 4 ms of jitter: %ld concealed, %ld resyncs", concealed, resyncs);
+        SVCHECK(target >= 4 && target <= 6, "4 ms of jitter takes the target to 4-6 blocks (%.0f)", target);
+        target = sv_remote_run(dev, ring, 10, 0, 0, 7, &concealed, &resyncs, &rms);
+        SVCHECK(concealed > 300 && concealed < 800 && resyncs == 0, "a block in seven lost is concealed: %ld in 10 s, %ld resyncs", concealed, resyncs);
+        // A ring that lies: a count no stream reaches, and slots of noise (seq odd, numbers wrong): silence, and nothing breaks.
+        __atomic_store_n(&ring->written, 1ull << 41, __ATOMIC_RELEASE);
+        remote_pull(dev, left, right, 128, 48000);
+        for (int f = 0; f < 128; f++)
+                silent &= left[f] == 0 && right[f] == 0;
+        SVCHECK(silent, "a ring whose count is past any stream's is silence");
+        for (unsigned long b = 0; b < sizeof(ring->slot); b++)
+                ((unsigned char *)ring->slot)[b] = (unsigned char)rand();
+        __atomic_store_n(&ring->written, 5000, __ATOMIC_RELEASE);
+        for (int k = 0; k < 2000; k++)
+                remote_pull(dev, left, right, 1 + rand() % 128, rand() % 2 ? 48000 : 44100);
+        SVCHECK(1, "a ring of noise pulled 2000 times");
+        remote_pull(-5, left, right, 128, 48000);
+        remote_pull(1 << 20, left, right, 128, 48000);
+        SVCHECK(left[0] == 0, "a dev that is no row is silence");
+        munmap(ring, CAST_SOUND_RING_BYTES);
+        audio_remote_lost();
+}
+
+/* The push: told wanted with its ring and eventfd at the pass, cut into blocks of 120 frames stamped 2.5 ms apart, the link woken a block at
+   a time; and told not wanted after 100 ms of no push, its ring let go. */
+static void sv_test_remote_push(void)
+{
+        struct audio_remote_message m = sv_message('H', AUDIO_REMOTE_SOUND, 1, "desk"), got;
+        int pair[2], fds[1];
+        long dev;
+        unsigned long long now = 2000000000000ull;
+        float left[128], right[128];
+        unsigned char control[CMSG_SPACE(2 * sizeof(int))];
+        struct iovec iov = {&got, sizeof got};
+        struct msghdr msg = {0};
+        int ring_fd = -1, wake_fd = -1;
+        const struct cast_sound_ring *ring = 0;
+
+        audio_remote_lost();
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, pair) < 0)
+                return;
+        audio_remote.link = pair[0];
+        SVCHECK(audio_remote_take(&m, fds, 0) && (dev = sv_remote_named("remote.desk.hears-sound")), "desk hearing what plays is a row");
+        for (int f = 0; f < 128; f++)
+                left[f] = right[f] = (float)f / 256.0f;
+        sv_remote_fake = now;
+        remote_push(dev, left, right, 128, 48000);
+        audio_remote_pass(now);
+        msg.msg_iov = &iov, msg.msg_iovlen = 1, msg.msg_control = control, msg.msg_controllen = sizeof control;
+        if (recvmsg(pair[1], &msg, MSG_DONTWAIT) == (ssize_t)sizeof got && CMSG_FIRSTHDR(&msg))
+        {
+                memcpy(&ring_fd, CMSG_DATA(CMSG_FIRSTHDR(&msg)), sizeof(int));
+                memcpy(&wake_fd, CMSG_DATA(CMSG_FIRSTHDR(&msg)) + sizeof(int), sizeof(int));
+                ring = mmap(0, CAST_SOUND_RING_BYTES, PROT_READ, MAP_SHARED, ring_fd, 0);
+        }
+        SVCHECK(got.op == 'W' && got.on == 1 && got.heard == 1 && got.kind == AUDIO_REMOTE_SOUND && ring && ring != MAP_FAILED,
+                "the pass tells the link it is wanted, with its ring (op %d on %d, out %p, told %d, fds %d %d)", got.op, got.on,
+                (void *)audio_remote.streams[dev - 1].out, audio_remote.streams[dev - 1].told, ring_fd, wake_fd);
+        if (!ring || ring == MAP_FAILED)
+        {
+                sv_remote_fake = 0;
+                return;
+        }
+        SVCHECK(mmap(0, CAST_SOUND_RING_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd, 0) == MAP_FAILED, "the link's mapping cannot write the ring");
+        for (int k = 0; k < 8; k++)
+        {
+                now += 2666667ull;
+                sv_remote_fake = now;
+                remote_push(dev, left, right, 128, 48000);
+        }
+        {
+                unsigned long long count = 0, written = __atomic_load_n(&ring->written, __ATOMIC_ACQUIRE);
+                struct cast_sound_slot a, b;
+                int same = 1;
+
+                if (read(wake_fd, &count, 8) != 8)
+                        count = 0;
+                SVCHECK(written == 8 && count == 8, "1024 frames after the yes are 8 blocks and 8 wakes (%llu, %llu)", written, count);
+                if (cast_sound_read(ring, 2, &a) && cast_sound_read(ring, 3, &b))
+                {
+                        long long gap = (long long)(b.stamp - a.stamp);
+
+                        SVCHECK(gap > 2400000 && gap < 2600000, "blocks are stamped 2.5 ms apart (%lld ns)", gap);
+                        // Block 3 starts at frame 360 of what was pushed: 360 % 128 = 104.
+                        same = b.pcm[0] == (short)lrintf(104.0f / 256.0f * 32767.0f) || b.pcm[0] == (short)(104.0f / 256.0f * 32768.0f);
+                        SVCHECK(same, "a block's first frame is the frame pushed there (%d)", b.pcm[0]);
+                }
+                else
+                        SVCHECK(0, "blocks 2 and 3 are read back");
+        }
+        now += 200000000ull;
+        sv_remote_fake = now;
+        audio_remote_pass(now);
+        memset(&got, 0, sizeof got);
+        msg.msg_controllen = sizeof control;
+        SVCHECK(recvmsg(pair[1], &msg, MSG_DONTWAIT) == (ssize_t)sizeof got && got.op == 'W' && got.on == 0 && !audio_remote.streams[dev - 1].out,
+                "100 ms with no push: not wanted, and its ring let go");
+        sv_remote_fake = 0;
+        munmap((void *)ring, CAST_SOUND_RING_BYTES);
+        close(ring_fd), close(wake_fd), close(pair[1]);
+        audio_remote_lost();
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -11312,6 +11749,10 @@ static int sv_main_checks(void)
         sv_test_file();
         sv_test_page();
         sv_test_page_rows();
+        sv_test_remote_rows();
+        sv_test_remote_socket();
+        sv_test_remote_pull();
+        sv_test_remote_push();
         printf("CHECK_audio_service: %u checks, %u failures\n", sv_checks, sv_failures);
         return sv_failures != 0;
 }
