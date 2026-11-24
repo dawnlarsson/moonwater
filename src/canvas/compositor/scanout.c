@@ -2350,14 +2350,28 @@ static void compositor_out_planes_take(unsigned int count)
         for (unsigned int at = 0; at < count && at < WINDOWS_OUTPUTS; at++)
         {
                 compositor_out_plane[at] = 0;
-                for (unsigned int each = 0; each < listed && !compositor_out_plane[at]; each++)
+                for (unsigned int each = 0; each < listed; each++)
                 {
                         unsigned int formats[64], props[COMPOSITOR_PLANE_PROPS];
                         unsigned long type = 3;
                         struct drm_plane_info info;
+                        int taken = 0;
 
+                        for (unsigned int prev = 0; prev < at; prev++)
+                                if (compositor_out_plane[prev] == planes[each])
+                                {
+                                        taken = 1;
+                                        break;
+                                }
+                        if (taken)
+                                continue;
                         if (drm_plane_get(planes[each], compositor.output[at].crtc_index, &info, formats, 64, props, &type) && type == 1)
-                                compositor_out_plane[at] = planes[each], memory_copy(compositor_out_props[at], props, sizeof(props));
+                        {
+                                if (!compositor_out_plane[at] || info.crtc == compositor.output[at].crtc)
+                                        compositor_out_plane[at] = planes[each], memory_copy(compositor_out_props[at], props, sizeof(props));
+                                if (info.crtc == compositor.output[at].crtc)
+                                        break;
+                        }
                 }
                 found += compositor_out_plane[at] != 0;
         }
@@ -2605,6 +2619,8 @@ static int compositor_flip_all(unsigned int fb)
         compositor_multi_off = 1;
         compositor_set_outputs();
         compositor_scaled_reset();
+        compositor.on_screen = fb;
+        compositor_flip_refused = 0;
         compositor_flip_done();
         return 1;
 }

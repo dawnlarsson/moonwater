@@ -1717,7 +1717,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
         int cx0 = x0 < g->clip[0] ? g->clip[0] : x0, cy0 = y0 < g->clip[1] ? g->clip[1] : y0, cx1 = x1 > g->clip[2] ? g->clip[2] : x1, cy1 = y1 > g->clip[3] ? g->clip[3] : y1;
         unsigned int *op = g->ops + 8 * g->count;
 
-        if (cx1 <= cx0 || cy1 <= cy0)
+        if (cx1 <= cx0 || cy1 <= cy0 || g->count >= g->room)
                 return;
         // Intel i915 scene shader supports ops 0 (fill), 1 (tone), 4 (image copy), and 11 (premultiplied image over).
         // Lower cover-masked ops (5, 12, 13) into op 1 (constant alpha) or op 11 (premultiplied RGBA tile in GPU_VA_MAPS).
@@ -1799,7 +1799,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                         }
                         else if (tile && compositor_gpu_va(frame))
                                 at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
-                        if (tile && at)
+                        if (tile && at && g->count + 1 < g->room)
                         {
                                 op[0] = kind == 12 ? 0x20u : 0x21u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
                                 op[5] = (unsigned int)cover_va, op[6] = (unsigned int)(cover_va >> 32), op[7] = tp;
@@ -1983,8 +1983,12 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         // The record's pitch is 16 bits (compositor_gpu_frame's op[0]): a wider picture is left to the processor.
         if (f->pitch > 65535)
                 return g->why = COMPOSITOR_GPU_WHY_ALIGN, false;
-        if (g->count + 40 > g->room - 400)
-                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+        {
+                unsigned int need = f->shaped ? f->shape_count : 40u;
+
+                if (g->room <= 400u || g->count > g->room - 400u || need > g->room - 400u - g->count)
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+        }
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = f->x - ox, ri = r > b ? r - b : 0;
         // The owner's way back (/run/moonwater/gpu-round-off, gpu.c's gpu_round_off): a blended window's round corners on the processor, as before 12.
@@ -3035,7 +3039,7 @@ static int compositor_scene_reads(const struct compositor_target *t, const struc
         {
                 if (frames[at].blend)
                         compositor_blend_under(t, frames, at, top, bottom);
-                if (!frames[at].builtin && !frames[at].pixels && !frames[at].fill && frames[at].line > 0)
+                if ((!frames[at].builtin && !frames[at].pixels && !frames[at].fill && frames[at].line > 0) || frames[at].shaped)
                 {
                         int fx, fy, fw, fh;
 

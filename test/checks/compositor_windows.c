@@ -6258,6 +6258,8 @@ static unsigned int border_lit_pixels(void)
         line's pixel as it always was, at 4 it is four pixels inward from the window's outline, and nothing outside the
         window is drawn; a value outside 1 to 4 is refused, and the compositor keeps the standard for it.
 */
+static void check_compositor_g3_regressions(void);
+
 static void check_compositor_border(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -6313,5 +6315,258 @@ static void check_compositor_border(void)
               !compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "0", &value) && value == 2 &&
               !compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "5", &value) && value == 2 &&
               !compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "default", &value) && value == 2);
+    check_compositor_g3_regressions();
+}
+
+/*
+        Team G3 regression checks (COMP-01 through COMP-07):
+        GPU op-buffer bounds on shaped windows, present_build_frames room bounds during multi-monitor Scenes overview,
+        compositor_flip_fenced VRR retry prop_count, compositor_out_planes_take duplicate plane exclusion,
+        refused carried-overlay re-damage, compositor_flip_all modeset fallback on_screen update, and
+        compositor_scene_reads inclusion of shaped frames.
+*/
+static unsigned int g3_fake_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at)
+{
+    for (unsigned int k = 0; k < 4; k++)
+    {
+        memory_zero(&frames[at + k], sizeof(frames[at + k]));
+        frames[at + k].x = compositor.x[row], frames[at + k].y = compositor.y[row];
+        frames[at + k].width = 40, frames[at + k].height = 40, frames[at + k].scale = 100;
+        rows[at + k] = (unsigned int)row;
+    }
+    return 4;
+}
+
+static void check_compositor_g3_regressions(void)
+{
+    /* COMP-01: GPU op-buffer overflow via shaped X11 window rectangles + shape_count cap */
+#ifdef MOONWATER_GPU_C
+    {
+        static unsigned int ops[8 * 650];
+        static int rects[600][4];
+        static unsigned char x_rects[5000 * 8];
+        struct compositor_gscene saved = compositor_gscene;
+        struct compositor_frame f;
+        b32 ok;
+
+        memory_zero(&compositor_gscene, sizeof(compositor_gscene));
+        memory_zero(ops, sizeof(ops));
+        memory_zero(&f, sizeof(f));
+        for (unsigned int i = 0; i < 600; i++)
+            rects[i][0] = (int)(i % 100), rects[i][1] = (int)(i / 100), rects[i][2] = 1, rects[i][3] = 1;
+        compositor_gscene.ops = ops;
+        compositor_gscene.room = 500;
+        compositor_gscene.width = 200;
+        compositor_gscene.height = 200;
+        compositor_gscene.clip[2] = 200;
+        compositor_gscene.clip[3] = 200;
+        for (unsigned int k = 0; k < 8; k++)
+            ops[8 * 500 + k] = 0xdeadbeefu;
+        f.x = 0, f.y = 0, f.width = 200, f.height = 200, f.scale = 100, f.fill = 0xff112233u;
+        f.shaped = 1, f.shape = rects, f.shape_count = 600, f.shape_w = 200, f.shape_h = 200;
+        ok = compositor_gpu_frame(&f);
+        check("COMP-01: compositor_gpu_frame refuses shaped frame exceeding op room without overflow",
+              !ok && compositor_gscene.why == COMPOSITOR_GPU_WHY_POOL && compositor_gscene.count == 0 &&
+                  ops[8 * 500] == 0xdeadbeefu);
+
+        compositor_gscene.count = compositor_gscene.room;
+        compositor_gpu_rect(0, 0, 0, 10, 10, 0xff223344u, 0, 0, 0);
+        check("COMP-01: compositor_gpu_rect refuses write when count == room",
+              compositor_gscene.count == compositor_gscene.room && ops[8 * 500] == 0xdeadbeefu);
+        compositor_gscene = saved;
+
+        compositor_zero();
+        compositor.width = compositor.height = 200;
+        compositor.scale = 100;
+        compositor.card = -1;
+        memory_zero(x_rects, sizeof(x_rects));
+        for (unsigned int i = 0; i < 5000; i++)
+            x_rects[i * 8 + 4] = 1, x_rects[i * 8 + 6] = 1;
+        compositor_row_shape_set(0, x_rects, 5000, 1);
+        check("COMP-01: compositor_row_shape_set caps shape_count to at most 4096",
+              compositor_cuts != 0 && compositor_cuts[0].shaped == 1 && compositor_cuts[0].count <= 4096u);
+        compositor_row_shape_set(0, 0, 0, 0);
+    }
+#endif
+
+    /* COMP-02: present_build_frames must not write past room during multi-monitor Scenes overview */
+    {
+        static struct compositor_frame frames[512];
+        static unsigned int rows[512];
+        static const struct canvas_ext_ops fake_ops = {.layers_frames = g3_fake_layers_frames};
+        const struct canvas_ext_ops *saved_ops = canvas_ext_host;
+        unsigned int room, built;
+
+        compositor_zero();
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = compositor.lit_row = COMPOSITOR_NONE;
+        compositor.width = 1600, compositor.height = 600, compositor.scale = 100, compositor.card = -1;
+        compositor.outputs = 2;
+        compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 800, compositor.screen[0][3] = 600;
+        compositor.screen[1][0] = 800, compositor.screen[1][1] = 0, compositor.screen[1][2] = 800, compositor.screen[1][3] = 600;
+        if (glass_table_map())
+        {
+            compositor.table->motion = 1;
+            compositor_spaces_ensure();
+            canvas_ext_host = &fake_ops;
+            /* Place 30 visible windows on screen 0 (each with 4 subsurfaces) and 1 visible window on screen 1 last in stack. */
+            for (unsigned int r = 0; r < 30 && r + 1 < compositor_rows_in_use; r++)
+            {
+                compositor.showing[r] = 1;
+                compositor.x[r] = 10 + (int)(r % 10) * 20, compositor.y[r] = 10 + (int)(r / 10) * 20;
+                compositor.w[r] = 100, compositor.h[r] = 80;
+                compositor.stack[compositor.stacked++] = r;
+                compositor_space_assign_new((int)r, 0);
+            }
+            {
+                unsigned int r1 = compositor.stacked;
+                compositor.showing[r1] = 1;
+                compositor.x[r1] = 850, compositor.y[r1] = 50, compositor.w[r1] = 200, compositor.h[r1] = 150;
+                compositor.stack[compositor.stacked++] = r1;
+                compositor_space_assign_new((int)r1, 1);
+            }
+            compositor_scenes_open(0);
+            room = (unsigned int)COMPOSITOR_ROWS_LAYERED(compositor_rows_in_use);
+            if (room < 500)
+            {
+                rows[room] = 0xbadc0de0u;
+                built = present_build_frames(frames, rows);
+                check("COMP-02: present_build_frames does not write past room in multi-monitor Scenes overview",
+                      built <= room && rows[room] == 0xbadc0de0u);
+            }
+            canvas_ext_host = saved_ops;
+        }
+    }
+
+    /* COMP-03 & COMP-05 (fenced path): compositor_flip_fenced VRR retry prop_count and overlay re-damage */
+#ifdef MOONWATER_GPU_C
+    if (card_fake_open(800, 600))
+    {
+        int fenced;
+
+        compositor_zero();
+        compositor.width = 800, compositor.height = 600, compositor.scale = 100;
+        compositor.card = card_fake.fd;
+        card_fake.atomic = 1;
+        card_fake.in_fence = 0;
+        compositor.crtc = CARD_FAKE_CRTC;
+        compositor.primary = 999u;
+        compositor.primary_props[COMPOSITOR_PLANE_FB] = 1u;
+        compositor_fence_prop = 13;
+        /* Overlay uses CARD_FAKE_PLANE with prop 13 while card_fake.in_fence == 0 -> 2-object commit returns -22. */
+        compositor.overlay = CARD_FAKE_PLANE;
+        compositor.overlay_props[COMPOSITOR_PLANE_FB] = 13u;
+        compositor_vrr.owed = 2;
+        compositor_vrr.carry_refused = 0;
+        compositor_vrr.prop = 777u;
+        compositor_vrr.crtc = CARD_FAKE_CRTC;
+        compositor_vrr.on = 0;
+        compositor_plane_carry.fb = CARD_FAKE_FB + 5;
+        compositor_plane_carry.row = 0;
+        compositor_plane_carry.which = 0;
+        compositor_plane_carry.rect[0] = 30, compositor_plane_carry.rect[1] = 40;
+        compositor_plane_carry.rect[2] = 130, compositor_plane_carry.rect[3] = 140;
+        compositor.damages = 0;
+        card_fake.crtc_prop = 0, card_fake.crtc_value = 0;
+
+        fenced = compositor_flip_fenced(CARD_FAKE_FB + 1, 3);
+        check("COMP-03: compositor_flip_fenced resets req.prop_count so VRR retry succeeds with CRTC VRR prop",
+              fenced == 1 && card_fake.crtc_prop == 777u && card_fake.crtc_value == 1ul &&
+                  compositor_vrr.carry_refused == 0 && compositor_vrr.on == 1);
+        check("COMP-05: compositor_flip_fenced re-damages carried overlay rect when 2-plane commit is refused",
+              compositor.damages > 0 && compositor.damage[0][0] == 30 && compositor.damage[0][1] == 40 &&
+                  compositor.damage[0][2] == 130 && compositor.damage[0][3] == 140);
+        compositor_fence_prop = 0;
+        memory_zero(&compositor_vrr, sizeof(compositor_vrr));
+        card_fake_close();
+    }
+#endif
+
+    /* COMP-04: compositor_out_planes_take must not assign the same primary plane ID to multiple outputs */
+    if (card_fake_open(800, 600))
+    {
+        compositor_zero();
+        compositor.card = card_fake.fd;
+        card_fake.universal = 1;
+        compositor.outputs = 2;
+        compositor.output[0].crtc = CARD_FAKE_CRTC, compositor.output[0].crtc_index = 0;
+        compositor.output[1].crtc = CARD_FAKE_CRTC + 1, compositor.output[1].crtc_index = 0;
+        compositor_out_planes_take(2);
+        check("COMP-04: compositor_out_planes_take never assigns one primary plane ID to two outputs",
+              compositor_out_plane[0] == CARD_FAKE_PLANE && compositor_out_plane[1] == 0 && compositor_out_ok == 0);
+        card_fake_close();
+    }
+
+    /* COMP-05 (compositor_present_tell path): refused carried-overlay commit re-damages rect */
+    if (card_fake_open(800, 600))
+    {
+        compositor_zero();
+        compositor.width = 800, compositor.height = 600, compositor.scale = 100;
+        compositor.card = card_fake.fd;
+        card_fake.atomic = 1;
+        card_fake.refuse_atomic = 1;
+        card_fake.page_flips = 1;
+        compositor.on_screen = CARD_FAKE_FB + 1;
+        compositor.fb = CARD_FAKE_FB + 2;
+        compositor.damages = 0;
+        compositor_modesetting = 0;
+        compositor_plane_carry.fb = CARD_FAKE_FB + 3;
+        compositor_plane_carry.row = 0;
+        compositor_plane_carry.which = 0;
+        compositor_plane_carry.rect[0] = 10, compositor_plane_carry.rect[1] = 20;
+        compositor_plane_carry.rect[2] = 110, compositor_plane_carry.rect[3] = 120;
+        compositor_present_tell(0, 0, 0, 0, 1, 0, 0);
+        check("COMP-05: compositor_present_tell re-damages carried overlay rect when atomic commit is refused",
+              compositor_plane_carry.fb == 0 && compositor.damages > 0 &&
+                  compositor.damage[0][0] == 10 && compositor.damage[0][1] == 20 &&
+                  compositor.damage[0][2] == 110 && compositor.damage[0][3] == 120);
+        card_fake_close();
+    }
+
+    /* COMP-06: compositor_flip_all modeset fallback updates compositor.on_screen and clears compositor_flip_refused */
+    if (card_fake_open(800, 600))
+    {
+        int ok;
+
+        compositor_zero();
+        compositor.width = 800, compositor.height = 600, compositor.scale = 100;
+        compositor.card = card_fake.fd;
+        card_fake.atomic = 1;
+        card_fake.refuse_atomic = 1;
+        card_fake.fbs = 2;
+        card_fake.fb_width[1] = 800, card_fake.fb_height[1] = 600;
+        card_fake.fb_width[2] = 800, card_fake.fb_height[2] = 600;
+        compositor.outputs = 2;
+        compositor_out_ok = 1;
+        compositor_multi_off = 0;
+        compositor.on_screen = CARD_FAKE_FB + 1;
+        compositor.fb = CARD_FAKE_FB + 2;
+        compositor_flip_refused = 2;
+        compositor.output[0].crtc = CARD_FAKE_CRTC, compositor.output[0].fb = CARD_FAKE_FB + 2;
+        compositor.output[1].crtc = CARD_FAKE_CRTC, compositor.output[1].fb = CARD_FAKE_FB + 2;
+        compositor.output[0].mode.hdisplay = 800, compositor.output[0].mode.vdisplay = 600;
+        compositor.output[1].mode.hdisplay = 800, compositor.output[1].mode.vdisplay = 600;
+        compositor.screen[0][2] = 800, compositor.screen[0][3] = 600;
+        compositor.screen[1][2] = 800, compositor.screen[1][3] = 600;
+        ok = compositor_flip_all(CARD_FAKE_FB + 2);
+        check("COMP-06: compositor_flip_all modeset fallback updates compositor.on_screen and clears flip_refused",
+              ok == 1 && compositor_multi_off == 1 && compositor.on_screen == CARD_FAKE_FB + 2 &&
+                  compositor_flip_refused == 0);
+        compositor_multi_off = 0;
+        card_fake_close();
+    }
+
+    /* COMP-07: compositor_scene_reads includes shaped frames so CPU fallback avoids WC scanout readbacks */
+    {
+        struct compositor_target t = {0, 200, 200, 200, 0, 0, 200, 200, 0, 0, 0, 1};
+        struct compositor_frame f;
+        int top = 0, bottom = 0, reads;
+
+        memory_zero(&f, sizeof(f));
+        f.shaped = 1, f.x = 20, f.y = 30, f.width = 80, f.height = 60, f.scale = 100;
+        reads = compositor_scene_reads(&t, &f, 1, &top, &bottom);
+        check("COMP-07: compositor_scene_reads reports rows overlapping a shaped frame",
+              reads == 1 && top <= 30 && bottom >= 90);
+    }
 }
 

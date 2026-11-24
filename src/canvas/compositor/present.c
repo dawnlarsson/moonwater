@@ -410,7 +410,13 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
                 if (compositor_atomic_to(compositor.fb, compositor_plane_carry.row, compositor_plane_carry.which, 1, compositor_plane_carry.fb,
                                          compositor_plane_carry.source, compositor_plane_carry.rect))
                         compositor_flip_refused = 0, compositor_plane_carried(1);
-                compositor_plane_carry.fb = 0;
+                else
+                {
+                        compositor_damage(compositor_plane_carry.rect[0], compositor_plane_carry.rect[1],
+                                          compositor_plane_carry.rect[2] - compositor_plane_carry.rect[0],
+                                          compositor_plane_carry.rect[3] - compositor_plane_carry.rect[1]);
+                        compositor_plane_carried(0);
+                }
         }
         if (compositor_modesetting)
                 return;
@@ -500,11 +506,14 @@ static unsigned int compositor_in_fence(void)
         return compositor_fence_prop > 0 ? (unsigned int)compositor_fence_prop : 0;
 }
 
+static void compositor_vrr_retry(void);
+
 static int compositor_flip_fenced(unsigned int fb, int fence)
 {
         unsigned int prop = compositor_in_fence();
         struct drm_atomic_req req = {0};
         long refused;
+        int vrr_was = compositor_vrr_owed();
 
         if (!prop || fence < 0 || compositor.card < 0)
                 return 0;
@@ -518,8 +527,14 @@ static int compositor_flip_fenced(unsigned int fb, int fence)
         if (refused != 0 && req.obj_count == 2 && refused != -16)
         {
                 // Refused with the overlay in it: the plate alone, and the overlay's buffer is committed by the next present.
+                compositor_damage(compositor_plane_carry.rect[0], compositor_plane_carry.rect[1],
+                                  compositor_plane_carry.rect[2] - compositor_plane_carry.rect[0],
+                                  compositor_plane_carry.rect[3] - compositor_plane_carry.rect[1]);
                 compositor_plane_carried(0);
+                if (vrr_was)
+                        compositor_vrr_retry();
                 req.obj_count = 1;
+                req.prop_count = req.counts[0];
                 refused = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, compositor.flip_serial + 1);
         }
         if (refused != 0)
@@ -1392,6 +1407,8 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
                                         count += compositor_scenes_frames(frames, rows, count, room), scenes = 2;
                                 continue;
                         }
+                        if (count >= room)
+                                break;
                         if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh) &&
                             (dw < (int)compositor.w[row] || dh < (int)compositor.h[row]) &&
                             count + 1 < room)
@@ -1407,7 +1424,8 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
                         rows[count] = compositor.stack[at];
                         compositor_row_prepare(compositor.stack[at]);
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
-                        count += compositor_wl_layers_frames(compositor.stack[at], frames, rows, count);
+                        if (count + 8u <= room)
+                                count += compositor_wl_layers_frames(compositor.stack[at], frames, rows, count);
                 }
         if (scenes == 1)
                 count += compositor_scenes_frames(frames, rows, count, room);

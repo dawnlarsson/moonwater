@@ -1676,6 +1676,11 @@ static void compositor_vrr_carried(int taken)
         compositor_vrr_publish();
 }
 
+static void compositor_vrr_retry(void)
+{
+        compositor_vrr.carry_refused = 0;
+}
+
 static int compositor_vrr_set(int on)
 {
         positive began = clock_monotonic_nanoseconds();

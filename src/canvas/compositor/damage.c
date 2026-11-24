@@ -1822,6 +1822,8 @@ static void compositor_row_shape_set(int row, const unsigned char *x_rects, unsi
                 compositor_cuts_rows = (unsigned int)(compositor_cuts_bytes / sizeof(struct compositor_cut));
         }
         s = &compositor_cuts[row];
+        if (shaped && count > 4096u)
+                count = 4096u;
         if (shaped && count > s->bytes / sizeof(s->rect[0]) &&
             !mem_buf_grow((void **)&s->rect, &s->bytes, count * sizeof(s->rect[0]), MEM_BUF_GROW_2X))
                 shaped = 0, count = 0, s->count = 0;
