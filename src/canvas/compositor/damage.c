@@ -1541,6 +1541,7 @@ static int compositor_row_shaped(int row)
 #define COMPOSITOR_CONTROLS_MOST 48  // logical pixels: one colour deeper than this is a picture, not a bar
 #define COMPOSITOR_CONTROLS_SKIP 2   // logical pixels at the top read past: a window's own edge line
 #define COMPOSITOR_CONTROLS_NEAR 12  // a channel within this of the bar's is the bar's colour
+#define COMPOSITOR_CONTROLS_EVEN 2   // logical pixels the columns of a bar may end apart: its foot, drawn smooth
 
 struct compositor_controls_row
 {
@@ -1745,14 +1746,25 @@ static void compositor_controls_read(struct compositor_frame *frame)
                 // A client's dma-buf mapped write-combined is read every other column: the bar is a run, and a word on it is wider.
                 step = frame->gpu_base ? 2 : 1;
                 ink = compositor_picture_at(frame, x0 + reach / 2, skip) & 0xffffffu;
+                // A bar ends at one depth across its room: every column is the bar's colour down to its foot and no further (an edge, or
+                // what is under the bar, starts there). A window's own button is not a bar: the columns through its glyph stop where the
+                // glyph starts and the columns beside it run on down the caption, so the depths disagree (Chrome's close button, whose
+                // X sits a dozen pixels down its caption, read as a bar to the glyph's top and had Canvas's buttons laid over its own).
                 band = most + 1;
-                for (int x = x0; x < x0 + reach && band >= least; x += step)
                 {
-                        int depth = skip;
+                        int deepest = 0, even = COMPOSITOR_CONTROLS_EVEN * scale / 100 > 0 ? COMPOSITOR_CONTROLS_EVEN * scale / 100 : 1;
 
-                        while (depth < band && compositor_controls_near(compositor_picture_at(frame, x, depth), ink))
-                                depth++;
-                        band = depth < band ? depth : band;
+                        for (int x = x0; x < x0 + reach && band >= least; x += step)
+                        {
+                                int depth = skip;
+
+                                while (depth <= most && compositor_controls_near(compositor_picture_at(frame, x, depth), ink))
+                                        depth++;
+                                band = depth < band ? depth : band;
+                                deepest = depth > deepest ? depth : deepest;
+                                if (deepest - band > even)
+                                        band = 0;
+                        }
                 }
                 if (band < least || band > most)
                         band = 0;
