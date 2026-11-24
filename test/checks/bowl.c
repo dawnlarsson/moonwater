@@ -1500,6 +1500,53 @@ static fn flatpak_profile(void)
                   !bowl_flatpak_entry(BOWL_ROOT_PREFIX "arch/var/lib/flatpak/exports/share/applications/x.desktopx", root, sizeof root, id, sizeof id));
 }
 
+/*
+        The appimage profile: Arch's libraries an AppImage leaves to the desktop, unsquashfs and the X server's wrapper; a session
+        under appimage's own name whose add, remove and list are its helper's, and which runs any other word as an AppImage under
+        the rootless X server; the helper written into the bowl, which unpacks with unsquashfs and runs nothing of the file to do
+        it; and an AppImage's entry is uninstalled as the AppImage.
+*/
+static fn appimage_profile(void)
+{
+        const struct bowl_profile address_to appimage = bowl_find_profile("appimage");
+        const struct bowl_component address_to part = appimage ? appimage->components : null;
+        string_address address_to session = appimage ? appimage->session : null;
+        positive verbs = chrome_line(session, "case $1 in add|remove|list|'') exec bowl " BOWL_ROOT_PREFIX "arch /usr/local/bin/appimage-moonwater \"$@\"");
+        positive socket = chrome_line(session, "[ -S /run/moonwater/wayland-0 ] ||");
+        positive wrapped = chrome_line(session, "bowl " BOWL_ROOT_PREFIX "arch /usr/local/bin/xwayland-moonwater /usr/local/bin/appimage-moonwater run \"$@\"");
+        positive last = 0;
+        p8 name[64];
+
+        while (session && session[last + 1])
+                last++;
+        check("The appimage profile has one component, Arch's, with a session; it holds the X server's wrapper and the AppImage helper",
+              appimage && !appimage->libraries && session && part && string_equals(part->distro, "arch") && !(part + 1)->distro &&
+                  appimage->xwayland && appimage->appimage && !appimage->unavailable && part->expose && !part->expose[0]);
+        check("The appimage component names unsquashfs, Python, Xwayland and what an AppImage leaves to the desktop (GTK 3, NSS, Mesa, sound, fonts)",
+              part && chrome_has(part->packages, "squashfs-tools") && chrome_has(part->packages, "python") &&
+                  chrome_has(part->packages, "xorg-xwayland") && chrome_has(part->packages, "gtk3") && chrome_has(part->packages, "nss") &&
+                  chrome_has(part->packages, "mesa") && chrome_has(part->packages, "libpulse") && chrome_has(part->packages, "fontconfig"));
+        check("Only the appimage profile holds the helper", bowl_find_profile("flatpak") && !bowl_find_profile("flatpak")->appimage &&
+                                                                 bowl_find_profile("steam") && !bowl_find_profile("steam")->appimage);
+        check("add, remove and list are the helper's, before the session looks for the desktop; anything else is an AppImage run under the X server, "
+              "on Wayland alone where it did not start",
+              verbs == 2 && socket > verbs && wrapped > socket &&
+                  string_equals(session[last], "exec bowl " BOWL_ROOT_PREFIX "arch /usr/local/bin/appimage-moonwater run \"$@\""));
+        check("The helper is Python, unpacks with unsquashfs past the ELF runtime, and runs nothing of the AppImage to unpack it",
+              string_has_prefix(bowl_appimage_script, "#!/usr/bin/python3\n") && strstr(bowl_appimage_script, "\"unsquashfs\"") &&
+                  strstr(bowl_appimage_script, "b\"hsqs\"") && !strstr(bowl_appimage_script, "--appimage-extract") &&
+                  strstr(bowl_appimage_script, "os.execve(apprun"));
+        check("An AppImage's entry in the launcher's list is the AppImage to uninstall",
+              bowl_appimage_entry("/root/.local/share/applications/appimage-Obsidian-1.6.7.desktop", name, sizeof name) &&
+                  string_equals(name, "Obsidian-1.6.7"));
+        check("Nothing else is: another prefix, a name with a path's step or a leading dash, no .desktop",
+              !bowl_appimage_entry("/root/.local/share/applications/Obsidian.desktop", name, sizeof name) &&
+                  !bowl_appimage_entry("/root/.local/share/applications/appimage-a/b.desktop", name, sizeof name) &&
+                  !bowl_appimage_entry("/root/.local/share/applications/appimage--rf.desktop", name, sizeof name) &&
+                  !bowl_appimage_entry("/root/.local/share/applications/appimage-x.desktopx", name, sizeof name) &&
+                  !bowl_appimage_entry("/tmp/appimage-x.desktop", name, sizeof name));
+}
+
 static fn pad_rows(void)
 {
         p8 bytes[96];
@@ -5221,6 +5268,7 @@ b32 main(void)
         record_rows();
         steam_profile();
         flatpak_profile();
+        appimage_profile();
         pad_rows();
         downloads();
         download_ceiling();

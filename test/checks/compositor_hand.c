@@ -2647,7 +2647,7 @@ static void check_taskbar_pins(void)
     }
     string_copy((string_address)second, (string_address)root), string_append_bounded((string_address)second, (string_address) "/proc", sizeof(second));
     {
-        static char proc_root[112], run_root[112], settings_root[112], bowls[112], local_dir[128];
+        static char proc_root[112], run_root[112], settings_root[112], bowls[112], local_dir[128], appimages_dir[128];
         static const struct { const char *at, *text; } files[] = {
             // Chromium: started by its bowl's launcher of the Exec's program; Steam: its class is Steam, its launcher a profile's session;
             // htop runs in a terminal and is not pinned; a hidden entry and one whose program has no launcher are not listed;
@@ -2659,6 +2659,14 @@ static void check_taskbar_pins(void)
             {"/bowls/arch/usr/share/applications/steam.desktop", "[Desktop Entry]\nType=Application\nName=Steam\nExec=/usr/bin/steam %U\nStartupWMClass=Steam\n"},
             {"/root/.local/share/applications/Black Mesa.desktop", "[Desktop Entry]\nName=Black Mesa\nExec=steam steam://rungameid/362890\nIcon=steam_icon_362890\nTerminal=false\nType=Application\n"},
             {"/bowls/bin/steam", "#!/bin/sh\n# bowl profile steam\nexec bowl profile steam session \"$@\"\n"},
+            // AppImages: one in ~/Applications not added yet is listed by its file's name, started by the appimage session with its
+            // path; one added (its entry appimage-NAME, which the helper wrote) is listed once, by its entry.
+            {"/bowls/bin/appimage", "#!/bin/sh\n# bowl profile appimage\nexec bowl profile appimage session \"$@\"\n"},
+            {"/root/Applications/Hello World (x64).AppImage", "\177ELF"},
+            {"/root/Applications/Tool.AppImage", "\177ELF"},
+            {"/root/Applications/notes.txt", "not an AppImage"},
+            {"/root/.local/share/applications/appimage-Tool.desktop",
+             "[Desktop Entry]\nType=Application\nName=The Tool\nExec=appimage \"/root/Applications/Tool.AppImage\" %U\n"},
         };
 
         string_copy((string_address)proc_root, (string_address)second);
@@ -2667,7 +2675,9 @@ static void check_taskbar_pins(void)
         string_copy((string_address)bowls, (string_address)root), string_append_bounded((string_address)bowls, (string_address) "/bowls", sizeof(bowls));
         string_copy((string_address)local_dir, (string_address)root), string_append_bounded((string_address)local_dir, (string_address) "/root/.local/share", sizeof(local_dir));
         taskbar_proc_root = proc_root, taskbar_run_root = run_root, compositor_settings_root = settings_root;
+        string_copy((string_address)appimages_dir, (string_address)root), string_append_bounded((string_address)appimages_dir, (string_address) "/root/Applications", sizeof(appimages_dir));
         ui_apps_bowls = bowls, ui_apps_local = local_dir, ui_apps_owner = (unsigned int)system_call(syscall(getuid)), ui_apps.read = false;
+        ui_apps_appimages_dir = appimages_dir;
         // The pictures kept across processes, in the check's directory too (never the system's /run/moonwater).
         string_copy((string_address)pins_cache, (string_address)root), string_append_bounded((string_address)pins_cache, (string_address) "/app-pictures", sizeof(pins_cache));
         ui_apps_cache_path = pins_cache;
@@ -2722,6 +2732,37 @@ static void check_taskbar_pins(void)
                   string_equals((string_address)ui_apps.app[game].profile, (string_address) "steam") && ui_apps.app[game].arg_count == 1 &&
                   string_equals((string_address)ui_apps.app[game].args[0], (string_address) "steam://rungameid/362890") &&
                   ui_apps_has_picture(game) && ui_apps_pinnable(game));
+        int hello = ui_apps_find("appimage-Hello-World-x64.AppImage"), named = ui_apps_find("appimage-Hello-World-x64"), tool = ui_apps_find("appimage-Tool");
+        int tools = 0;
+        for (int at = 0; at < ui_apps.count; at++)
+                tools += string_has_prefix((string_address)ui_apps.app[at].id, "appimage-Tool") || string_equals((string_address)ui_apps.app[at].name, (string_address) "Tool");
+        string_copy((string_address)want, (string_address)ui_apps_appimages_dir), string_append_bounded((string_address)want, (string_address) "/Hello World (x64).AppImage", sizeof(want));
+        check("apps: an AppImage in ~/Applications not added yet is listed by its file's name, its id the one the helper gives it, started by the appimage session with its path",
+              hello < 0 && named >= 0 && string_equals((string_address)ui_apps.app[named].name, (string_address) "Hello World (x64)") &&
+                  string_equals((string_address)ui_apps.app[named].profile, (string_address) "appimage") && ui_apps.app[named].arg_count == 1 &&
+                  string_equals((string_address)ui_apps.app[named].args[0], (string_address)want) && ui_apps_find("appimage-notes") < 0);
+        check("apps: an AppImage added is listed by its entry",
+              tool >= 0 && string_equals((string_address)ui_apps.app[tool].name, (string_address) "The Tool"));
+        check("apps: and only once, not again by its file's name", tools == 1);
+        check("apps: Uninstall of an AppImage not added yet is the entry it will have (the helper's remove)",
+              named >= 0 && memory_has_suffix((string_address)ui_apps.app[named].source, string_length((string_address)ui_apps.app[named].source),
+                                              "/applications/appimage-Hello-World-x64.desktop") &&
+                  ui_apps_uninstallable(named));
+        if (tool < 0 || tools != 1)
+                for (int at = 0; at < ui_apps.count; at++)
+                        if (!ui_apps.app[at].kit)
+                        {
+                                string_format(log, "  apps listed: %s [%s] %s\n", (string_address)ui_apps.app[at].id, (string_address)ui_apps.app[at].name,
+                                              (string_address)ui_apps.app[at].source);
+                                log_flush();
+                        }
+        {
+                char name[64];
+                check("apps: an AppImage's name is its stem, bytes of no id made dashes, run together and off its ends, 48 bytes at most, app for none",
+                      ui_apps_appimage_name("--a  b\xc3\xa9" "c--", 11, name) == 5 && string_equals((string_address)name, (string_address) "a-b-c") &&
+                          ui_apps_appimage_name("\xc3\xa9", 2, name) == 3 && string_equals((string_address)name, (string_address) "app") &&
+                          ui_apps_appimage_name("abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz", 62, name) == 48);
+        }
     }
     /* An app's picture is made off the draw: the first draw of its task reads no file and decodes nothing, so the task is the window
        symbol's and the entry has no picture yet, the worker's job; when the worker is done, the loop's pass takes it and asks for the

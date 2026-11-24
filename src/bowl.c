@@ -10117,6 +10117,9 @@ struct bowl_profile
         // The bowl holds steam-overlay-gl.so, so Steam's overlay draws in OpenGL games (bowl_steam_overlay_gl_install). The
         // session writes it at every start, as it does the wrapper, so it is not a step of the profile's generation.
         bool overlay_gl;
+        // The bowl holds appimage-moonwater, the helper that unpacks, lists and runs AppImages (bowl_appimage_install), written
+        // at install and at every start of the session, as the X server's wrapper is.
+        bool appimage;
 };
 
 /*
@@ -24181,6 +24184,322 @@ static string_address bowl_flatpak_session[] = {
     "exec bowl " BOWL_FLATPAK_ROOT " /usr/bin/flatpak \"$@\"",
     null};
 
+/*
+        AppImages, run from the Arch bowl: an AppImage is an ELF runtime with a squashfs after it, and the program in it links
+        what a desktop has (glibc, GTK, NSS, Mesa, the sound libraries), which a bowl's distribution gives it. The component is
+        those (what Electron's and GTK's AppImages ask for), unsquashfs, and Xwayland and Python for the X server and for the
+        helper, appimage-moonwater (a Python script written into the bowl at install and at every session, as the X server's
+        wrapper is). Nothing of an AppImage is run to unpack it, and no FUSE is asked for: unsquashfs reads its squashfs past
+        the runtime into ~/Applications/.appimage/NAME, once and again when the file changes, and its AppRun is run from there.
+
+        The session is the launcher named appimage: `appimage add FILE` keeps it in ~/Applications and puts it in the launcher's
+        list (a desktop entry in ~/.local/share/applications from the one it carries, with its icon, as Steam's games are),
+        `appimage remove NAME` takes all of that away, `appimage list` says each, and `appimage FILE [ARGS]` runs one, which an
+        entry's Exec does. A run has the desktop's sockets, the system bus and the rootless X server, as a Flatpak app's.
+*/
+#define BOWL_APPIMAGE_HELPER "/usr/local/bin/appimage-moonwater"
+
+static string_address bowl_appimage_arch[] = {
+    // Unpacking: unsquashfs. Running: what an AppImage leaves to the desktop it runs on (Electron's: GTK 3, NSS, the XScreenSaver
+    // and Xtst extensions, CUPS's library, libsecret; Mesa and the sound and font libraries every one asks for).
+    "squashfs-tools", "gtk3", "nss", "libxss", "libxtst", "libcups", "libsecret", "libnotify", "alsa-lib", "libpulse", "mesa",
+    "libglvnd", "fontconfig", "ttf-dejavu", "libxkbcommon-x11", "xdg-utils",
+    // The X server and the helper's interpreter.
+    "xorg-xwayland", "python",
+    null};
+
+static string_address bowl_appimage_expose[] = {null};
+
+static const struct bowl_component bowl_appimage_components[] = {
+    {"arch", bowl_appimage_arch, 0, bowl_appimage_expose, null},
+    {null, null, 0, null, null},
+};
+
+static string_address bowl_appimage_session[] = {
+    "wa(){ ! grep -qx \"$1 off\" /root/workarounds 2>/dev/null; }",
+    // add, remove and list are the helper's own; anything else is an AppImage to run (and run FILE is said so too).
+    "case $1 in add|remove|list|'') exec bowl " BOWL_FLATPAK_ROOT " " BOWL_APPIMAGE_HELPER " \"$@\" ;; run) shift ;; esac",
+    "[ -S " BOWL_STEAM_SOCKET " ] || { echo \"appimage: Canvas has no Wayland socket (" BOWL_STEAM_SOCKET "): this image was "
+    "built with CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
+    "export WAYLAND_DISPLAY=" BOWL_STEAM_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none GTK_A11Y=none",
+    "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
+    "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
+    "[ -S /run/dbus/system_bus_socket ] || bowl bus >/dev/null 2>&1 || true",
+    "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
+    BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "if [ -S " BOWL_STEAM_WM " ]; then",
+    "bowl " BOWL_FLATPAK_ROOT " " BOWL_XWAYLAND_WRAPPER " " BOWL_APPIMAGE_HELPER " run \"$@\"",
+    "status=$?",
+    "[ $status -ne 125 ] && exit $status",
+    "echo \"appimage: the X server did not start: the app runs on Wayland alone\" >&2",
+    "fi",
+    "exec bowl " BOWL_FLATPAK_ROOT " " BOWL_APPIMAGE_HELPER " run \"$@\"",
+    null};
+
+static const char bowl_appimage_script[] =
+    "#!/usr/bin/python3\n"
+    "# appimage-moonwater add FILE | remove NAME | list | run FILE [ARGS...]\n"
+    "#\n"
+    "# AppImages on Moonwater, kept in ~/Applications and run from the bowl that holds this script: add copies an AppImage there\n"
+    "# (unless it is there already), unpacks it into ~/Applications/.appimage/NAME (its squashfs, read past the ELF runtime by\n"
+    "# unsquashfs: nothing of the file is run to unpack it, and no FUSE is asked for) and puts it in the launcher's list\n"
+    "# (~/.local/share/applications/appimage-NAME.desktop, from the desktop entry and the icon it carries); remove takes all of\n"
+    "# that away, the AppImage too; list says NAME and FILE of each; run unpacks it again when the file changed (an update), adds it\n"
+    "# to the list when it is not there, and runs its AppRun with APPIMAGE, APPDIR, ARGV0 and OWD set as the AppImage runtime\n"
+    "# sets them. NAME is the file's name less .AppImage, its bytes past letters, digits, '.', '_', '+' and '-' made dashes.\n"
+    "import os\n"
+    "import re\n"
+    "import shutil\n"
+    "import struct\n"
+    "import subprocess\n"
+    "import sys\n"
+    "\n"
+    "HOME = os.environ.get(\"HOME\", \"/root\")\n"
+    "APPS = os.path.join(HOME, \"Applications\")\n"
+    "UNPACKED = os.path.join(APPS, \".appimage\")\n"
+    "ENTRIES = os.path.join(HOME, \".local/share/applications\")\n"
+    "ICONS = os.path.join(HOME, \".local/share/icons/hicolor\")\n"
+    "PREFIX = \"appimage-\"\n"
+    "KEYS = (\"Name\", \"GenericName\", \"Comment\", \"Keywords\", \"Categories\", \"StartupWMClass\", \"MimeType\")\n"
+    "\n"
+    "\n"
+    "def say(text):\n"
+    "    sys.stderr.write(\"appimage: %s\\n\" % text)\n"
+    "\n"
+    "\n"
+    "def name_of(path):\n"
+    "    stem = os.path.basename(path)\n"
+    "    if stem.lower().endswith(\".appimage\"):\n"
+    "        stem = stem[:-9]\n"
+    "    name = re.sub(r\"-+\", \"-\", re.sub(r\"[^A-Za-z0-9._+-]\", \"-\", stem)).strip(\"-\")\n"
+    "    return name[:48] or \"app\"\n"
+    "\n"
+    "\n"
+    "def squashfs_at(path):\n"
+    "    \"\"\"Where the AppImage's squashfs begins: past the ELF runtime's section headers (a type 2 AppImage), or None.\"\"\"\n"
+    "    with open(path, \"rb\") as source:\n"
+    "        head = source.read(64)\n"
+    "        if len(head) < 64 or head[:4] != b\"\\x7fELF\" or head[8:11] != b\"AI\\x02\":\n"
+    "            return None\n"
+    "        if head[4] == 2:\n"
+    "            shoff = struct.unpack_from(\"<Q\", head, 0x28)[0]\n"
+    "            shentsize, shnum = struct.unpack_from(\"<HH\", head, 0x3A)\n"
+    "        else:\n"
+    "            shoff = struct.unpack_from(\"<I\", head, 0x20)[0]\n"
+    "            shentsize, shnum = struct.unpack_from(\"<HH\", head, 0x2E)\n"
+    "        at = shoff + shentsize * shnum\n"
+    "        source.seek(at)\n"
+    "        return at if source.read(4) == b\"hsqs\" else None\n"
+    "\n"
+    "\n"
+    "def stamp_of(path):\n"
+    "    facts = os.stat(path)\n"
+    "    return \"%d %d\\n\" % (facts.st_size, facts.st_mtime_ns)\n"
+    "\n"
+    "\n"
+    "def inside(root, path):\n"
+    "    \"\"\"path, when it is root or under it once every link is followed; else None.\"\"\"\n"
+    "    real, top = os.path.realpath(path), os.path.realpath(root)\n"
+    "    return real if real == top or real.startswith(top + os.sep) else None\n"
+    "\n"
+    "\n"
+    "def unpack(path, name):\n"
+    "    \"\"\"The AppImage at path unpacked into UNPACKED/name, again when the file is not the one unpacked there: that directory.\"\"\"\n"
+    "    where = os.path.join(UNPACKED, name)\n"
+    "    stamp = os.path.join(where, \".moonwater-stamp\")\n"
+    "    try:\n"
+    "        with open(stamp) as kept:\n"
+    "            if kept.read() == stamp_of(path):\n"
+    "                return where\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    at = squashfs_at(path)\n"
+    "    if at is None:\n"
+    "        raise SystemExit(\"appimage: %s is not an AppImage of type 2 (an ELF runtime and a squashfs after it)\" % path)\n"
+    "    os.makedirs(UNPACKED, exist_ok=True)\n"
+    "    fresh = where + \".new\"\n"
+    "    shutil.rmtree(fresh, ignore_errors=True)\n"
+    "    done = subprocess.run([\"unsquashfs\", \"-q\", \"-n\", \"-o\", str(at), \"-d\", fresh, path], stdout=subprocess.DEVNULL)\n"
+    "    if done.returncode != 0:\n"
+    "        shutil.rmtree(fresh, ignore_errors=True)\n"
+    "        raise SystemExit(\"appimage: unsquashfs could not unpack %s\" % path)\n"
+    "    with open(os.path.join(fresh, \".moonwater-stamp\"), \"w\") as kept:\n"
+    "        kept.write(stamp_of(path))\n"
+    "    shutil.rmtree(where, ignore_errors=True)\n"
+    "    os.rename(fresh, where)\n"
+    "    return where\n"
+    "\n"
+    "\n"
+    "def entry_of(where):\n"
+    "    \"\"\"The keys of the [Desktop Entry] of the one desktop file at the top of an unpacked AppImage: a dict, empty for none.\"\"\"\n"
+    "    found = {}\n"
+    "    for leaf in sorted(os.listdir(where)):\n"
+    "        path = os.path.join(where, leaf)\n"
+    "        if not leaf.endswith(\".desktop\") or not inside(where, path) or not os.path.isfile(path):\n"
+    "            continue\n"
+    "        group = None\n"
+    "        with open(path, encoding=\"utf-8\", errors=\"replace\") as source:\n"
+    "            for line in source:\n"
+    "                line = line.rstrip(\"\\n\")\n"
+    "                if line.startswith(\"[\"):\n"
+    "                    group = line.strip()\n"
+    "                elif group == \"[Desktop Entry]\" and \"=\" in line and not line.startswith(\"#\"):\n"
+    "                    key, value = line.split(\"=\", 1)\n"
+    "                    key = key.strip()\n"
+    "                    if key in KEYS or key == \"Icon\" or (key.startswith(\"Name[\") or key.startswith(\"Comment[\")):\n"
+    "                        found.setdefault(key, value.strip())\n"
+    "        break\n"
+    "    return found\n"
+    "\n"
+    "\n"
+    "def icon_of(where, icon):\n"
+    "    \"\"\"The PNG an unpacked AppImage shows itself by, inside it: its Icon in hicolor's largest size, at its top, or .DirIcon.\"\"\"\n"
+    "    names = []\n"
+    "    if icon and \"/\" not in icon:\n"
+    "        for size in (\"512x512\", \"256x256\", \"192x192\", \"128x128\", \"96x96\", \"64x64\", \"48x48\"):\n"
+    "            names.append(\"usr/share/icons/hicolor/%s/apps/%s.png\" % (size, icon))\n"
+    "        names.append(icon + \".png\")\n"
+    "    names.append(\".DirIcon\")\n"
+    "    for leaf in names:\n"
+    "        path = inside(where, os.path.join(where, leaf))\n"
+    "        if path and os.path.isfile(path):\n"
+    "            with open(path, \"rb\") as source:\n"
+    "                head = source.read(24)\n"
+    "            if head[:8] == b\"\\x89PNG\\r\\n\\x1a\\n\":\n"
+    "                return path, struct.unpack(\">II\", head[16:24])\n"
+    "    return None, None\n"
+    "\n"
+    "\n"
+    "def quote(path):\n"
+    "    return '\"' + \"\".join(\"\\\\\" + c if c in '\"`$\\\\' else c for c in path) + '\"'\n"
+    "\n"
+    "\n"
+    "def integrate(path, name, where):\n"
+    "    \"\"\"The launcher's entry for the AppImage, and its icon.\"\"\"\n"
+    "    entry = entry_of(where)\n"
+    "    os.makedirs(ENTRIES, exist_ok=True)\n"
+    "    icon, sides = icon_of(where, entry.get(\"Icon\", \"\"))\n"
+    "    icon_name = \"\"\n"
+    "    if icon:\n"
+    "        side = sides[0] if sides and sides[0] == sides[1] and 16 <= sides[0] <= 1024 else 256\n"
+    "        folder = os.path.join(ICONS, \"%dx%d\" % (side, side), \"apps\")\n"
+    "        os.makedirs(folder, exist_ok=True)\n"
+    "        shutil.copyfile(icon, os.path.join(folder, PREFIX + name + \".png\"))\n"
+    "        icon_name = PREFIX + name\n"
+    "    lines = [\"[Desktop Entry]\", \"Type=Application\", \"Name=%s\" % entry.get(\"Name\", name)]\n"
+    "    for key, value in entry.items():\n"
+    "        if key not in (\"Name\", \"Icon\") and \"\\n\" not in value:\n"
+    "            lines.append(\"%s=%s\" % (key, value))\n"
+    "    lines.append(\"Exec=appimage %s %%U\" % quote(path))\n"
+    "    if icon_name:\n"
+    "        lines.append(\"Icon=%s\" % icon_name)\n"
+    "    lines.append(\"X-AppImage-Path=%s\" % path)\n"
+    "    fresh = os.path.join(ENTRIES, PREFIX + name + \".desktop.new\")\n"
+    "    with open(fresh, \"w\", encoding=\"utf-8\") as out:\n"
+    "        out.write(\"\\n\".join(lines) + \"\\n\")\n"
+    "    os.rename(fresh, os.path.join(ENTRIES, PREFIX + name + \".desktop\"))\n"
+    "\n"
+    "\n"
+    "def add(path):\n"
+    "    path = os.path.abspath(path)\n"
+    "    if not os.path.isfile(path) or squashfs_at(path) is None:\n"
+    "        raise SystemExit(\"appimage: %s is not an AppImage of type 2\" % path)\n"
+    "    name = name_of(path)\n"
+    "    if os.path.dirname(path) != APPS:\n"
+    "        os.makedirs(APPS, exist_ok=True)\n"
+    "        kept = os.path.join(APPS, name + \".AppImage\")\n"
+    "        shutil.copyfile(path, kept + \".new\")\n"
+    "        os.rename(kept + \".new\", kept)\n"
+    "        path = kept\n"
+    "    os.chmod(path, 0o755)\n"
+    "    integrate(path, name, unpack(path, name))\n"
+    "    print(\"%s\\t%s\" % (name, path))\n"
+    "    return 0\n"
+    "\n"
+    "\n"
+    "def remove(name):\n"
+    "    name = name_of(name)\n"
+    "    entry = os.path.join(ENTRIES, PREFIX + name + \".desktop\")\n"
+    "    path = None\n"
+    "    try:\n"
+    "        with open(entry, encoding=\"utf-8\", errors=\"replace\") as source:\n"
+    "            for line in source:\n"
+    "                if line.startswith(\"X-AppImage-Path=\"):\n"
+    "                    path = line.split(\"=\", 1)[1].strip()\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    if not path:\n"
+    "        for leaf in os.listdir(APPS) if os.path.isdir(APPS) else []:\n"
+    "            if leaf.lower().endswith(\".appimage\") and name_of(leaf) == name:\n"
+    "                path = os.path.join(APPS, leaf)\n"
+    "    gone = False\n"
+    "    for victim in (entry, path if path and os.path.dirname(path) == APPS else None):\n"
+    "        if victim and os.path.lexists(victim):\n"
+    "            os.remove(victim)\n"
+    "            gone = True\n"
+    "    for size in os.listdir(ICONS) if os.path.isdir(ICONS) else []:\n"
+    "        icon = os.path.join(ICONS, size, \"apps\", PREFIX + name + \".png\")\n"
+    "        if os.path.lexists(icon):\n"
+    "            os.remove(icon)\n"
+    "    where = os.path.join(UNPACKED, name)\n"
+    "    if os.path.isdir(where):\n"
+    "        shutil.rmtree(where)\n"
+    "        gone = True\n"
+    "    if not gone:\n"
+    "        raise SystemExit(\"appimage: no AppImage %s here\" % name)\n"
+    "    return 0\n"
+    "\n"
+    "\n"
+    "def listing():\n"
+    "    for leaf in sorted(os.listdir(APPS)) if os.path.isdir(APPS) else []:\n"
+    "        path = os.path.join(APPS, leaf)\n"
+    "        if leaf.lower().endswith(\".appimage\") and os.path.isfile(path):\n"
+    "            print(\"%s\\t%s\" % (name_of(leaf), path))\n"
+    "    return 0\n"
+    "\n"
+    "\n"
+    "def run(path, arguments):\n"
+    "    path = os.path.abspath(path)\n"
+    "    name = name_of(path)\n"
+    "    where = unpack(path, name)\n"
+    "    if not os.path.exists(os.path.join(ENTRIES, PREFIX + name + \".desktop\")) and os.path.dirname(path) == APPS:\n"
+    "        try:\n"
+    "            integrate(path, name, where)\n"
+    "        except OSError as error:\n"
+    "            say(\"could not put %s in the launcher's list (%s)\" % (name, error.strerror))\n"
+    "    apprun = os.path.join(where, \"AppRun\")\n"
+    "    environment = dict(os.environ, APPIMAGE=path, APPDIR=where, ARGV0=path, OWD=os.getcwd())\n"
+    "    os.execve(apprun, [apprun] + arguments, environment)\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    words = sys.argv[1:]\n"
+    "    if not words:\n"
+    "        return listing()\n"
+    "    verb = words[0]\n"
+    "    if verb == \"add\" and len(words) == 2:\n"
+    "        return add(words[1])\n"
+    "    if verb == \"remove\" and len(words) == 2:\n"
+    "        return remove(words[1])\n"
+    "    if verb == \"list\" and len(words) == 1:\n"
+    "        return listing()\n"
+    "    if verb == \"run\" and len(words) >= 2:\n"
+    "        return run(words[1], words[2:])\n"
+    "    say(\"appimage add FILE | remove NAME | list | FILE [ARGS...]\")\n"
+    "    return 2\n"
+    "\n"
+    "\n"
+    "if __name__ == \"__main__\":\n"
+    "    sys.exit(main())\n";
+
+// The helper written into each bowl of the profile, executable (bowl_guest_install: whole, then renamed over the old one).
+static void __attribute__((__noinline__))
+bowl_appimage_install(const struct bowl_profile address_to profile)
+{
+        bowl_guest_install(profile, BOWL_XWAYLAND_DIRECTORY, BOWL_APPIMAGE_HELPER, (const p8 address_to)bowl_appimage_script,
+                           sizeof(bowl_appimage_script) - 1, 0, null, 0);
+}
+
 #if X64 || ARM64
 #define BOWL_FLATPAK_UNAVAILABLE null
 #else
@@ -24446,6 +24765,10 @@ static const struct bowl_profile bowl_profiles[] = {
     {"flatpak", "Flatpak (Arch's package) with Flathub, its apps on Canvas and in the launcher's list",
      "add an app with: flatpak install flathub APP (com.discordapp.Discord, com.visualstudio.code, org.gimp.GIMP...)",
      bowl_flatpak_components, bowl_flatpak_session, false, null, BOWL_FLATPAK_UNAVAILABLE, true},
+    {"appimage", "AppImages (from ~/Applications) on Canvas, run from Arch with the libraries they leave to the desktop",
+     "add one with: appimage add FILE.AppImage; it is in the launcher's list, and appimage FILE runs it",
+     bowl_appimage_components, bowl_appimage_session, false, null, null, true, false, false, false, null, null, false, false, false,
+     true},
     {"ssh", "OpenSSH's server (Alpine's openssh-server), run by Moonwater from its settings",
      "it is off: moonwater ssh on turns it on, and moonwater ssh says how it is",
      bowl_ssh_components, null, false, null, null, false, false, false, true},
@@ -24455,7 +24778,7 @@ static const struct bowl_profile bowl_profiles[] = {
      BOWL_BUILD_TRIPLET, bowl_build_tools, true},
 };
 
-#define BOWL_PROFILES_KNOWN "known profiles: graphics, chrome, steam, flatpak, ssh, build\n"
+#define BOWL_PROFILES_KNOWN "known profiles: graphics, chrome, steam, flatpak, appimage, ssh, build\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
@@ -25024,6 +25347,8 @@ bowl_profile_session(const struct bowl_profile address_to profile,
                 bowl_chrome_pwrite_install(profile);
         if (profile->overlay_gl)
                 bowl_steam_overlay_gl_install(profile);
+        if (profile->appimage)
+                bowl_appimage_install(profile);
 
         argv[at++] = "/bin/sh";
         argv[at++] = path;
@@ -25488,6 +25813,8 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                 bowl_chrome_pwrite_install(profile);
         if (profile->overlay_gl)
                 bowl_steam_overlay_gl_install(profile);
+        if (profile->appimage)
+                bowl_appimage_install(profile);
         if (profile->tools || profile->bins_first)
                 bowl_profile_tools(profile, true);
         if (profile->input)
@@ -25958,6 +26285,32 @@ static bool bowl_flatpak_entry(string_address path, p8 address_to root, positive
         return true;
 }
 
+/*
+        An AppImage's entry in the launcher's list, as the appimage profile's helper writes it: BOWL_LOCAL_APPLICATIONS/appimage-
+        NAME.desktop, NAME letters, digits, '.', '_', '+' and '-'. The name into name; false for any other path. Uninstalled, the
+        AppImage goes with it (the helper's remove: the file in ~/Applications, what was unpacked of it, its icon and the entry).
+*/
+#define BOWL_APPIMAGE_ENTRY BOWL_LOCAL_APPLICATIONS "/appimage-"
+
+static bool bowl_appimage_entry(string_address path, p8 address_to name, positive room)
+{
+        positive length;
+
+        if (!path || !string_has_prefix(path, BOWL_APPIMAGE_ENTRY))
+                return false;
+        path += sizeof(BOWL_APPIMAGE_ENTRY) - 1;
+        length = string_length(path);
+        if (length <= 8 || length - 8 >= room || !memory_has_suffix(path, length, ".desktop") || path[0] == '.' || path[0] == '-')
+                return false;
+        for (positive at = 0; at < length - 8; at++)
+                if (!((path[at] >= 'a' && path[at] <= 'z') || (path[at] >= 'A' && path[at] <= 'Z') || (path[at] >= '0' && path[at] <= '9') ||
+                      path[at] == '.' || path[at] == '_' || path[at] == '+' || path[at] == '-'))
+                        return false;
+        memory_copy(name, path, length - 8);
+        name[length - 8] = end;
+        return true;
+}
+
 static b32 bowl_uninstall(positive count, string_address address_to arguments)
 {
         string_address target;
@@ -25986,6 +26339,19 @@ static b32 bowl_uninstall(positive count, string_address address_to arguments)
                 if (bowl_setup_become_root("uninstall", target, null))
                         return 1;
                 return bowl_setup_isolated(root, argv[0], argv, "flatpak could not uninstall the app\n", null);
+        }
+        if (bowl_appimage_entry(target, id, sizeof(id)) && bowl_executable_in_root(BOWL_FLATPAK_ROOT, BOWL_APPIMAGE_HELPER) >= 0)
+        {
+                string_address argv[] = {BOWL_APPIMAGE_HELPER, "remove", (string_address)id, null};
+                bipolar child;
+
+                if (bowl_setup_become_root("uninstall", target, null))
+                        return 1;
+                // The helper runs as a program of the bowl does, in a session's view, where ~/Applications is the person's.
+                child = system_fork();
+                if (child == 0)
+                        exit(bowl_launch(BOWL_FLATPAK_ROOT, argv[0], argv, false));
+                return bowl_wait_applet(child, "the AppImage could not be removed\n");
         }
         if (!bowl_desktop_path_ok(target))
                 return bowl_refuse("uninstall takes a profile name or a .desktop entry under "

@@ -21364,6 +21364,102 @@ static positive ui_apps_names(bipolar directory, char address_to names, positive
         return count;
 }
 
+/*
+        AppImages in ~/Applications that are not in the list yet: each by its file's name, started by the appimage profile's session
+        (appimage FILE), which puts it in the list with its own name and icon at its first run (a desktop entry appimage-NAME, the
+        id this one has, so that one is the one listed from then on). Only where the profile is installed (its launcher is
+        there), and only a file that is root's alone, as a desktop entry is. Its source is the entry it will have, which is what
+        Uninstall takes away with the AppImage (bowl uninstall: the helper's remove).
+*/
+#define UI_APPS_APPIMAGES "/root/Applications"
+static const char address_to ui_apps_appimages_dir = UI_APPS_APPIMAGES; // a check's own directory in its place
+
+// The name the appimage profile's helper gives an AppImage's file (appimage-moonwater's name_of): its stem, every byte that is no
+// letter, digit, '.', '_', '+' or '-' a dash, dashes run together and taken off its ends, 48 bytes at most; "app" for none.
+static positive ui_apps_appimage_name(const char address_to file, positive stem, char address_to into)
+{
+        positive made = 0;
+        for (positive at = 0; at < stem; at++)
+        {
+                unsigned char byte = (unsigned char)file[at];
+                char c = ui_apps_id_byte(byte) ? (char)byte : '-';
+                if (c == '-' && made && into[made - 1] == '-')
+                        continue;
+                into[made++] = c;
+        }
+        while (made && into[made - 1] == '-')
+                made--;
+        positive from = 0;
+        while (from < made && into[from] == '-')
+                from++;
+        for (positive at = from; at < made; at++)
+                into[at - from] = into[at];
+        made -= from;
+        if (made > 48)
+                made = 48;
+        if (!made)
+                memory_copy(into, "app", 3), made = 3;
+        into[made] = 0;
+        return made;
+}
+
+static fn ui_apps_appimages(char address_to names, positive room, unsigned int address_to order)
+{
+        char launch[UI_APP_PATH], profile[48], name[64];
+        bipolar directory;
+        positive count;
+        if (!ui_apps_launcher("", "appimage", launch, sizeof(launch), profile, sizeof(profile)) || !profile[0])
+                return;
+        ui_apps_watch(ui_apps_appimages_dir);
+        directory = system_open_at(AT_FDCWD, (string_address)ui_apps_appimages_dir, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (directory < 0)
+                return;
+        count = ui_apps_names(directory, names, room, order);
+        for (positive each = 0; each < count && ui_apps.count < UI_APPS_MOST; each++)
+        {
+                const char address_to file = names + order[each];
+                positive length = string_length((string_address)file), stem = length - 9;
+                struct ui_apps_facts facts;
+                struct ui_app_entry address_to app;
+                char id[WINDOWS_APP_ID];
+                if (length <= 9 || !memory_has_suffix((string_address)file, length, ".AppImage"))
+                        continue;
+                memory_zero(&facts, sizeof(facts));
+                if (system_stat_at(directory, (string_address)file, AT_SYMLINK_NOFOLLOW, 0x7ff, &facts) != 0 ||
+                    (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022))
+                        continue;
+                ui_apps_appimage_name(file, stem, name);
+                string_copy_bounded((p8 address_to)id, (string_address) "appimage-", sizeof(id));
+                string_append_bounded((p8 address_to)id, (string_address)name, sizeof(id));
+                if (ui_apps_find(id) >= 0)
+                        continue;
+                app = &ui_apps.app[ui_apps.count];
+                memory_zero(app, sizeof(*app));
+                string_copy_bounded((p8 address_to)app->id, (string_address)id, sizeof(app->id));
+                string_copy_bounded((p8 address_to)app->key, (string_address)id, sizeof(app->key));
+                memory_copy(app->name, file, stem < sizeof(app->name) ? stem : sizeof(app->name) - 1);
+                app->name[stem < sizeof(app->name) ? stem : sizeof(app->name) - 1] = 0;
+                string_copy_bounded((p8 address_to)app->launch, (string_address)launch, sizeof(app->launch));
+                string_copy_bounded((p8 address_to)app->args[0], (string_address)ui_apps_appimages_dir, UI_APP_PATH);
+                string_append_bounded((p8 address_to)app->args[0], (string_address) "/", UI_APP_PATH);
+                string_append_bounded((p8 address_to)app->args[0], (string_address)file, UI_APP_PATH);
+                app->arg_count = string_length((string_address)app->args[0]) + 1 < UI_APP_PATH ? 1 : 0;
+                if (!app->arg_count)
+                        continue;
+                string_copy_bounded((p8 address_to)app->root, (string_address)ui_apps_local, sizeof(app->root));
+                string_copy_bounded((p8 address_to)app->source, (string_address)ui_apps_local, sizeof(app->source));
+                string_append_bounded((p8 address_to)app->source, (string_address) "/applications/", sizeof(app->source));
+                string_append_bounded((p8 address_to)app->source, (string_address)id, sizeof(app->source));
+                string_append_bounded((p8 address_to)app->source, (string_address) ".desktop", sizeof(app->source));
+                string_copy_bounded((p8 address_to)app->profile, (string_address)profile, sizeof(app->profile));
+                ui_apps_word(app, app->id, string_length((string_address)app->id));
+                ui_apps_word(app, "appimage", 8);
+                ui_apps_word(app, name, string_length((string_address)name));
+                ui_apps.count++;
+        }
+        system_close(directory);
+}
+
 // Read every directory again: the kit's programs, then each bowl's entries, the bowls by name. The language is the kit's now.
 static fn ui_apps_scan_folder(const char address_to base, const char address_to sub, const char address_to entry_root,
                               char address_to entries, positive room, unsigned int address_to entry_order)
@@ -21443,6 +21539,7 @@ static fn ui_apps_read(void)
                 ui_apps_watch(ui_apps_local);
                 ui_apps_scan_folder(ui_apps_local, "applications", "", entries, room, entry_order);
         }
+        ui_apps_appimages(entries, room, entry_order);
         memory_free(bowls, room * 2);
         ui_apps_cache_map(); // the pictures kept by an earlier process, before any is drawn
 }
