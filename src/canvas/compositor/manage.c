@@ -584,6 +584,7 @@ static void compositor_space_assign_new(int row, int focus_switch);
 static void compositor_space_enter_fullscreen(int row, int screen);
 static void compositor_space_exit_fullscreen(int row, int closing);
 static int compositor_space_activate(int screen, unsigned int sid);
+static void compositor_cast_took(int row); // cast.c: a window of a shared Scene took a picture while its Scene is not shown
 
 static int compositor_meets(int row, unsigned int edge)
 {
@@ -2234,7 +2235,10 @@ static void compositor_take(int row)
         if (compositor_scenes_took(row))
                 return;
         if (!compositor_visible(row))
+        {
+                compositor_cast_took(row); // a Scene that is shared, while the person is on another
                 return;
+        }
         {
                 long x1 = damage[0] < 0 ? 0 : damage[0], y1 = damage[1] < 0 ? 0 : damage[1];
                 long x2 = (long)damage[0] + damage[2], y2 = (long)damage[1] + damage[3];

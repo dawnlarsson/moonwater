@@ -6976,6 +6976,8 @@ LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
 LANGUAGE_ID(share_asks, "%s asks to see:") \
 LANGUAGE_ID(share_refuse, "Don't share") \
+LANGUAGE_ID(share_scene, "Scene %d") \
+LANGUAGE_ID(share_scene_of, "Scene %1$d, screen %2$d") \
 LANGUAGE_ID(share_screen, "Entire screen") \
 LANGUAGE_ID(share_screen_of, "Screen %1$d, %2$s") \
 LANGUAGE_ID(share_stop, "Stop sharing %1$s with %2$s") \

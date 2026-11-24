@@ -84,6 +84,88 @@ static void compositor_cast_stale(struct compositor_cast *c, const int *rect)
         }
 }
 
+// The desktop Scenes, for the share app to offer: each one's id, screen, place on its screen and whether it is shown.
+static void compositor_cast_scenes_publish(struct windows *table)
+{
+        unsigned int n = 0, place[WINDOWS_OUTPUTS];
+
+        memory_zero(place, sizeof place);
+        for (unsigned int at = 0; compositor.spaces.ready && at < compositor.spaces.count && n < WINDOWS_CAST_SCENES; at++)
+        {
+                const struct compositor_space *sp = &compositor.spaces.list[at];
+
+                if (sp->kind != COMPOSITOR_SPACE_DESKTOP || sp->screen < 0 || sp->screen >= WINDOWS_OUTPUTS)
+                        continue;
+                table->cast_scene_id[n] = sp->id, table->cast_scene_screen[n] = (unsigned int)sp->screen;
+                table->cast_scene_place[n] = ++place[sp->screen];
+                table->cast_scene_shown[n] = compositor.spaces.active[sp->screen] == sp->id;
+                n++;
+        }
+        __atomic_store_n(&table->cast_scenes, n, __ATOMIC_RELEASE);
+}
+
+// The frames of a Scene: its windows bottom to top, each with its layers, wherever the person is (a room that grows; 0 when none).
+static unsigned int compositor_cast_scene_frames(unsigned int sid, struct compositor_frame **out)
+{
+        static struct compositor_frame *room;
+        static unsigned int *rows, have;
+        unsigned int count = 0;
+
+        for (unsigned int at = 0; at < compositor.stacked; at++)
+        {
+                int row = (int)compositor.stack[at];
+
+                if (!compositor.showing[row] || (compositor.state[row] & WINDOW_MINIMIZED) || compositor.row_space[row] != sid)
+                        continue;
+                if (count + 1 + COMPOSITOR_LAYERS > have)
+                {
+                        unsigned int more = have ? 2 * have : 64 + 2 * COMPOSITOR_LAYERS;
+                        struct compositor_frame *fresh = compositor_map_zeroed((unsigned long)more * sizeof(*fresh));
+                        unsigned int *fresh_rows = compositor_map_zeroed((unsigned long)more * sizeof(*fresh_rows));
+
+                        if (!fresh || !fresh_rows)
+                                break;
+                        if (room)
+                        {
+                                memory_copy(fresh, room, (positive)count * sizeof(*fresh)), memory_copy(fresh_rows, rows, (positive)count * sizeof(*rows));
+                                compositor_call(syscall(munmap), (positive)room, (positive)have * sizeof(*room), 0, 0, 0, 0);
+                                compositor_call(syscall(munmap), (positive)rows, (positive)have * sizeof(*rows), 0, 0, 0, 0);
+                        }
+                        room = fresh, rows = fresh_rows, have = more;
+                }
+                compositor_row_prepare(row);
+                compositor_frame_of(row, &room[count]);
+                rows[count] = (unsigned int)row;
+                if (room[count].tiled_kind)
+                        compositor_wl_straight_settle(row, 0, (long)compositor.h[row]), room[count].tiled_kind = 0;
+                count++;
+                count += compositor_wl_layers_frames(row, room, rows, count);
+        }
+        *out = room;
+        return count;
+}
+
+/*
+        A window took a new picture while it is not shown (on another Scene, or covered by the overview): what it covers is stale in the
+        shares of its Scene and its own, and a present is asked for (a pixel of the screen) so that they are composed.
+*/
+static void compositor_cast_took(int row)
+{
+        if (!compositor_cast_rings || row < 0 || !compositor.row_space)
+                return;
+        for (unsigned int at = 0; at < WINDOWS_CASTS; at++)
+        {
+                struct compositor_cast *c = &compositor_casts[at];
+                int rect[4] = {compositor.x[row], compositor.y[row], compositor.x[row] + (int)compositor.w[row], compositor.y[row] + (int)compositor.h[row]};
+
+                if (!c->ticket || !((c->kind == WINDOWS_CAST_SCENE && compositor.row_space[row] == c->target) ||
+                                    (c->kind == WINDOWS_CAST_WINDOW && c->target == (unsigned int)row)))
+                        continue;
+                compositor_cast_stale(c, rect);
+                compositor_damage(c->x, c->y, 1, 1);
+        }
+}
+
 // Where a share's source is now: 1 with its rectangle in the space, 0 when it is not there (a screen gone, a window closed or another's).
 static int compositor_cast_where(const struct windows_cast *row, int *x, int *y, int *w, int *h)
 {
@@ -92,6 +174,15 @@ static int compositor_cast_where(const struct windows_cast *row, int *x, int *y,
                 if ((int)row->target >= compositor_output_count())
                         return 0;
                 compositor_output_rect((int)row->target, x, y, w, h);
+                return *w > 0 && *h > 0;
+        }
+        if (row->kind == WINDOWS_CAST_SCENE)
+        {
+                const struct compositor_space *sp = compositor.spaces.ready ? compositor_space_find(row->target) : 0;
+
+                if (!sp || sp->kind != COMPOSITOR_SPACE_DESKTOP || sp->screen < 0 || sp->screen >= compositor_output_count())
+                        return 0;
+                compositor_output_rect(sp->screen, x, y, w, h);
                 return *w > 0 && *h > 0;
         }
         if (row->kind == WINDOWS_CAST_WINDOW)
@@ -167,6 +258,7 @@ static void compositor_cast_look(int always)
 
         if (!table)
                 return;
+        compositor_cast_scenes_publish(table);
         serial = __atomic_load_n(&table->cast_serial, __ATOMIC_ACQUIRE);
         if (serial == compositor_cast_seen && !always)
                 return;
@@ -298,6 +390,14 @@ static void compositor_cast_present(const struct compositor_frame *frames, unsig
                                 compositor_wl_straight_settle(r, 0, (long)compositor.h[r]), own[0].tiled_kind = 0;
                         drawn = own, drawn_count = 1 + compositor_wl_layers_frames(r, own, own_rows, 1);
                         compositor_corner_masks_ready(own, drawn_count);
+                }
+                else if (c->kind == WINDOWS_CAST_SCENE)
+                {
+                        struct compositor_frame *scene;
+
+                        drawn_count = compositor_cast_scene_frames(c->target, &scene);
+                        drawn = scene;
+                        compositor_corner_masks_ready(scene, drawn_count);
                 }
                 else
                         for (unsigned int f = 0; f < windows && f < count; f++)

@@ -342,6 +342,7 @@ enum
 #define WINDOWS_CASTS 16
 #define WINDOWS_CAST_SLOTS 4
 #define WINDOWS_CAST_DAMAGE 16
+#define WINDOWS_CAST_SCENES 16 // as many as the compositor has (COMPOSITOR_SPACES_MAX)
 enum
 {
         WINDOWS_CAST_FREE = 0u, WINDOWS_CAST_ASKED, WINDOWS_CAST_PICKED, WINDOWS_CAST_LIVE, WINDOWS_CAST_REFUSED, WINDOWS_CAST_STOPPED,
@@ -534,6 +535,10 @@ struct windows
            and the clipboard's door rings the compositor after one. */
         unsigned int cast_serial;
         struct windows_cast casts[WINDOWS_CASTS];
+        /* The Scenes a share may be of, as the compositor has them (written at its looks): each one's id, screen and its place among its
+           screen's (1 the first), and whether it is the one its screen shows. */
+        unsigned int cast_scenes, cast_scene_id[WINDOWS_CAST_SCENES], cast_scene_screen[WINDOWS_CAST_SCENES], cast_scene_place[WINDOWS_CAST_SCENES],
+            cast_scene_shown[WINDOWS_CAST_SCENES];
 };
 
 enum

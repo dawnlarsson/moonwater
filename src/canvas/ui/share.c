@@ -13,7 +13,7 @@
         (STOPPED: the compositor drops the ring, the bus closes the session and the program is told it ended).
 
             share [-a] [-f FONT.ttf] [-b BOLD.ttf]
-            share --pick screen N | --pick window ROW|WORD | --refuse | --stop     the same, without the window: the oldest ask
+            share --pick screen N | --pick scene N | --pick window ROW|WORD | --refuse | --stop     the same, without the window: the oldest ask
                                                                              answered, or every share stopped (for the keys and checks)
 
         Dawn Larsson - Apache-2.0 license
@@ -25,7 +25,8 @@
 #define SHARE_TEXT 160
 #define SHARE_ID_SCREEN 1                          // a screen is id SHARE_ID_SCREEN + its index
 #define SHARE_ID_WINDOW (SHARE_ID_SCREEN + WINDOWS_OUTPUTS) // a window is SHARE_ID_WINDOW + its place in the list
-#define SHARE_ID_REFUSE (SHARE_ID_WINDOW + UI_MENU_ITEMS)
+#define SHARE_ID_SCENE (SHARE_ID_WINDOW + UI_MENU_ITEMS)   // a Scene is SHARE_ID_SCENE + its place in the table's list
+#define SHARE_ID_REFUSE (SHARE_ID_SCENE + WINDOWS_CAST_SCENES)
 #define SHARE_ID_STOP (SHARE_ID_REFUSE + 1)        // a share is SHARE_ID_STOP + its row
 #define SHARE_ID_STOP_ALL (SHARE_ID_STOP + WINDOWS_CASTS)
 
@@ -134,6 +135,16 @@ static void share_build(void)
                                 language_format(share.text[n], SHARE_TEXT, WORDS(share_screen_of), (long)(k + 1), (long)table->output_name[k]);
                         ui_popmenu_add(&share.menu, share.text[n], null, UI_MENU_LITERAL, SHARE_ID_SCREEN + (int)k), n++;
                 }
+                // a Scene is a screen's worth of windows, so it is offered where a screen is: shown here whichever Scene the person is on
+                for (unsigned int k = 0; (row->types & WINDOWS_CAST_MONITOR) && k < table->cast_scenes && k < WINDOWS_CAST_SCENES && n < UI_MENU_ITEMS - 4; k++)
+                {
+                        if (outputs == 1)
+                                language_format(share.text[n], SHARE_TEXT, WORDS(share_scene), (long)table->cast_scene_place[k]);
+                        else
+                                language_format(share.text[n], SHARE_TEXT, WORDS(share_scene_of), (long)table->cast_scene_place[k],
+                                                (long)(table->cast_scene_screen[k] + 1));
+                        ui_popmenu_add(&share.menu, share.text[n], null, UI_MENU_LITERAL, SHARE_ID_SCENE + (int)k), n++;
+                }
                 if (row->types & WINDOWS_CAST_TOPLEVEL)
                         for (unsigned int r = 0; r < rows && n < UI_MENU_ITEMS - 3; r++)
                         {
@@ -159,6 +170,15 @@ static void share_build(void)
                         continue;
                 if (row->kind == WINDOWS_CAST_WINDOW && row->target < windows_rows(table))
                         string_copy_bounded((p8 *)what, (string_address)table->title[row->target], sizeof what);
+                else if (row->kind == WINDOWS_CAST_SCENE)
+                {
+                        unsigned int place = 0;
+
+                        for (unsigned int j = 0; j < table->cast_scenes && j < WINDOWS_CAST_SCENES; j++)
+                                if (table->cast_scene_id[j] == row->target)
+                                        place = table->cast_scene_place[j];
+                        language_format(what, sizeof what, WORDS(share_scene), (long)place);
+                }
                 else
                         language_format(what, sizeof what, WORDS(share_the_screen));
                 language_format(share.text[n], SHARE_TEXT, WORDS(share_stop), (long)what, (long)row->app);
@@ -196,6 +216,8 @@ static b32 share_event(const struct window_event address_to event)
                 // a press anywhere but on it, or Escape, is Don't share: nothing is shared without a pick
                 if (answer >= SHARE_ID_SCREEN && answer < SHARE_ID_WINDOW)
                         share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCREEN, (unsigned int)(answer - SHARE_ID_SCREEN), 0);
+                else if (answer >= SHARE_ID_SCENE && answer < SHARE_ID_SCENE + WINDOWS_CAST_SCENES)
+                        share_answer(table, share.asked, share.ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[answer - SHARE_ID_SCENE], 0);
                 else if (answer >= SHARE_ID_WINDOW && answer < SHARE_ID_WINDOW + share.count)
                         share_answer(table, share.asked, share.ticket, WINDOWS_CAST_WINDOW, (unsigned int)share.window[answer - SHARE_ID_WINDOW],
                                      share.window_pid[answer - SHARE_ID_WINDOW]);
@@ -282,6 +304,11 @@ static b32 share_command(positive at)
                         n = n * 10 + (unsigned int)(number[k] - '0');
                 if (string_equals(what, (string_address) "screen"))
                         return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCREEN, n, 0) ? 0 : 1;
+                // a Scene by its place among the first screen's (1 the first)
+                if (string_equals(what, (string_address) "scene"))
+                        for (unsigned int k = 0; k < table->cast_scenes && k < WINDOWS_CAST_SCENES; k++)
+                                if (table->cast_scene_screen[k] == 0 && table->cast_scene_place[k] == n)
+                                        return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[k], 0) ? 0 : 1;
                 // a window by its row, or the first offered whose app id or title holds the word
                 if (string_equals(what, (string_address) "window") && !(number[0] >= '0' && number[0] <= '9'))
                         for (unsigned int r = 0; r < windows_rows(table); r++)
@@ -294,7 +321,7 @@ static b32 share_command(positive at)
                 if (string_equals(what, (string_address) "window") && n < windows_rows(table) && share_offered(table, n, ~0u))
                         return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_WINDOW, n, table->pid[n]) ? 0 : 1;
         }
-        string_format(log, (string_address) "share: --pick screen N | --pick window ROW|WORD | --refuse | --stop\n");
+        string_format(log, (string_address) "share: --pick screen N | --pick scene N | --pick window ROW|WORD | --refuse | --stop\n");
         return log_flush(), 2;
 }
 
