@@ -2317,11 +2317,11 @@ static void gpu_i915_rows(void)
 }
 
 /*
-        The card's path by generation (gpu.c's gpu_slower, the compositor's compositor_gpu_slower): i915's Gen7 and Gen7.5 (Ivy Bridge, Valleyview, Haswell)
-        compose on the processor while canvas gpu is at its default (no word, or "default"), since there the card measured slower than the processor at every
-        size (a Haswell HD 4600, 0x0412, two screens: the card's present 21.6 to 44.9 ms and up to 180, the processor's 0.27 to 0.34 ms). Gen8, Gen9 and later,
-        and amdgpu, keep the card. canvas gpu said on puts the card back on any generation, and put back to its default lets it go again. The chips are the
-        fake i915 node's device ids; the card that is up is the compositor's state as a start leaves it (the start itself is gpu_i915_rows').
+        The card's path by generation (gpu.c's gpu_slower, the compositor's compositor_gpu_slower): no generation is the processor's by default. i915's
+        Gen7 to Gen11 were while their scene was slower than the processor or wrong with many records (715dc66e7, d4330c65e); they keep the card now, as
+        Gen12 and amdgpu do, at canvas gpu's default (no word, or "default"), said on, and put back to the default; off is off. The machinery of a
+        generation that is off by default stays (its reason, the table's and the board's words) for one that measures slower again. The chips are the fake
+        i915 node's device ids; the card that is up is the compositor's state as a start leaves it (the start itself is gpu_i915_rows').
 */
 static void gpu_generation_rows(void)
 {
@@ -2334,7 +2334,7 @@ static void gpu_generation_rows(void)
         const struct gpu_backend *kept_backend = gpu_backend;
         struct windows *kept_table = compositor.table;
         int kept_on = compositor_gpu, kept_asked = compositor_gpu_asked, kept_card = compositor.card;
-        unsigned int kept_maps = gpu_map_count, family = 0, device = 0, identified;
+        unsigned int kept_maps = gpu_map_count, family = 0, device = 0;
         positive kept_next = gpu_map_next;
         b32 off = true, on = true;
 
@@ -2347,14 +2347,14 @@ static void gpu_generation_rows(void)
         for (unsigned int i = 0; i < sizeof(slower) / sizeof(slower[0]); i++)
         {
                 gpu_kernel.i915_chip = slower[i][0];
-                off &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == slower[i][1] && gpu_slower(&gpu_i915_row, family);
+                off &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == slower[i][1] && !gpu_slower(&gpu_i915_row, family);
         }
         for (unsigned int i = 0; i < sizeof(faster) / sizeof(faster[0]); i++)
         {
                 gpu_kernel.i915_chip = faster[i][0];
                 on &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == faster[i][1] && !gpu_slower(&gpu_i915_row, family);
         }
-        check("gpu generation: the devices the Gen9 kernel set draws for (Haswell, Ivy Bridge, Valleyview, Broadwell, Coffee Lake, Gemini Lake, Ice Lake) are the processor's by default", off);
+        check("gpu generation: the devices the Gen9 kernel set draws for (Haswell, Ivy Bridge, Valleyview, Broadwell, Coffee Lake, Gemini Lake, Ice Lake) keep the card by default", off);
         check("gpu generation: a Gen12 device keeps the card, and so does amdgpu", on && !gpu_slower(&gpu_amd, 144) && !gpu_slower(&gpu_amd, 750));
 
         // The compositor with a card up as a start leaves it (no descriptor, no buffer, no maps of the rows': the let-go closes and unmaps nothing of theirs).
@@ -2363,25 +2363,11 @@ static void gpu_generation_rows(void)
         compositor_gpu_word("");
         check("gpu generation: no word is the default: the card on, not said on", compositor_gpu && !compositor_gpu_asked);
         gpu_backend = &gpu_i915_row, gpu.family = 750, gpu.device = 0x0412, gpu_req.family = 750, gpu_req.device = 0x0412, compositor_gpu_state.up = 1;
-        check("gpu generation: at the default a Haswell card that is up is let go of, its reason a slower generation",
-              compositor_gpu_up() == 0 && !compositor_gpu_state.up && compositor_gpu_state.dead && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION &&
-                  gpu.fd == -1);
-        identified = gpu_kernel.i915_identifies;
-        check("gpu generation: and it is not started again while canvas gpu stays at its default (no chip asked)",
-              compositor_gpu_up() == 0 && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION && gpu_kernel.i915_identifies == identified);
-        check("gpu generation: its reason's words are the default's, not a fault's",
-              string_find((string_address)windows_gpu_reasons[COMPOSITOR_GPU_WHY_GENERATION], (string_address) "off by default on this GPU generation") != 0);
-        memory_zero(&compositor_gpu_state, sizeof(compositor_gpu_state));
-        gpu_backend = &gpu_i915_row, gpu.family = 1200, gpu.device = 0x9a49, gpu_req.family = 1200, compositor_gpu_state.up = 1;
-        check("gpu generation: at the default a Gen12 card that is up stays up", compositor_gpu_up() == 1 && compositor_gpu_state.up && !compositor_gpu_state.dead);
-        compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_GENERATION;
+        check("gpu generation: at the default a Haswell card that is up stays up", compositor_gpu_up() == 1 && compositor_gpu_state.up && !compositor_gpu_state.dead);
         compositor_gpu_word("on");
-        check("gpu generation: canvas gpu said on is the setting's, and tries the card again at once", compositor_gpu && compositor_gpu_asked && !compositor_gpu_state.dead);
-        gpu.family = 750, gpu.device = 0x0412, gpu_req.family = 750, compositor_gpu_state.up = 1;
-        check("gpu generation: said on, a Haswell card that is up composes", compositor_gpu_up() == 1 && compositor_gpu_state.up && !compositor_gpu_state.dead);
+        check("gpu generation: canvas gpu said on is the setting's, and the Haswell card composes", compositor_gpu && compositor_gpu_asked && compositor_gpu_up() == 1);
         compositor_gpu_word("default");
-        check("gpu generation: put back to its default, the Haswell card it turned on is let go of again",
-              !compositor_gpu_asked && compositor_gpu_up() == 0 && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION);
+        check("gpu generation: put back to its default, the Haswell card stays up", !compositor_gpu_asked && compositor_gpu_up() == 1 && !compositor_gpu_state.dead);
         compositor_gpu_word("off");
         check("gpu generation: off is off", !compositor_gpu && !compositor_gpu_asked);
 
