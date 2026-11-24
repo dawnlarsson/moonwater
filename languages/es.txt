@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
+# machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 @language es
 @name Español
 @translated machine
@@ -121,6 +122,7 @@ files_not_folder	2663	Esto no es una carpeta
 files_nothing_to_paste	c9d4	El portapapeles no tiene archivos
 files_nothing_to_redo	b2a4	Nada que rehacer
 files_nothing_to_undo	1433	Nada que deshacer
+files_pick	8f59	Abra una imagen PNG para que sea el fondo de esta escena
 files_place_downloads	07de	Descargas
 files_place_home	0eae	Inicio
 files_place_pictures	feae	Imágenes

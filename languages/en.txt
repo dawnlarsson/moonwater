@@ -92,6 +92,7 @@ files_not_folder	2663	This is not a folder
 files_nothing_to_paste	c9d4	The clipboard holds no files
 files_nothing_to_redo	b2a4	Nothing to do again
 files_nothing_to_undo	1433	Nothing to undo
+files_pick	8f59	Open a PNG picture to make it the wallpaper of this Scene
 files_place_downloads	07de	Downloads
 files_place_home	0eae	Home
 files_place_pictures	feae	Pictures

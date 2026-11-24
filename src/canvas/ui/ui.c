@@ -6565,6 +6565,7 @@ LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
 LANGUAGE_ID(files_nothing_to_redo, "Nothing to do again") \
 LANGUAGE_ID(files_nothing_to_undo, "Nothing to undo") \
+LANGUAGE_ID(files_pick, "Open a PNG picture to make it the wallpaper of this Scene") \
 LANGUAGE_ID(files_place_downloads, "Downloads") \
 LANGUAGE_ID(files_place_home, "Home") \
 LANGUAGE_ID(files_place_pictures, "Pictures") \

@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
+# machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 @language fr
 @name Français
 @translated machine
@@ -121,6 +122,7 @@ files_not_folder	2663	Ce n'est pas un dossier
 files_nothing_to_paste	c9d4	Le presse-papiers ne contient aucun fichier
 files_nothing_to_redo	b2a4	Rien à rétablir
 files_nothing_to_undo	1433	Rien à annuler
+files_pick	8f59	Ouvrez une image PNG pour en faire le fond d'écran de cette scène
 files_place_downloads	07de	Téléchargements
 files_place_home	0eae	Dossier personnel
 files_place_pictures	feae	Images

@@ -169,6 +169,10 @@ static struct files_peer address_to files_peer_by_name(const p8 address_to name)
 
 static inline b32 files_in_rect(int x, int y, int rx, int ry, int rw, int rh) { return x >= rx && x < rx + rw && y >= ry && y < ry + rh; }
 static inline fn files_clear_msg(void) { files.said = 0, files.big->note[0] = 0; }
+
+// Pick mode (files -pick image, which the wallpaper's editor starts): a PNG opened is the wallpaper of the Scene you are on, and Files ends.
+static b32 files_picking, files_picked;
+static fn files_pick(struct files_model address_to m, const struct files_entry address_to e);
 static inline fn files_reload(void)
 {
         if (files_model_is_remote(&files.big->model))
@@ -505,6 +509,8 @@ static fn files_status_text(void)
                 string_copy_bounded((string_address)into, (string_address)files.big->note, room);
         else if (files.said)
                 string_copy_bounded((string_address)into, (string_address)language_text(files.said), room);
+        else if (files_picking)
+                string_copy_bounded((string_address)into, (string_address)WORDS(files_pick), room);
         else if (m->state == FILES_READY && m->chosen_count > 1)
         {
                 p64 bytes = 0;
@@ -1554,6 +1560,8 @@ static fn files_open(p32 place)
                 return;
         // A file of sound or video the browser plays is opened there (an MP3, a WAV, an MP4); any other file, or one with no browser to open
         // it, in the editor as before.
+        if (e->kind == FILES_KIND_FILE && files_picking)
+                return (void)(m->cursor = place, files_pick(m, e));
         if (e->kind == FILES_KIND_FILE)
         {
                 static p8 path[FILES_PATH];
@@ -1797,6 +1805,32 @@ static fn files_wallpaper(void)
                                    (string_address)path, null};
         if (!files_model_is_remote(m) && e && e->kind != FILES_KIND_DIRECTORY && files_is_png(m, e) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
                 (void)ui_start_apart(words, 5);
+}
+
+// The editor of the wallpaper opened again, over the desktop (pick mode's end, a picture taken or none).
+static fn files_pick_back(void)
+{
+        string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "edit",
+                                   (string_address) "on", null};
+        (void)ui_start_apart(words, 5);
+}
+
+// A file opened in pick mode: a PNG of this machine is remembered and the Scene's (Set as Wallpaper's verb), the editor shown again with it,
+// and Files ends; anything else is not a picture, and it says so.
+static fn files_pick(struct files_model address_to m, const struct files_entry address_to e)
+{
+        static p8 path[FILES_PATH];
+        string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
+                                   (string_address)path, null};
+        if (files_model_is_remote(m) || !files_is_png(m, e) || !files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
+                return (void)(files.said = LANGUAGE_files_pick, files.dirty = true);
+        (void)ui_start_apart(words, 5);
+        files_pick_back(), files_picked = true;
+}
+
+static b32 files_pick_done(void)
+{
+        return files_picked;
 }
 
 #define FILES_SEP {null, null, UI_MENU_SEPARATOR, 0, false}
@@ -2498,6 +2532,8 @@ static fn files_remote_tick(long address_to timeout, long address_to other)
 
 static fn files_close_window(void)
 {
+        if (files_picking && !files_picked)
+                files_pick_back(), files_picked = true;
         if (!files.big)
                 return;
         files_remote_read_abort();
@@ -3566,7 +3602,7 @@ static struct ui_app files_app = {
     .nofont = (string_address) "files: no font to draw with (-f FONT.ttf), pid ",
     .dirty = &files.dirty, .focused = &files.focused, .ground = &files.ground,
     .open = files_open_window, .close = files_close_window, .event = files_event, .tick = files_tick, .job = &files.runner,
-    .popup = &files.menu, .chose = files_chose,
+    .popup = &files.menu, .chose = files_chose, .done = files_pick_done,
     .width = &files.width, .height = &files.height, .shown = &files.shown, .draw = files_draw,
 };
 
@@ -3575,9 +3611,17 @@ static b32 files_main()
         memory_zero(&files, sizeof(files));
         files.runner.output = files.device.output = files.uevents = -1;
         files.start = getenv((string_address) "HOME");
+        files_picking = files_picked = false;
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
-                if (!(took = ui_app_option(&files_app, at)) && program_argument(at)[0] == '/')
+        {
+                if ((took = ui_app_option(&files_app, at)))
+                        continue;
+                if (string_equals(program_argument(at), (string_address) "-pick") && at + 1 < (positive)program_argument_count() &&
+                    string_equals(program_argument(at + 1), (string_address) "image"))
+                        files_picking = true, took = 2;
+                else if (program_argument(at)[0] == '/')
                         files.start = program_argument(at);
+        }
         return ui_app_run(&files_app);
 }
 

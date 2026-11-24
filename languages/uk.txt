@@ -27,6 +27,7 @@
 # machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
+# machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
 @language uk
 @name Українська
 @translated machine
@@ -121,6 +122,7 @@ files_not_folder	2663	Це не тека
 files_nothing_to_paste	c9d4	У буфері обміну немає файлів
 files_nothing_to_redo	b2a4	Нічого повторювати
 files_nothing_to_undo	1433	Нічого скасовувати
+files_pick	8f59	Відкрийте зображення PNG, щоб зробити його шпалерами цієї сцени
 files_place_downloads	07de	Завантаження
 files_place_home	0eae	Домівка
 files_place_pictures	feae	Зображення
