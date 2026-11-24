@@ -287,6 +287,90 @@ static fn icheck_window(void)
                   icheck_has(installer.big->plan, "/bowl profile ssh\n/moonwater ssh on\n") && !icheck_has(installer.big->plan, "steam"));
 }
 
+// Regression checks for single-drive auto-select mode, Wi-Fi scan during passphrase entry, and variadic language_format width.
+static fn icheck_regressions(void)
+{
+        static const char one_mw[] = "sda\t500107862016\t0\t1\t0\tSamsung SSD 860\nsdb\t30943995904\t1\t0\t1\tCruzer Blade\n";
+        static const char wifi_ab[] = "[Moonwater] wifi on\n"
+                                      "[Moonwater]   Alpha               -55 dBm ###.  wpa2    5 GHz ch 36\n"
+                                      "[Moonwater]   Beta                -65 dBm ##..  wpa2    2.4 GHz ch 6\n";
+        static const char wifi_gab[] = "[Moonwater] wifi on\n"
+                                       "[Moonwater]   Gamma               -40 dBm ####  wpa3    5 GHz ch 36\n"
+                                       "[Moonwater]   Alpha               -55 dBm ###.  wpa2    5 GHz ch 36\n"
+                                       "[Moonwater]   Beta                -65 dBm ##..  wpa2    2.4 GHz ch 6\n";
+        static const char wifi_g[] = "[Moonwater] wifi on\n"
+                                     "[Moonwater]   Gamma               -40 dBm ####  wpa3    5 GHz ch 36\n";
+        struct installer_big address_to big;
+
+        // APP-SET-03: single target drive with existing Moonwater install must default to Update, not Overwrite.
+        icheck_window_start();
+        big = installer.big;
+        installer.choice.mode = INSTALLER_OVERWRITE;
+        memory_copy(big->said, one_mw, sizeof(one_mw) - 1);
+        big->said_length = sizeof(one_mw) - 1;
+        installer_listed();
+        check("installer disk: single target drive with Moonwater auto-selects Update mode, not Overwrite",
+              installer.chosen == 0 && installer.choice.mode == INSTALLER_UPDATE);
+
+        // APP-SET-01: background Wi-Fi scan must pause during passphrase entry, re-match by SSID, close pass if gone, and cancel scan on join.
+        installer_go(INSTALLER_STEP_NETWORK);
+        memory_copy(big->said, wifi_ab, sizeof(wifi_ab) - 1);
+        big->said_length = sizeof(wifi_ab) - 1;
+        installer_heard();
+        installer_pick_network(1); // Beta
+        installer.next_wifi = 0;
+        ui_kit.now = INSTALLER_WIFI_NS * 10;
+        installer.child = 0;
+        installer_tick(-1, null);
+        check("installer wifi: periodic background scan is paused while entering a passphrase", installer.next_wifi == 0);
+
+        memory_copy(big->said, wifi_gab, sizeof(wifi_gab) - 1);
+        big->said_length = sizeof(wifi_gab) - 1;
+        installer_heard();
+        check("installer wifi: background scan re-matches chosen network by SSID instead of shifting to wrong index",
+              big->net_chosen == 2 && string_equals((string_address)big->nets[big->net_chosen].name, (string_address) "Beta"));
+
+        memory_copy(big->said, wifi_g, sizeof(wifi_g) - 1);
+        big->said_length = sizeof(wifi_g) - 1;
+        installer_heard();
+        check("installer wifi: clearing net_chosen when network disappears also closes the passphrase field",
+              big->net_chosen == -1 && !big->pass.doc.selections);
+
+        memory_copy(big->said, wifi_ab, sizeof(wifi_ab) - 1);
+        big->said_length = sizeof(wifi_ab) - 1;
+        installer_heard();
+        installer_pick_network(1); // Beta
+        ui_text_set(&big->pass, (const p8 address_to) "secret123", 9);
+        {
+                string_address sleeper[3] = {(string_address) "/bin/sleep", (string_address) "10", null};
+                b32 started_scan = installer_start(sleeper, 2, INSTALLER_JOB_WIFI, null);
+                installer.moonwater = (string_address) "/bin/true";
+                installer_join();
+                check("installer wifi: joining cancels any in-flight background wifi scan and starts the join job",
+                      started_scan && installer.job == INSTALLER_JOB_JOIN && big->net_chosen == -1 && !big->pass.doc.selections);
+                if (installer.child > 0)
+                {
+                        positive st = 0;
+                        system_call_2(syscall(kill), (positive)installer.child, 9);
+                        system_wait4_retry(installer.child, address_of st, 0, null);
+                        ui_job_reset(&installer.runner, false);
+                }
+                installer.job = INSTALLER_JOB_NONE;
+                installer.moonwater = (string_address) "/nonexistent/moonwater";
+        }
+
+        // APP-SET-06: language_format variadic arguments must be 64-bit long (negative int without cast reads 4294967295 on aarch64).
+        installer.step = INSTALLER_STEP_RUN;
+        installer.at = -2;
+        installer.commands = 4;
+        installer.width = ICHECK_W, installer.height = ICHECK_H;
+        installer.ui.scale = 100;
+        installer_layout();
+        check("installer layout: language_format receives 64-bit long arguments without int/long variadic mismatch",
+              string_find((string_address)big->line[0], (string_address) "-1") != null &&
+                  string_find((string_address)big->line[0], (string_address) "4294967295") == null);
+}
+
 // The write path on a file: the install's layout, read back as an install's; an image's sum read back equal, and not after a byte changed.
 static fn icheck_write_path(void)
 {
@@ -688,6 +772,7 @@ b32 main()
         icheck_listing();
         icheck_plan();
         icheck_window();
+        icheck_regressions();
         icheck_write_path();
         if (program_argument_count() > 3)
         {

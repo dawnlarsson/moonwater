@@ -78,6 +78,7 @@ struct installer_big
         int drive_count;
         struct installer_network nets[INSTALLER_NETWORKS];
         int net_count, net_chosen;
+        char net_name[64];
         b32 wifi_on, wifi_read;
         char said[INSTALLER_SAID];
         positive said_length;
@@ -192,7 +193,8 @@ static fn installer_listed(void)
         installer.chosen = big->drive_count == 1 ? 0 : -1;
         if (installer.chosen == 0)
                 string_copy_bounded((string_address)installer.choice.drive, (string_address)big->drives[0].name, sizeof(installer.choice.drive)),
-                    installer.choice.bytes = big->drives[0].bytes;
+                    installer.choice.bytes = big->drives[0].bytes,
+                    installer.choice.mode = big->drives[0].moonwater ? INSTALLER_UPDATE : INSTALLER_OVERWRITE;
 }
 
 static int installer_wifi_parse(const char address_to text, positive length, struct installer_network address_to nets, int most, b32 address_to on)
@@ -221,8 +223,20 @@ static fn installer_heard(void)
 
         big->net_count = installer_wifi_parse(big->said, big->said_length, big->nets, INSTALLER_NETWORKS, &big->wifi_on);
         big->wifi_read = true;
-        if (big->net_chosen >= big->net_count)
-                big->net_chosen = -1;
+        if (big->net_chosen >= 0)
+        {
+                int found = -1;
+
+                for (int k = 0; k < big->net_count; k++)
+                        if (string_equals((string_address)big->nets[k].name, (string_address)big->net_name))
+                        {
+                                found = k;
+                                break;
+                        }
+                big->net_chosen = found;
+                if (found < 0)
+                        big->net_name[0] = 0, ui_field_close(&big->pass);
+        }
 }
 
 static fn installer_job_data(struct ui_job address_to j)
@@ -243,7 +257,7 @@ static fn installer_job_done(struct ui_job address_to j, b32 killed, positive st
         installer_last_line();
         if (job == INSTALLER_JOB_LIST)
                 installer_listed();
-        else if (job == INSTALLER_JOB_WIFI)
+        else if (job == INSTALLER_JOB_WIFI && !killed)
                 installer_heard();
         else if (job == INSTALLER_JOB_JOIN)
         {
@@ -277,6 +291,16 @@ static fn installer_wifi(void)
 
         if (installer.child <= 0)
                 installer_start(words, 2, INSTALLER_JOB_WIFI, null);
+}
+
+static fn installer_cancel_wifi(void)
+{
+        if (installer.child > 0 && installer.job == INSTALLER_JOB_WIFI)
+        {
+                installer.job = INSTALLER_JOB_NONE;
+                system_call_2(syscall(kill), (positive)installer.child, 9);
+                ui_job_reset(&installer.runner, true);
+        }
 }
 
 static fn installer_spawn_or_note(string_address address_to words, positive count)
@@ -335,7 +359,7 @@ static fn installer_go(int step)
         if (step < INSTALLER_STEP_LANGUAGE || step > INSTALLER_STEP_DONE)
                 return;
         installer.step = step;
-        installer.big->note[0] = 0, installer.big->net_chosen = -1;
+        installer.big->note[0] = 0, installer.big->net_chosen = -1, installer.big->net_name[0] = 0;
         if (step != INSTALLER_STEP_NETWORK)
                 ui_field_close(&installer.big->pass);
         l->hover = l->down = -1, l->scroll.scroll = 0, l->focus = 0;
@@ -398,14 +422,17 @@ static fn installer_pick_network(int at)
                 return;
         if (!n->open && !n->saved)
         {
+                ui_field_close(&big->pass);
                 big->net_chosen = at;
-                ui_field_open(&big->pass, &installer.own, "");
+                string_copy_bounded((string_address)big->net_name, (string_address)n->name, sizeof(big->net_name));
+                ui_field_begin(&big->pass, &installer.own, "", at);
                 big->pass.most = 63, big->pass.masked = true;
                 ui_field_focus(&big->pass, true);
                 return;
         }
         {
                 string_address words[5] = {installer.moonwater, (string_address) "wifi", (string_address) "add", (string_address)n->name, null};
+                installer_cancel_wifi();
                 installer_start(words, 4, INSTALLER_JOB_JOIN, null);
         }
 }
@@ -416,15 +443,17 @@ static fn installer_join(void)
         char secret[96];
         positive length;
 
-        if (big->net_chosen < 0 || big->net_chosen >= big->net_count || !big->pass.doc.selections)
+        if (big->net_chosen < 0 || !big->net_name[0] || !big->pass.doc.selections)
                 return;
         length = doc_read(&big->pass.doc, 0, (p8 address_to)secret, sizeof(secret) - 1);
         secret[length] = 0;
+        if (length)
         {
                 string_address words[6] = {installer.moonwater, (string_address) "wifi", (string_address) "add",
-                                           (string_address)big->nets[big->net_chosen].name, (string_address) "-", null};
-                if (length && installer_start(words, 5, INSTALLER_JOB_JOIN, secret))
-                        big->net_chosen = -1, ui_field_close(&big->pass);
+                                           (string_address)big->net_name, (string_address) "-", null};
+                installer_cancel_wifi();
+                if (installer_start(words, 5, INSTALLER_JOB_JOIN, secret))
+                        big->net_chosen = -1, big->net_name[0] = 0, ui_field_close(&big->pass);
         }
         memory_fill(secret, 0, sizeof(secret));
         __asm__ __volatile__("" : : "r"(secret) : "memory");
@@ -608,7 +637,7 @@ static fn installer_layout(void)
                                                 ui_rows(l, .class = "list", .grow = 1);
                                         if (installer.step == INSTALLER_STEP_NETWORK && big->net_chosen >= 0)
                                         {
-                                                language_format(big->line[2], sizeof(big->line[2]), WORDS(installer_wifi_password), big->nets[big->net_chosen].name);
+                                                language_format(big->line[2], sizeof(big->line[2]), WORDS(installer_wifi_password), big->net_name);
                                                 ui_row(.class = "gap3.level")
                                                 {
                                                         ui_view_field(&big->pass_c, &big->pass, big->line[2], 48, true, &big->pass_box);
@@ -672,7 +701,7 @@ static fn installer_layout(void)
                                                                                                               : UI_ONE / installer.commands * installer.at;
                                                 if (installer.step == INSTALLER_STEP_RUN)
                                                 {
-                                                        language_format(big->line[0], sizeof(big->line[0]), WORDS(installer_running_step), installer.at + 1, installer.commands);
+                                                        language_format(big->line[0], sizeof(big->line[0]), WORDS(installer_running_step), (long)(installer.at + 1), (long)installer.commands);
                                                         ui_text(big->line[0], .class = "quiet");
                                                         ui_control(&big->meter, .class = "meter");
                                                         if (installer.failed)
@@ -1117,10 +1146,10 @@ static long installer_tick(long timeout, long address_to other)
                 installer.dirty |= was != installer.choice.online;
                 installer.next_look = now + INSTALLER_LOOK_NS;
         }
-        if (installer.step == INSTALLER_STEP_NETWORK && now >= installer.next_wifi && installer.child <= 0)
+        if (installer.step == INSTALLER_STEP_NETWORK && installer.big->net_chosen < 0 && now >= installer.next_wifi && installer.child <= 0)
                 installer_wifi(), installer.next_wifi = now + INSTALLER_WIFI_NS;
         timeout = ui_deadline_wait(timeout, now, installer.next_look);
-        if (installer.step == INSTALLER_STEP_NETWORK)
+        if (installer.step == INSTALLER_STEP_NETWORK && installer.big->net_chosen < 0)
                 timeout = ui_deadline_wait(timeout, now, installer.next_wifi);
         return timeout == 0 ? 1 : timeout;
 }

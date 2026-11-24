@@ -149,7 +149,7 @@ static const struct settings_ink address_to settings_ink_find(const struct setti
 _Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) <= 64 * SETTINGS_UNREAD_WORDS, "the rows to ask fit their words");
 
 static const char address_to const settings_asks[][3] = {
-    {"wipe"}, {"setup", "install"}, {"setup", "update"}, {"setup", "use"}, {"setup", "rollback"}, {"sleep"},
+    {"wipe"}, {"install"}, {"setup", "install"}, {"setup", "update"}, {"setup", "use"}, {"setup", "rollback"}, {"sleep"},
     {"hibernate"}, {"bios", "reboot"}, {"desktop", "start"}, {"desktop", "rest"}, {"desktop", "off"}, {"link", "remove"},
     {"link", "group", "leave"}, {"wifi", "remove"}, {"bluetooth", "remove"}, {"cpu", "offline"}, {"init", "remove"}, {"exit", "remove"},
 };
@@ -1642,7 +1642,7 @@ static fn settings_try_click_paint(struct ui address_to ui, int id, int x, int y
         char said[32];
         struct ui_box pill = {x * 256, top * 256, (x + w) * 256, (top + high) * 256, high * 128, high * 128};
         (void)id;
-        language_format(said, sizeof(said), WORDS(settings_try_ms), settings_click_try.apart);
+        language_format(said, sizeof(said), WORDS(settings_try_ms), (long)settings_click_try.apart);
         wide = ui_kit_measure(ui, (string_address)said, UI_LABEL_LARGE);
         ui_kit_fill(ui, &pill, ui_role(UI_PRIMARY), null);
         ui_kit_text(ui, x + (w - wide) / 2, ui_kit_baseline(ui, top + (high - ui_px(ui, ui_types[UI_LABEL_LARGE].line)) / 2, UI_LABEL_LARGE), (string_address)said, UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_PRIMARY), 0);
@@ -1667,7 +1667,7 @@ static fn settings_try_describe(int id, struct ui_row address_to row)
         }
         else if (which == SETTINGS_TRY_CLICK)
         {
-                language_format(apart, sizeof(apart), WORDS(settings_try_ms), settings_click_try.apart);
+                language_format(apart, sizeof(apart), WORDS(settings_try_ms), (long)settings_click_try.apart);
                 if (settings_click_try.apart > 0 && settings_click_try.apart < settings_number_of(SETTING_DOUBLE_CLICK_PATH, 450) && settings.ui.regular)
                         row->picture_w = (ui_kit_measure(&settings.ui, (string_address)apart, UI_LABEL_LARGE) * 100 + scale - 1) / scale + 2 * UI_GAP4, row->paint = settings_try_click_paint;
                 else
@@ -2278,10 +2278,15 @@ static b32 settings_refused(int row, const char address_to value)
         {
                 string_address words[SETTINGS_WORDS];
                 positive count = settings_generic_words(row, value, words, SETTINGS_WORDS);
+                if (count >= 2 &&
+                    (string_equals(words[1], (string_address) "install") || string_equals(words[1], (string_address) "setup") ||
+                     string_equals(words[1], (string_address) "wipe")))
+                        delib = true;
                 if (count >= 3 &&
                     ((string_equals(words[1], (string_address) "device") && string_equals(words[2], (string_address) "allow")) ||
                      (string_equals(words[1], (string_address) "link") &&
-                      (string_equals(words[2], (string_address) "allow") || string_equals(words[2], (string_address) "allow-all")))))
+                      (string_equals(words[2], (string_address) "allow") || string_equals(words[2], (string_address) "allow-all") ||
+                       string_equals(words[2], (string_address) "on")))))
                         delib = true;
                 for (positive at = 0; at < SETTINGS_ROWS && !delib; at++)
                 {
@@ -5003,6 +5008,8 @@ static fn settings_row_menu_act(int id, int item_id)
                         char code = it && (it->flags & SETTINGS_ITEM_SAVED) ? settings_forget_code(it->kind) : 0;
                         if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it))
                                 settings_startup_apply(SETTINGS_STARTUP_REMOVE, (int)(it - settings.item[SETTINGS_STARTUP_LIST]), 0);
+                        else if (code && it->kind == SETTINGS_DEVICE && it->port[0])
+                                settings_act('g', it->port, null);
                         else if (code) settings_act(code, it->label, null);
                 }
                 else if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
@@ -5867,6 +5874,72 @@ static fn settings_chose(int id)
                 ui_text_menu_do(&settings.ui, t, id), ui_page_redraw(&settings.page);
 }
 
+static fn settings_chose_hand(int id, b32 hand)
+{
+        settings.hand = hand;
+        settings_chose(id);
+        settings.hand = false;
+}
+
+static int settings_popup_pump(struct ui_popup address_to p, b32 address_to hand_out)
+{
+        struct window_event event;
+        int answer = UI_MENU_NOTHING;
+        b32 hand = false;
+
+        ui_tree_ready(&p->menu.tree);
+        if (!p->open)
+                return UI_MENU_NOTHING;
+        ui_kit.now = (b64)ui_kit_clock();
+        if (p->pending && windows_ready(&p->own))
+                ui_popmenu_present(p);
+        if (p->own.table && (p->own.table->ground[p->own.row] & 0xffffffu) && (p->own.table->ground[p->own.row] & 0xffffffu) != p->ui.ground)
+        {
+                ui_inks(&p->ui, p->own.table->ground[p->own.row]);
+                ui_popmenu_present(p);
+        }
+        {
+                int owner_x = ui_kit.pointer_x, owner_y = ui_kit.pointer_y;
+                unsigned int owner_shape = ui_kit_shape;
+                while (p->own.table && windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
+                {
+                        int hot = p->menu.hot, scroll = p->menu.tree.node[0].offset;
+                        b32 lit = p->menu.scroll.hover, held = p->menu.scroll.held;
+                        ui_event_context(&event);
+                        if (event.type == WINDOW_EVENT_MOTION)
+                                p->x = event.a, p->y = event.b;
+                        answer = ui_popmenu_event(&p->ui, &p->menu, &event, p->x, p->y);
+                        if (answer == UI_MENU_OPEN)
+                                answer = UI_MENU_NOTHING;
+                        if (answer != UI_MENU_NOTHING)
+                                hand = ui_event_hand(&event);
+                        if (p->menu.hot != hot || p->menu.tree.node[0].offset != scroll || p->menu.scroll.hover != lit || p->menu.scroll.held != held)
+                                ui_popmenu_present(p);
+                }
+                ui_kit.pointer_x = owner_x, ui_kit.pointer_y = owner_y, ui_kit_shape = owner_shape;
+        }
+        if (p->menu.moving && answer == UI_MENU_NOTHING)
+                ui_popmenu_present(p);
+        if (p->own.table && (p->own.table->state[p->own.row] & WINDOW_CLOSING))
+                answer = UI_MENU_GONE, hand = false;
+        if (answer != UI_MENU_NOTHING)
+                ui_popmenu_close(p);
+        if (hand_out)
+                *hand_out = hand;
+        return answer;
+}
+
+static fn settings_pass(void)
+{
+        if (settings.popup.open)
+        {
+                b32 hand = false;
+                int choice = settings_popup_pump(&settings.popup, &hand);
+                if (choice != UI_MENU_NOTHING)
+                        settings_chose_hand(choice, hand);
+        }
+}
+
 static long settings_tick(long timeout, long address_to other)
 {
         if (settings_pair_on && settings.page.card && settings.runner.child > 0)
@@ -5957,7 +6030,7 @@ static struct ui_app settings_app = {
     .glass = 0, .side = true, .font = null,
     .nofont = (string_address) "settings: no font to draw with (-f FONT.ttf), pid ",
     .dirty = &settings.page.dirty, .focused = &settings.focused, .ground = &settings.ground,
-    .open = settings_open, .page = settings_asked, .frame = settings_frame,
+    .open = settings_open, .pass = settings_pass, .page = settings_asked, .frame = settings_frame,
     .language = settings_language, .event = settings_event, .focus = settings_focus,
     .buffers = &settings.page.buffers, .size = settings_size, .tick = settings_tick,
     .job = &settings.runner, .close = settings_close, .popup = &settings.popup, .chose = settings_chose, .ready = settings_picker_read,

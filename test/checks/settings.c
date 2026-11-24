@@ -1998,6 +1998,104 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: ssh on and ssh root on typed in All commands are refused without a hand, and ssh port is not",
                       typed && typed_root && typed_port);
                 check("settings: a key is added by a hand and not without one", add >= 0 && added && added_plugged);
+                // APP-SET-02: link on, install, setup, and wipe via All commands must be refused without a hand, and install must ask twice.
+                {
+                        b32 ref_link_on, ref_install, ref_setup, ref_wipe, asks_install;
+                        string_address install_words[2] = {(string_address) "install", (string_address) "sda"};
+
+                        settings.hand = false, settings.queued = 0;
+                        settings_say((string_address) "");
+                        ref_link_on = settings_refused(SETTINGS_ANY, "link on peer-a") && string_equals((string_address)settings.status, refusal);
+                        settings_say((string_address) "");
+                        ref_install = settings_refused(SETTINGS_ANY, "install sda overwrite yes 1000") && string_equals((string_address)settings.status, refusal);
+                        settings_say((string_address) "");
+                        ref_setup = settings_refused(SETTINGS_ANY, "setup install sda yes") && string_equals((string_address)settings.status, refusal);
+                        settings_say((string_address) "");
+                        ref_wipe = settings_refused(SETTINGS_ANY, "wipe yes") && string_equals((string_address)settings.status, refusal);
+                        asks_install = settings_asks_for(install_words, 2);
+                        check("settings: link on, install, setup, and wipe via All commands are refused without a hand, and install asks twice",
+                              ref_link_on && ref_install && ref_setup && ref_wipe && asks_install);
+                }
+                // APP-SET-04: context-menu Remove on paired Bluetooth device uses bluetooth forget <address> ('g'), not remove <name> ('d').
+                {
+                        static struct settings_item bt_item[1];
+                        struct settings_item address_to saved_items = settings.item[1];
+                        int saved_count = settings.item_count[1];
+                        bipolar saved_child = settings.runner.child;
+
+                        memory_zero(bt_item, sizeof(bt_item));
+                        bt_item[0].kind = SETTINGS_DEVICE;
+                        bt_item[0].flags = SETTINGS_ITEM_SAVED;
+                        string_copy_bounded((string_address)bt_item[0].label, (string_address) "Headphones", sizeof(bt_item[0].label));
+                        string_copy_bounded((string_address)bt_item[0].port, (string_address) "AA:BB:CC:DD:EE:FF", sizeof(bt_item[0].port));
+                        settings.item[1] = bt_item, settings.item_count[1] = 1;
+                        settings.runner.child = 1, settings.queued = 0;
+                        settings_row_menu_act(SETTINGS_LIST_ID(1, 0), SETTINGS_MENU_REMOVE);
+                        check("settings: context-menu Remove on paired Bluetooth device runs bluetooth forget <address>",
+                              settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "g\nAA:BB:CC:DD:EE:FF"));
+                        settings.queued = 0;
+                        settings.item[1] = saved_items, settings.item_count[1] = saved_count, settings.runner.child = saved_child;
+                }
+                // APP-SET-05: physical click on Devices context-menu Allow must succeed; virtual click must still be refused.
+                {
+                        static struct settings_item port_item[1];
+                        static struct windows *pop_table_scratch;
+                        struct windows *const pop_table = windows_scratch_table(&pop_table_scratch);
+                        struct settings_item address_to saved_items = settings.item[2];
+                        int saved_count = settings.item_count[2];
+                        bipolar saved_child = settings.runner.child;
+                        b32 phys_ok = false, virt_refused = false;
+
+                        memory_zero(port_item, sizeof(port_item));
+                        port_item[0].kind = SETTINGS_PORT;
+                        port_item[0].flags = 0;
+                        string_copy_bounded((string_address)port_item[0].label, (string_address) "USB-1", sizeof(port_item[0].label));
+                        string_copy_bounded((string_address)port_item[0].port, (string_address) "1-1", sizeof(port_item[0].port));
+                        settings.item[2] = port_item, settings.item_count[2] = 1;
+                        settings.runner.child = 1;
+
+                        for (int pass = 0; pass < 2; pass++)
+                        {
+                                unsigned int vflag = pass ? WINDOW_EVENT_VIRTUAL : 0;
+
+                                memory_zero(&settings.popup, sizeof(settings.popup));
+                                pop_table->ground[0] = 0, pop_table->state[0] = 0;
+                                settings.popup.open = true;
+                                settings.popup.own.table = pop_table;
+                                settings.popup.own.row = 0;
+                                settings.popup.own.door = -1;
+                                settings.popup.own.wake = -1;
+                                settings.popup.own.bytes = 0;
+                                settings.popup.ui.scale = 100;
+                                settings.popup.list = &settings.list;
+                                settings.popup.list_row = SETTINGS_LIST_ID(2, 0);
+                                settings.list.menu = &settings_list_menu;
+                                ui_popmenu_add(&settings.popup.menu, "Allow", null, 0, SETTINGS_MENU_ACT);
+                                settings.popup.menu.width = 160, settings.popup.menu.height = 44;
+                                settings.popup.menu.hot = 0;
+                                pop_table->event_type[0][0] = WINDOW_EVENT_KEY;
+                                pop_table->event_flags[0][0] = WINDOW_KEY_DOWN | vflag;
+                                pop_table->event_a[0][0] = 28; // UI_KEY_ENTER
+                                pop_table->event_head[0] = 1;
+                                pop_table->event_tail[0] = 0;
+
+                                settings.queued = 0;
+                                settings.hand = false;
+                                settings_say((string_address) "");
+                                if (settings_app.pass)
+                                        settings_app.pass();
+                                else
+                                        ui_app_popup_done(&settings_app, ui_popmenu_pump(&settings.popup));
+                                if (!pass)
+                                        phys_ok = settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT && settings.queue[0].value[0] == 'v';
+                                else
+                                        virt_refused = settings.queued == 0 && string_equals((string_address)settings.status, refusal);
+                        }
+                        check("settings: physical input on Devices context-menu Allow succeeds and virtual input is refused", phys_ok && virt_refused);
+                        settings.queued = 0;
+                        settings.item[2] = saved_items, settings.item_count[2] = saved_count, settings.runner.child = saved_child;
+                }
                 settings_say((string_address) "");
         }
         // A slider row (the taskbar scale): the kit's slider over the row's range at the number the verb said, moved a step by the keys inside
@@ -2528,7 +2626,9 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_press(UI_KEY_BACKSPACE);
                 settings_press(UI_KEY_ENTER);
                 check("settings: a key between the two Enters asks again", settings.queued == 0 && settings_editing() == wipe);
+                settings.hand = true;
                 settings_press(UI_KEY_ENTER);
+                settings.hand = false;
                 check("settings: and the second Enter runs it, words and all",
                       settings.queued == 1 && settings.queue[0].row == wipe && string_equals((string_address)settings.queue[0].value, (string_address) "yes") &&
                           settings_editing() < 0);
