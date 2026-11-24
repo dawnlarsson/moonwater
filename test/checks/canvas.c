@@ -2670,6 +2670,479 @@ static fn te_replacements(void)
         doc_close(&d);
 }
 
+static fn te_uikit1_under(void)
+{
+        long got = compositor_call(syscall(mmap), 0, 8192, 3, 0x22, (positive)-1, 0);
+        unsigned char address_to pages = (unsigned char address_to)got;
+        struct ui_tree t = {0};
+        int hit;
+
+        te_check(!(got < 0 && got > -4096), "uikit1-008: mmap guard page", 0);
+        if (got < 0 && got > -4096)
+                return;
+        compositor_call(syscall(mprotect), (positive)pages, 4096, 0, 0, 0, 0);
+        t.node = (struct ui_node address_to)(pages + 4096);
+        t.count = 1;
+        t.room = 1;
+        t.node[0].x = 0, t.node[0].y = 0, t.node[0].w = 100, t.node[0].h = 100;
+        t.node[0].first = -1, t.node[0].next = -1;
+        hit = ui_tree_under(&t, -1, 0, 0);
+        te_check(hit == -1, "uikit1-008: ui_tree_under rejects negative index", (positive)(hit + 1));
+        compositor_call(syscall(munmap), (positive)pages, 8192, 0, 0, 0, 0);
+}
+
+static fn te_uikit1_walk(void)
+{
+        long got = compositor_call(syscall(mmap), 0, 8192, 3, 0x22, (positive)-1, 0);
+        unsigned char address_to pages = (unsigned char address_to)got;
+        unsigned int scratch[16 * 20];
+        struct ui ui = {0};
+
+        te_check(!(got < 0 && got > -4096), "uikit1-002: mmap guard page", 0);
+        if (got < 0 && got > -4096)
+                return;
+        compositor_call(syscall(mprotect), (positive)pages, 4096, 0, 0, 0, 0);
+        for (positive i = 0; i < 16 * 20; i++)
+                scratch[i] = 0xffffffffu;
+        ui.pixels = (unsigned int address_to)(pages + 4096);
+        ui.scratch = scratch;
+        ui.width = 16, ui.height = 16, ui.pitch = 16;
+        ui.top = -10, ui.bottom = 16, ui.scale = 100;
+        ui_run_lay(&ui, 16, 20, -5, 0, 0, 16, 0xffffffffu, 255, true, 0);
+        te_check(ui.pixels[0] != 0, "uikit1-002: ui_run_lay skips negative y and draws visible rows", ui.pixels[0]);
+#if X64
+        {
+                struct ui_ramp address_to ramp = ui_ramp_for(0xffffffffu, 255, 0);
+                struct ui_walk walk = {.scratch = scratch, .wide = 16, .rows = 20, .top = -5, .first = 0,
+                                       .last = 16, .pixels = ui.pixels, .pitch = 16, .pen_x = 0,
+                                       .ui_top = -10, .ui_bottom = 16, .ui_height = 16,
+                                       .band_top = 0, .band_bottom = 0, .paper = 0,
+                                       .ground = 0, .flip = 0, .stroke = 0, .ramp = ramp};
+                ui.pixels[0] = 0;
+                ui_run_walk(&walk);
+                te_check(ui.pixels[0] != 0, "uikit1-002: x64 ui_run_walk skips negative y when ui_top < 0", ui.pixels[0]);
+        }
+#endif
+        compositor_call(syscall(munmap), (positive)pages, 8192, 0, 0, 0, 0);
+}
+
+static fn te_uikit1_logic(void)
+{
+        /* UIKIT1-001: partial allocation failure in ui_tree_room */
+        {
+                struct ui_tree t = {0};
+                ui_tree_begin(&t);
+                te_check(ui_grown_room(&t.grown, sizeof(struct ui_node), UI_TREE_GROWN, UI_TREE_NODES + 1) != 0,
+                         "uikit1-001: pre-grow node buffer", 0);
+                ui_tree_begin(&t);
+                te_check(t.room == UI_TREE_NODES && t.node == t.first,
+                         "uikit1-001: ui_tree_point stays on first when grown_scratch is missing", (positive)t.room);
+                if (t.grown.at)
+                        compositor_call(syscall(munmap), (positive)t.grown.at, (positive)sizeof(struct ui_node) * UI_TREE_GROWN, 0, 0, 0, 0);
+        }
+        {
+                struct ui_tree t = {0};
+                ui_tree_begin(&t);
+                ui_tree_open(&t)->id = 42;
+                for (int i = 1; i < UI_TREE_NODES; i++)
+                {
+                        ui_tree_open(&t)->id = i + 100;
+                        ui_tree_close(&t);
+                }
+                te_check(ui_grown_room(&t.grown, sizeof(struct ui_node), UI_TREE_GROWN, UI_TREE_NODES + 1) != 0,
+                         "uikit1-001: simulate partial grown without grown_scratch", 0);
+                ui_tree_open(&t)->id = 999;
+                ui_tree_close(&t);
+                ui_tree_close(&t);
+                te_check(t.count == UI_TREE_NODES + 1 && t.node[0].id == 42,
+                         "uikit1-001: retry copies first[0..127] into grown", (positive)t.node[0].id);
+                if (t.grown.at)
+                        compositor_call(syscall(munmap), (positive)t.grown.at, (positive)sizeof(struct ui_node) * UI_TREE_GROWN, 0, 0, 0, 0);
+                if (t.grown_scratch.at)
+                        compositor_call(syscall(munmap), (positive)t.grown_scratch.at, (positive)sizeof(int) * UI_TREE_GROWN, 0, 0, 0, 0);
+        }
+
+        /* UIKIT1-003: doc_case overlapping multi-cursor carets & shrinking UTF-8 caret clamp */
+        {
+                struct doc d;
+                p8 buf[32];
+                doc_open(&d, (const p8 address_to) "\xe2\xb1\xbe\xe2\xb1\xbe world", 12);
+                doc_select_set(&d, 0, 0);
+                doc_select_add(&d, 3, 3);
+                doc_case(&d, DOC_CASE_LOWER);
+                te_check(doc_length(&d) == 10 && doc_read(&d, 0, buf, 10) == 10 && !memory_compare(buf, "\xc8\xbf\xc8\xbf world", 10),
+                         "uikit1-003: doc_case merges overlapping multi-caret words", doc_length(&d));
+                doc_close(&d);
+        }
+        {
+                struct doc d;
+                doc_open(&d, (const p8 address_to) "\xe2\xb1\xbe\xe2\xb1\xbe world", 12);
+                doc_select_set(&d, 5, 5);
+                doc_case(&d, DOC_CASE_LOWER);
+                te_check(d.selections[0].active <= 4 && (d.selections[0].active % 2) == 0,
+                         "uikit1-003: doc_case clamps shrinking UTF-8 caret to code-point boundary", d.selections[0].active);
+                doc_close(&d);
+        }
+
+        /* UIKIT1-004: doc_delete auto_close Backspace overlap merge */
+        {
+                struct doc d;
+                p8 buf[16];
+                doc_open(&d, (const p8 address_to) "\"\"\"abc", 6);
+                d.auto_close = true;
+                doc_select_set(&d, 1, 1);
+                doc_select_add(&d, 2, 2);
+                d.closers[0] = 1, d.closers[1] = 2, d.closer_count = 2;
+                doc_delete(&d, false, DOC_REACH_CLUSTER);
+                te_check(doc_length(&d) == 3 && doc_read(&d, 0, buf, 3) == 3 && !memory_compare(buf, "abc", 3),
+                         "uikit1-004: doc_delete auto_close merges overlapping pairs", doc_length(&d));
+                doc_close(&d);
+        }
+
+        /* UIKIT1-005: horizontal scrollbar (across == 1) hit-testing and dragging in LTR & RTL */
+        {
+                struct ui ui = {0};
+                struct ui_scroll s = {0};
+                b32 saved_touch = ui_kit_touch;
+                unsigned int saved_rtl = ui_kit.rtl;
+                int res;
+
+                ui_kit_touch = false;
+                ui_kit.rtl = 0;
+                ui.scale = 100, ui.width = 400, ui.height = 300;
+                s.across = 1, s.x = 20, s.y = 40, s.height = 200, s.view = 300, s.content = 600, s.scale = 100;
+                te_check(ui_scroll_reach(&ui, &s, 50, 235) != 0, "uikit1-005: horizontal bar hit on thumb", 0);
+                te_check(ui_scroll_reach(&ui, &s, 25, 100) == 0, "uikit1-005: horizontal bar misses vertical strip", 0);
+                res = ui_scroll_pointer(&ui, &s, WINDOW_EVENT_BUTTON, 50, 235, true);
+                te_check(res >= 0 && s.held, "uikit1-005: horizontal thumb press grabs", (positive)(res + 1));
+                res = ui_scroll_pointer(&ui, &s, WINDOW_EVENT_MOTION, 100, 235, true);
+                te_check(res == 100, "uikit1-005: horizontal thumb drag updates scroll along x", (positive)(res + 1));
+                ui_scroll_pointer(&ui, &s, WINDOW_EVENT_BUTTON, 100, 235, false);
+
+                s = (struct ui_scroll){0};
+                s.across = 1, s.x = 20, s.y = 40, s.height = 200, s.view = 300, s.content = 600, s.scale = 100;
+                ui_kit.rtl = 1;
+                res = ui_scroll_pointer(&ui, &s, WINDOW_EVENT_BUTTON, 290, 235, true);
+                te_check(res >= 0 && s.held, "uikit1-005: RTL horizontal thumb press grabs", (positive)(res + 1));
+                res = ui_scroll_pointer(&ui, &s, WINDOW_EVENT_MOTION, 240, 235, true);
+                te_check(res == 100, "uikit1-005: RTL horizontal thumb drag left increases scroll", (positive)(res + 1));
+                ui_scroll_pointer(&ui, &s, WINDOW_EVENT_BUTTON, 240, 235, false);
+
+                ui_kit_touch = saved_touch;
+                ui_kit.rtl = saved_rtl;
+        }
+
+        /* UIKIT1-006: doc_select_box past EOF clamps first */
+        {
+                struct doc d;
+                doc_open(&d, (const p8 address_to) "a\nb\nc", 5);
+                doc_select_set(&d, 0, 0);
+                doc_select_box(&d, 5, 0, 6, 4);
+                te_check(doc_line_of(&d, d.selections[0].active) == 2,
+                         "uikit1-006: doc_select_box past EOF clamps first", doc_line_of(&d, d.selections[0].active));
+                doc_close(&d);
+        }
+
+        /* UIKIT1-007: doc_replace_bulk selection remapping uses pre-edit anchor/active */
+        {
+                struct doc d;
+                struct doc_find find = {0};
+                p8 raw[4101];
+                memory_fill(raw, 'a', sizeof(raw));
+                doc_open(&d, raw, sizeof(raw));
+                doc_select_set(&d, 4099, 4100);
+                doc_find_set(&find, (const p8 address_to) "a", 1, DOC_FIND_CASE);
+                doc_replace_all(&d, &find, (const p8 address_to) "aaa", 3);
+                te_check(d.selections[0].anchor == 12297 && d.selections[0].active == 12303,
+                         "uikit1-007: doc_replace_bulk maps forward selection with pre-edit stickiness", d.selections[0].active);
+                doc_find_drop(&find);
+                doc_close(&d);
+        }
+}
+
+static fn te_uikit2_list_desc(int id, struct ui_row address_to row)
+{
+        row->kind = id == 0 ? UI_ROW_CAPTION : UI_ROW_PLAIN;
+        row->label = id == 0 ? "Section" : "Item";
+        row->reveal = UI_ONE;
+}
+
+static fn te_uikit2(void)
+{
+        /* UIKIT2-001: ui_graph OOB node/edge accesses when nodes or edges shrink mid-interaction */
+        {
+                struct ui ui = {0};
+                struct ui_graph g = {0};
+                struct ui_graph_node nodes[2] = {0};
+                struct ui_graph_edge edges[1] = {0};
+                struct window_event ev = {0};
+                int sx = 0, sy = 0;
+                unsigned int res;
+
+                ui.scale = 100;
+                ui_graph_start(&g);
+                g.node = nodes, g.nodes = 2, g.edge = edges, g.edges = 1;
+                g.rules = UI_GRAPH_WIRING, g.w = 400, g.h = 300, g.homed = 1;
+                nodes[0].x = 10, nodes[0].y = 20, nodes[0].w = 80, nodes[0].h = 40, nodes[0].flags = UI_GRAPH_PICKED;
+                nodes[1].x = 50, nodes[1].y = 60, nodes[1].w = 80, nodes[1].h = 40, nodes[1].flags = UI_GRAPH_PICKED;
+                edges[0].from = 0, edges[0].to = 1, edges[0].out = 0, edges[0].in = 0;
+
+                /* Case A: ui_graph_shown with g.held >= g.nodes */
+                g.held = 1, g.moving = 1, g.at_x = 100, g.at_y = 120;
+                g.nodes = 1;
+                ui_graph_shown(&g, 0, &sx, &sy);
+                te_check(sx == 10 && sy == 20, "uikit2-001: ui_graph_shown ignores out-of-bounds held index", (positive)(sx * 1000 + sy));
+
+                /* Case B: ui_graph_event release with g.held >= g.nodes */
+                g.held = 1, g.moving = 1, g.at_x = 100, g.at_y = 120, g.dropped = -1;
+                ev.type = WINDOW_EVENT_BUTTON, ev.a = UI_POINTER_LEFT, ev.flags = 0;
+                ui_kit.pointer_x = 100, ui_kit.pointer_y = 100;
+                res = ui_graph_event(&ui, &g, &ev);
+                te_check(!(res & UI_GRAPH_DROP) && g.dropped == -1 && g.held == -1,
+                         "uikit2-001: ui_graph_event resets out-of-bounds held node", res);
+
+                /* Case C: ui_graph_wiring release with g.lifted >= g.edges */
+                g.nodes = 2, g.edges = 0;
+                g.drag_from = 0, g.drag_out = 0, g.lifted = 0, g.unwired = -1;
+                res = ui_graph_wiring(&ui, &g, &ev, true);
+                te_check(!(res & UI_GRAPH_UNWIRED) && g.unwired == -1 && g.drag_from == -1 && g.lifted == -1,
+                         "uikit2-001: ui_graph_wiring resets out-of-bounds lifted edge", res);
+        }
+
+        /* UIKIT2-002: ui_apps_cache_write memory leak & infinite loop when olds + fresh > UI_APPS_MOST */
+        {
+                static p8 cache_buf[sizeof(struct ui_apps_cache_head) + UI_APPS_MOST * sizeof(struct ui_apps_cache_record) + UI_APPS_MOST * 16 + 64];
+                struct ui_apps_cache_head address_to head = (struct ui_apps_cache_head address_to)cache_buf;
+                struct ui_apps_cache_record address_to recs = (struct ui_apps_cache_record address_to)(cache_buf + sizeof(*head));
+                p64 off = (sizeof(*head) + (p64)UI_APPS_MOST * sizeof(*recs) + 15) & ~(p64)15;
+                const p8 address_to saved_bytes = ui_apps_cache.bytes;
+                positive saved_len = ui_apps_cache.length;
+                p32 saved_cnt = ui_apps_cache.count;
+                const char address_to saved_path = ui_apps_cache_path;
+                unsigned int address_to px;
+
+                memory_zero(cache_buf, sizeof(cache_buf));
+                head->magic = UI_APPS_CACHE_MAGIC, head->version = UI_APPS_CACHE_VERSION, head->count = UI_APPS_MOST;
+                for (p32 i = 0; i < UI_APPS_MOST; i++)
+                {
+                        recs[i].id[0] = 'a';
+                        recs[i].id[1] = (char)('0' + (i / 100));
+                        recs[i].id[2] = (char)('0' + ((i / 10) % 10));
+                        recs[i].id[3] = (char)('0' + (i % 10));
+                        recs[i].id[4] = 0;
+                        recs[i].side = 2;
+                        recs[i].offset = (p32)off;
+                        off += 16;
+                }
+                ui_apps_cache.bytes = cache_buf, ui_apps_cache.length = sizeof(cache_buf), ui_apps_cache.count = UI_APPS_MOST;
+                ui_apps_cache_path = "/tmp/mw_h2/apps_cache_uikit2_002";
+
+                px = (unsigned int address_to)memory_checked(2 * 2 * 4);
+                memory_zero(&ui_apps_job, sizeof(ui_apps_job));
+                string_copy_bounded((p8 address_to)ui_apps_job.fresh[0].id, (string_address) "fresh.new.app", sizeof(ui_apps_job.fresh[0].id));
+                ui_apps_job.fresh[0].side = 2;
+                ui_apps_job.fresh[0].pixels = px;
+                ui_apps_job.fresh_count = 1;
+
+                ui_apps_cache_write();
+                te_check(ui_apps_job.fresh_count == 0,
+                         "uikit2-002: ui_apps_cache_write clears fresh_count when cache at UI_APPS_MOST", (positive)ui_apps_job.fresh_count);
+                if (ui_apps_job.fresh_count > 0 && ui_apps_job.fresh[0].pixels)
+                {
+                        memory_free(ui_apps_job.fresh[0].pixels, 2 * 2 * 4);
+                        ui_apps_job.fresh_count = 0;
+                }
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive) "/tmp/mw_h2/apps_cache_uikit2_002", 0);
+                ui_apps_cache.bytes = saved_bytes, ui_apps_cache.length = saved_len, ui_apps_cache.count = saved_cnt;
+                ui_apps_cache_path = saved_path;
+        }
+
+        /* UIKIT2-003: read-only text & hex documents modified via Find/Replace and Undo/Redo */
+        {
+                struct ui ui = {0};
+                struct ui_text t = {0};
+                struct ui_findbar bar = {0};
+                positive count = 0;
+                p8 buf[32];
+                positive len;
+                p32 r;
+
+                ui.scale = 100;
+                ui_text_open(&t, UI_TEXT_CODE, (const p8 address_to) "hello", 5, ui_text_keymap());
+                t.read_only = true;
+                ui_findbar_open(null, &bar, &t, UI_FINDBAR_REPLACE, false);
+                te_check(bar.mode != UI_FINDBAR_REPLACE,
+                         "uikit2-003: ui_findbar_open disallows Replace mode on read-only view", (positive)bar.mode);
+
+                bar.mode = UI_FINDBAR_REPLACE;
+                ui_text_set(&bar.field, (const p8 address_to) "hello/world", 11);
+                ui_findbar_enter(&ui, &bar, &t, false, false, &count);
+                len = ui_text_string(&t, buf, sizeof(buf));
+                te_check(count == 0 && len == 5 && memory_compare(buf, "hello", 5) == 0,
+                         "uikit2-003: ui_findbar_enter blocks replace on read-only view", count);
+                doc_find_drop(&bar.search);
+                ui_text_close(&bar.field);
+                ui_text_close(&t);
+
+                /* Undo/Redo in read-only text mode and hex mode */
+                memory_zero(&t, sizeof(t));
+                ui_text_open(&t, UI_TEXT_CODE, (const p8 address_to) "hello", 5, ui_text_keymap());
+                doc_seal(&t.doc);
+                doc_replace(&t.doc, 0, 5, (const p8 address_to) "world", 5);
+                doc_seal(&t.doc);
+                t.read_only = true;
+
+                r = ui_text_command(&ui, &t, DOC_CMD_UNDO);
+                len = ui_text_string(&t, buf, sizeof(buf));
+                te_check(r == 0 && len == 5 && memory_compare(buf, "world", 5) == 0,
+                         "uikit2-003: ui_text_command blocks DOC_CMD_UNDO when read_only", r);
+
+                t.hex = true;
+                r = ui_text_hex_command(&ui, &t, DOC_CMD_UNDO);
+                len = ui_text_string(&t, buf, sizeof(buf));
+                te_check(r == 0 && len == 5 && memory_compare(buf, "world", 5) == 0,
+                         "uikit2-003: ui_text_hex_command blocks DOC_CMD_UNDO when read_only", r);
+                ui_text_close(&t);
+        }
+
+        /* UIKIT2-004 & UIKIT2-007: centered LTR text hit-testing & HiDPI menubutton draw */
+        {
+                struct ui ui = {0};
+                font_face face = {0};
+                if (ui_engine_open_sized(&ui, 256) && ui_face_load(&face, (string_address) "fonts/inter/Inter-Regular.ttf"))
+                {
+                        /* UIKIT2-004 */
+                        struct ui_text t = {0};
+                        int origin, x1;
+                        p64 hit;
+
+                        ui.scale = 100;
+                        ui.regular = &face;
+                        ui_field_open(&t, null, "terminal");
+                        t.centred = true;
+                        t.left = 0, t.right = 400, t.top = 0, t.bottom = 40;
+                        ui_text_metrics(&ui, &t);
+                        ui_text_layout_line(&ui, &t, 0, &ui_text_lay);
+                        origin = ui_text_origin(&t, &ui_text_lay);
+                        x1 = origin + ui_text_x_of(&ui_text_lay, 1);
+                        hit = ui_text_hit(&ui, &t, x1, 10);
+                        te_check(hit == 1, "uikit2-004: ui_text_hit respects centred origin for LTR text", (positive)hit);
+                        ui_text_close(&t);
+
+                        /* UIKIT2-007 */
+                        {
+                                static unsigned int pix_actual[200 * 100], pix_expect[200 * 100];
+                                struct ui_menubutton m = {.label = "H", .x = 0, .y = 0, .w = 200, .h = 80};
+                                int pad, actual_min_y = 100, actual_max_y = -1, expect_min_y = 100, expect_max_y = -1;
+
+                                ui.scale = 200;
+                                ui.width = 200, ui.height = 100, ui.pitch = 200;
+                                ui.top = 0, ui.bottom = 100;
+                                ui.band_top = 0, ui.band_bottom = 0;
+                                ui.glass = true, ui.ink = 0xffffffu, ui.quiet = 0xaaaaaau;
+                                ui_scratch_fit(&ui, 256);
+
+                                memory_zero(pix_actual, sizeof(pix_actual));
+                                ui.pixels = pix_actual;
+                                ui_menubutton_draw(&ui, &m);
+
+                                memory_zero(pix_expect, sizeof(pix_expect));
+                                ui.pixels = pix_expect;
+                                pad = ui_px(&ui, UI_MENUBUTTON_PAD);
+                                ui_kit_text(&ui, m.x + pad,
+                                            ui_kit_baseline(&ui, m.y + (m.h - ui_dev(&ui, ui_types[UI_LABEL_LARGE].line)) / 2, UI_LABEL_LARGE),
+                                            (string_address)m.label, UI_LABEL_LARGE, ui_text_colour(&ui, UI_ON_SURFACE), 0);
+
+                                /* Inspect label region [pad, pad + 30) to exclude the chevron on the right */
+                                for (int y = 0; y < 80; y++)
+                                        for (int x = pad; x < pad + 30; x++)
+                                        {
+                                                if (pix_actual[y * 200 + x])
+                                                {
+                                                        if (y < actual_min_y) actual_min_y = y;
+                                                        if (y > actual_max_y) actual_max_y = y;
+                                                }
+                                                if (pix_expect[y * 200 + x])
+                                                {
+                                                        if (y < expect_min_y) expect_min_y = y;
+                                                        if (y > expect_max_y) expect_max_y = y;
+                                                }
+                                        }
+                                te_check(actual_min_y == expect_min_y && actual_max_y == expect_max_y && expect_max_y > expect_min_y,
+                                         "uikit2-007: ui_menubutton_draw scales line height on HiDPI",
+                                         (positive)((actual_min_y - expect_min_y) & 0xffff));
+                        }
+                }
+                else
+                        te_check(0, "uikit2-004/007: failed to load Inter-Regular.ttf", 0);
+        }
+
+        /* UIKIT2-005: ui_list_hit returns UI_ROW_CAPTION rows in non-virtual lists */
+        {
+                struct ui ui = {0};
+                struct ui_list l = {0};
+                int hit_cap, hit_item;
+
+                ui.scale = 100;
+                l.describe = te_uikit2_list_desc;
+                l.ids = 2;
+                ui_list_begin(&l);
+                ui_list_add(&l, 0);
+                ui_list_add(&l, 1);
+                ui_list_end(&l);
+                ui_list_place(&ui, &l, 0, 0, 300, 200);
+                ui_list_layout(&ui, &l);
+                hit_cap = ui_list_hit(&ui, &l, 50, l.top[0] + l.tall[0] / 2);
+                hit_item = ui_list_hit(&ui, &l, 50, l.top[1] + l.tall[1] / 2);
+                te_check(hit_cap == -1 && hit_item == 1,
+                         "uikit2-005: ui_list_hit ignores UI_ROW_CAPTION in non-virtual list", (positive)(hit_cap + 1));
+                if (l.slab)
+                        system_call_2(syscall(munmap), (positive)l.slab, l.slab_bytes);
+        }
+
+        /* UIKIT2-006: WINDOW_KEY_CANCEL falsely activates ui_iconbutton and ui_menubutton */
+        {
+                struct ui ui = {0};
+                struct ui_iconbutton ib = {.x = 0, .y = 0, .w = 40, .h = 40};
+                struct ui_menubutton mb = {.label = "Menu", .x = 0, .y = 0, .w = 80, .h = 40};
+                struct window_event down = {.type = WINDOW_EVENT_BUTTON, .a = UI_POINTER_LEFT, .flags = WINDOW_KEY_DOWN};
+                struct window_event cancel = {.type = WINDOW_EVENT_BUTTON, .a = UI_POINTER_LEFT, .flags = WINDOW_KEY_CANCEL};
+                unsigned int ir;
+                b32 mr;
+
+                ui.scale = 100;
+                ui_iconbutton_event(&ui, &ib, &down, 20, 20);
+                ir = ui_iconbutton_event(&ui, &ib, &cancel, 20, 20);
+                te_check(ir == 0 && !ib.down, "uikit2-006: ui_iconbutton_event ignores cancelled release", ir);
+
+                ui_menubutton_event(&ui, &mb, &down, 20, 20);
+                mr = ui_menubutton_event(&ui, &mb, &cancel, 20, 20);
+                te_check(mr == 0 && !mb.down, "uikit2-006: ui_menubutton_event ignores cancelled release", (positive)mr);
+        }
+
+        /* UIKIT2-008: ui_view_open OOB on v->item[] when ui_view_items fails after ui_tree_open */
+        {
+                struct ui ui = {0};
+                static struct ui_view v;
+                int before_count;
+
+                ui.scale = 100;
+                memory_zero(&v, sizeof(v));
+                ui_view_begin(&v, &ui, 400, 300);
+                for (int i = 1; i < UI_TREE_NODES; i++)
+                        ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BOX, .w = 10, .h = 10});
+                before_count = v.tree.count;
+                /* Force ui_view_items's ui_grown_room to fail mprotect on an unmapped address while ui_tree_open can still grow */
+                v.grown.at = (unsigned char address_to)4096;
+                v.grown.room = UI_TREE_NODES;
+                ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BOX, .w = 10, .h = 10});
+                te_check(v.tree.count == before_count && v.tree.count <= UI_TREE_NODES && v.tree.dropped >= 1,
+                         "uikit2-008: ui_view_open does not increment v->tree.count when ui_view_items fails", (positive)v.tree.count);
+                v.grown.at = null, v.grown.room = 0;
+                ui_view_now = null;
+        }
+}
+
 b32 main(void)
 {
         b32 bench = program_argument_count() > 1 && string_equals(program_argument(1), "bench");
@@ -2707,6 +3180,10 @@ b32 main(void)
                 TE_SECTION("sparse", te_sparse())
                 TE_SECTION("clipboard", te_clipboard(3000))
                 TE_SECTION("popups", te_popups(5000))
+                TE_SECTION("uikit1_logic", te_uikit1_logic())
+                TE_SECTION("uikit1_under", te_uikit1_under())
+                TE_SECTION("uikit1_walk", te_uikit1_walk())
+                TE_SECTION("uikit2", te_uikit2())
 #undef TE_SECTION
         }
         string_format(log, "text engine: %p checks, %p failures\n", te_checks, te_failures);

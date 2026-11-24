@@ -1500,8 +1500,17 @@ static int ui_grown_room(struct ui_grown address_to g, long unit, long most, lon
 // The tree's elements pointed at where they are: its own, or the grown ones once it has grown.
 static inline fn ui_tree_point(struct ui_tree address_to t)
 {
-        t->node = t->grown.at ? (struct ui_node address_to)t->grown.at : t->first;
-        t->room = t->grown.at ? (int)t->grown.room : UI_TREE_NODES;
+        long room = t->grown.room < t->grown_scratch.room ? t->grown.room : t->grown_scratch.room;
+        if (t->grown.at && t->grown_scratch.at && room > UI_TREE_NODES)
+        {
+                t->node = (struct ui_node address_to)t->grown.at;
+                t->room = (int)room;
+        }
+        else
+        {
+                t->node = t->first;
+                t->room = UI_TREE_NODES;
+        }
 }
 
 // A tree that was never begun (zero, as a container is made) pointed at its own elements, so a read of it before its...
@@ -1514,11 +1523,12 @@ static inline fn ui_tree_ready(const struct ui_tree address_to t)
 // Room for one more element: the tree grown past its own (its elements copied to the reservation once), 0 when it cannot be.
 static int ui_tree_room(struct ui_tree address_to t)
 {
-        b32 first = !t->grown.at;
+        b32 first;
         if (t->count < t->room)
                 return 1;
-        if (!ui_grown_room(&t->grown, sizeof(struct ui_node), UI_TREE_GROWN, (long)t->count + 1) ||
-            !ui_grown_room(&t->grown_scratch, sizeof(int), UI_TREE_GROWN, (long)t->count + 1))
+        first = !t->node || t->node == t->first;
+        if (!ui_grown_room(&t->grown_scratch, sizeof(int), UI_TREE_GROWN, (long)t->count + 1) ||
+            !ui_grown_room(&t->grown, sizeof(struct ui_node), UI_TREE_GROWN, (long)t->count + 1))
                 return 0;
         if (first)
                 memory_copy(t->grown.at, t->first, (positive)t->count * sizeof(struct ui_node));
@@ -1529,7 +1539,7 @@ static int ui_tree_room(struct ui_tree address_to t)
 // An int an element, for a pass that keeps one (the offsets a run asked, a hit's depths).
 static inline int address_to ui_tree_scratch(const struct ui_tree address_to t)
 {
-        return t->grown_scratch.at ? (int address_to)t->grown_scratch.at : (int address_to)t->first_scratch;
+        return t->node && t->node != t->first && t->grown_scratch.at ? (int address_to)t->grown_scratch.at : (int address_to)t->first_scratch;
 }
 
 // An empty tree with no measure; the array is left as it is.
@@ -1851,7 +1861,7 @@ static inline b32 ui_tree_in(const struct ui_node address_to n, int x, int y)
 static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y)
 {
         ui_tree_ready(t);
-        for (int ch = at < t->count && ui_tree_in(&t->node[at], x, y) ? t->node[at].first : -1; ch >= 0; ch = t->node[ch].next)
+        for (int ch = at >= 0 && at < t->count && ui_tree_in(&t->node[at], x, y) ? t->node[at].first : -1; ch >= 0; ch = t->node[ch].next)
                 if (ui_tree_in(&t->node[ch], x, y))
                         return ch;
         return -1;
@@ -4105,12 +4115,9 @@ static b32 doc_delete(struct doc address_to doc, b32 forward, p32 reach)
                                 for (p32 c = 0; which && c < doc->closer_count; c++)
                                         if (doc->closers[c] == at && after == (p8)doc_closes[which - doc_opens])
                                         {
-                                                edits[kept++] = (struct doc_edit){other, 2, null, 0, 0, 0};
-                                                other = DOC_NONE;
+                                                at++;
                                                 break;
                                         }
-                                if (other == DOC_NONE)
-                                        continue;
                         }
                 }
                 if (kept && (forward ? at : other) < edits[kept - 1].at + edits[kept - 1].removed)
@@ -4529,7 +4536,7 @@ static b32 doc_comment(struct doc address_to doc, const char address_to prefix)
 static b32 doc_case(struct doc address_to doc, p32 mode)
 {
         struct doc_edit address_to edits = doc_edits_room(doc->selection_count);
-        positive total = 0, used = 0;
+        positive kept = 0, total = 0, used = 0;
         p8 address_to texts;
         b32 done;
         if (!edits)
@@ -4539,17 +4546,28 @@ static b32 doc_case(struct doc address_to doc, p32 mode)
                 p64 start = doc_sel_start(&doc->selections[s]), finish = doc_sel_end(&doc->selections[s]);
                 if (start == finish)
                         doc_word_at(doc, start, &start, &finish);
-                edits[s] = (struct doc_edit){start, finish - start, null, 0, 0, finish - start};
-                total += (finish - start) * 2 + 4;
+                while (kept && start < edits[kept - 1].at + edits[kept - 1].removed)
+                {
+                        p64 prev_start = edits[kept - 1].at, prev_end = prev_start + edits[kept - 1].removed;
+                        if (prev_start < start)
+                                start = prev_start;
+                        if (prev_end > finish)
+                                finish = prev_end;
+                        kept--;
+                }
+                edits[kept++] = (struct doc_edit){start, finish - start, null, 0, 0, finish - start};
         }
+        for (positive k = 0; k < kept; k++)
+                total += (positive)edits[k].removed * 2 + 4;
         texts = doc_bytes_room(total);
         if (!texts)
                 return false;
-        for (positive s = 0; s < doc->selection_count; s++)
+        for (positive k = 0; k < kept; k++)
         {
-                p8 address_to from = texts + used + edits[s].removed + 4;
-                positive length = doc_read(doc, edits[s].at, from, (positive)edits[s].removed), out = 0;
-                b32 word_start = true;
+                p8 address_to from = texts + used + edits[k].removed + 4;
+                positive length = doc_read(doc, edits[k].at, from, (positive)edits[k].removed), out = 0, caret_out = 0;
+                b32 word_start = true, caret = kept == doc->selection_count && doc_sel_start(&doc->selections[k]) == doc_sel_end(&doc->selections[k]);
+                p64 rel = caret ? doc->selections[k].active - edits[k].at : 0;
                 // Each code point mapped one to one; a byte that is not UTF-8 is kept as it is.
                 for (positive at = 0; at < length;)
                 {
@@ -4558,27 +4576,33 @@ static b32 doc_case(struct doc address_to doc, p32 mode)
                         {
                                 texts[used + out++] = from[at++];
                                 word_start = false;
+                                if (caret && at <= rel)
+                                        caret_out = out;
                                 continue;
                         }
                         mapped = (p32)unicode_case(code, mode == DOC_CASE_UPPER || (mode == DOC_CASE_TITLE && word_start) ? UNICODE_CASE_UPPER
                                                                                                                          : UNICODE_CASE_LOWER);
                         word_start = doc_class(doc, code) != DOC_CLASS_WORD;
                         // A mapping that would grow past the room the text had is not made.
-                        if (out + 4 > edits[s].removed * 2 + 4)
+                        if (out + 4 > edits[k].removed * 2 + 4)
                                 mapped = code;
                         out += memory_utf8_encode(texts + used + out, 4, mapped);
                         at += size;
+                        if (caret && at <= rel)
+                                caret_out = out;
                 }
-                edits[s].text = texts + used;
-                edits[s].length = out;
-                edits[s].active = out;
-                edits[s].anchor = 0;
-                if (doc_sel_start(&doc->selections[s]) == doc_sel_end(&doc->selections[s]))
-                        edits[s].anchor = edits[s].active = doc->selections[s].active - edits[s].at;
+                edits[k].text = texts + used;
+                edits[k].length = out;
+                if (kept != doc->selection_count)
+                        edits[k].anchor = edits[k].active = DOC_NONE;
+                else if (caret)
+                        edits[k].anchor = edits[k].active = caret_out;
+                else
+                        edits[k].anchor = 0, edits[k].active = out;
                 used += out;
         }
         doc_seal(doc);
-        done = doc_apply(doc, edits, doc->selection_count, DOC_KIND_OTHER, 0);
+        done = doc_apply(doc, edits, kept, DOC_KIND_OTHER, 0);
         return done;
 }
 
@@ -4944,10 +4968,15 @@ static fn doc_add_cursor(struct doc address_to doc, b32 below)
 // Column (box) selection, from the anchor's line and column to the active one's:
 static fn doc_select_box(struct doc address_to doc, p64 anchor_line, p64 anchor_column, p64 active_line, p64 active_column)
 {
-        p64 first = anchor_line < active_line ? anchor_line : active_line, last = anchor_line < active_line ? active_line : anchor_line;
-        p64 left = anchor_column < active_column ? anchor_column : active_column;
+        p64 lines = doc_line_count(doc);
+        p64 first, last, left = anchor_column < active_column ? anchor_column : active_column;
         positive count = 0;
-        last = last >= doc_line_count(doc) ? doc_line_count(doc) - 1 : last;
+        if (anchor_line >= lines)
+                anchor_line = lines - 1;
+        if (active_line >= lines)
+                active_line = lines - 1;
+        first = anchor_line < active_line ? anchor_line : active_line;
+        last = anchor_line < active_line ? active_line : anchor_line;
         if (!array_store_reserve(doc->selections, doc->selection_room, 0, last - first + 1, 16))
                 return;
         for (p64 line = first; line <= last; line++)
@@ -5308,8 +5337,9 @@ static b32 doc_replace_bulk(struct doc address_to doc, const struct doc_edit add
                 for (positive s = 0; s < doc->selection_count; s++)
                 {
                         struct doc_selection address_to sel = &doc->selections[s];
-                        sel->anchor = doc_map(sel->anchor, edits, count, sel->anchor > sel->active);
-                        sel->active = doc_map(sel->active, edits, count, sel->active >= sel->anchor);
+                        p64 old_anchor = sel->anchor, old_active = sel->active;
+                        sel->anchor = doc_map(old_anchor, edits, count, old_anchor >= old_active);
+                        sel->active = doc_map(old_active, edits, count, old_active >= old_anchor);
                 }
         doc_normalize(doc);
         doc_group_end(doc, 0);
@@ -8143,6 +8173,7 @@ __asm__(
     ".Lrw_row:\n"
     "cmp 16(%rbx), %r12\n   jge .Lrw_done\n"
     "mov 24(%rbx), %rax\n   add %r12, %rax\n"
+    "test %rax, %rax\n   js .Lrw_next_row\n"
     "cmp 72(%rbx), %rax\n   jl .Lrw_next_row\n"
     "cmp 80(%rbx), %rax\n   jge .Lrw_next_row\n"
     "cmp 88(%rbx), %rax\n   jge .Lrw_next_row\n"
@@ -8563,7 +8594,7 @@ HOT static fn ui_run_lay(struct ui address_to restrict ui, int wide, int rows, i
         {
                 struct ui_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
                                        .last = last, .pixels = ui->pixels, .pitch = (long)ui->pitch, .pen_x = pen_x,
-                                       .ui_top = ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
+                                       .ui_top = ui->top < 0 ? 0 : ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
                                        .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,
                                        .ground = ground, .flip = light ? 0 : 255, .stroke = stroke, .ramp = ramp};
                 ui_run_walk(&walk);
@@ -14137,9 +14168,10 @@ static fn ui_scroll_draw(struct ui address_to ui, struct ui_scroll address_to s)
 // Whether a press at x, y takes the bar:
 static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll address_to s, int x, int y)
 {
-        int top, height;
+        int top, height, width = ui_scroll_width(ui);
         ui_scroll_track(ui, s, &top, &height);
-        return ui_hit(ui, ui_kit_touch, x, y, s->x, top, ui_scroll_width(ui), height);
+        return s->across ? ui_hit(ui, ui_kit_touch, x, y, top, s->y + s->height - width, height, width)
+                         : ui_hit(ui, ui_kit_touch, x, y, s->x, top, width, height);
 }
 
 static int ui_scroll_most(const struct ui_scroll address_to s)
@@ -14166,12 +14198,15 @@ static void ui_scroll_hold(struct ui_scroll address_to s)
 // The pointer on a scrollbar:
 static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
 {
-        int top, length, at, track, rest = s->content - s->view;
+        int top, length, at, track, rest = s->content - s->view, width = ui_scroll_width(ui), pos;
         b32 touch = ui_kit_touch;
         b32 bar = ui_scroll_thumb(ui, s, &top, &length);
         b32 on_track = bar && ui_scroll_reach(ui, s, x, y);
-        b32 on_thumb = on_track && ui_hit(ui, touch, x, y, s->x, top, ui_scroll_width(ui), length);
+        int drawn = s->across ? ui_mirror(top, length, s->x, s->view) : top;
+        b32 on_thumb = on_track && (s->across ? ui_hit(ui, touch, x, y, drawn, s->y + s->height - width, length, width)
+                                              : ui_hit(ui, touch, x, y, s->x, top, width, length));
         ui_scroll_track(ui, s, &at, &track);
+        pos = s->across ? (ui_rtl() ? 2 * at + track - x : x) : y;
         if (type == WINDOW_EVENT_MOTION)
         {
                 s->hover = on_thumb && !touch; // a finger hovers nothing: the thumb lights where it is held
@@ -14180,7 +14215,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 if (track - length <= 0)
                         return s->scroll;
                 ui_scroll_extent(s);
-                ui_body_track(&s->body, (ui_thumb_share(y - s->grab - at, track - length, rest) << UI_Q) - s->body.raw, ui_kit_time());
+                ui_body_track(&s->body, (ui_thumb_share(pos - s->grab - at, track - length, rest) << UI_Q) - s->body.raw, ui_kit_time());
                 s->precise = 0;
                 s->scroll = ui_body_px(&s->body);
                 return s->scroll < 0 ? 0 : s->scroll;
@@ -14197,12 +14232,12 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
         if (!on_track || (touch && !on_thumb))
                 return -1;
         s->held = 1;
-        s->grab = on_thumb ? y - top : length / 2;
+        s->grab = on_thumb ? pos - top : length / 2;
         ui_scroll_hold(s);
         if (!on_thumb && track - length > 0)
         {
                 // The thumb's middle goes under the pointer, as far as its track lets it: a press alone pulls nothing past an end.
-                b64 to = ui_thumb_share(y - s->grab - at, track - length, rest);
+                b64 to = ui_thumb_share(pos - s->grab - at, track - length, rest);
                 to = to < 0 ? 0 : to > rest ? rest : to;
                 ui_body_track(&s->body, (to << UI_Q) - s->body.raw, ui_kit_time());
                 s->precise = 0;
@@ -17629,7 +17664,7 @@ static fn ui_graph_shown(const struct ui_graph address_to g, int k, int address_
 {
         const struct ui_graph_node address_to n = &g->node[k];
         *x = n->x, *y = n->y;
-        if (g->held < 0 || !g->moving)
+        if (g->held < 0 || g->held >= g->nodes || !g->moving)
                 return;
         if (k == g->held)
                 *x = g->at_x, *y = g->at_y;
@@ -17811,6 +17846,13 @@ static fn ui_graph_let_go(struct ui_graph address_to g)
         g->held = -1, g->moving = 0, g->panning = 0, g->drag_from = g->lifted = g->turning = -1;
 }
 
+static fn ui_graph_check_active(struct ui_graph address_to g)
+{
+        if ((g->held >= 0 && g->held >= g->nodes) || (g->drag_from >= 0 && g->drag_from >= g->nodes) ||
+            (g->lifted >= 0 && g->lifted >= g->edges) || (g->turning >= 0 && g->turning >= g->edges))
+                ui_graph_let_go(g);
+}
+
 // The graph's keys while they are in it: Home and F frame the nodes, + and = zoom in about the middle, - out; Space held makes a press pan.
 static unsigned int ui_graph_key(const struct ui address_to ui, struct ui_graph address_to g, const struct window_event address_to event)
 {
@@ -17903,6 +17945,7 @@ static unsigned int ui_graph_wiring(const struct ui address_to ui, struct ui_gra
 {
         int px = ui_kit.pointer_x, py = ui_kit.pointer_y, k, port, e;
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, out;
+        ui_graph_check_active(g);
         if (!(g->rules & UI_GRAPH_WIRING))
                 return 0;
         if (event->type == WINDOW_EVENT_MOTION)
@@ -17976,6 +18019,7 @@ static unsigned int ui_graph_event(const struct ui address_to ui, struct ui_grap
         int px = ui_kit.pointer_x, py = ui_kit.pointer_y, hit;
         b32 inside = px >= g->x && px < g->x + g->w && py >= g->y && py < g->y + g->h, down = (event->flags & WINDOW_KEY_DOWN) != 0;
         unsigned int out = 0;
+        ui_graph_check_active(g);
         if (!g->homed)
                 ui_graph_home(ui, g);
         if ((out = ui_graph_wiring(ui, g, event, inside)) & UI_GRAPH_TAKEN)
@@ -18850,9 +18894,24 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         struct ui address_to ui = v->ui;
         int parent = v->tree.depth ? v->tree.open[v->tree.depth - 1] : -1;
         int along = parent >= 0 ? v->tree.node[parent].dir : 0;
-        struct ui_node address_to n = ui_tree_open(&v->tree);
-        struct ui_item address_to item = n == &v->tree.discard || !ui_view_items(v, (long)(n - v->tree.node) + 1) ? &v->discard
-                                                                                                                 : &v->item[n - v->tree.node];
+        struct ui_node address_to n;
+        struct ui_item address_to item;
+        if (!ui_view_items(v, (long)v->tree.count + 1))
+        {
+                if (v->tree.depth == UI_TREE_DEPTH)
+                        v->tree.over++;
+                else
+                        v->tree.open[v->tree.depth++] = -1;
+                v->tree.dropped++;
+                memory_zero(&v->tree.discard, sizeof(v->tree.discard));
+                n = &v->tree.discard;
+                item = &v->discard;
+        }
+        else
+        {
+                n = ui_tree_open(&v->tree);
+                item = n == &v->tree.discard ? &v->discard : &v->item[n - v->tree.node];
+        }
         struct ui_class look;
         int fixed[2], low[2], high[2], grow, type;
         ui_class_resolve(v, p->class, &look);
@@ -20643,7 +20702,7 @@ static unsigned int ui_iconbutton_event(struct ui address_to ui, struct ui_iconb
                 }
                 else
                 {
-                        b32 acted = b->down && inside;
+                        b32 acted = b->down && inside && !(event->flags & WINDOW_KEY_CANCEL);
                         b->down = false;
                         return acted ? UI_ICONBUTTON_PRESSED : 0;
                 }
@@ -20689,7 +20748,7 @@ static fn ui_menubutton_draw(struct ui address_to ui, const struct ui_menubutton
         else if (m->icon)
                 ui_icon(ui, m->icon - 1, m->x + pad, cy - side / 2, side, 0, ink | 0xff000000u);
         else
-                ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_types[UI_LABEL_LARGE].line) / 2 + (m->down ? ui_px(ui, 1) : 0), UI_LABEL_LARGE),
+                ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_dev(ui, ui_types[UI_LABEL_LARGE].line)) / 2 + (m->down ? ui_px(ui, 1) : 0), UI_LABEL_LARGE),
                             (string_address)m->label, UI_LABEL_LARGE, ink, 0);
         ui_chevron(ui, m->x + pad + label + ui_px(ui, 10) + chev, cy, chev, m->failed ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT));
         if (m->focus)
@@ -20716,7 +20775,7 @@ static b32 ui_menubutton_event(struct ui address_to ui, struct ui_menubutton add
                 }
                 else
                 {
-                        b32 acted = m->down && inside;
+                        b32 acted = m->down && inside && !(event->flags & WINDOW_KEY_CANCEL);
                         m->down = false;
                         return acted;
                 }
@@ -22291,7 +22350,8 @@ static fn ui_apps_cache_write(void)
         p64 offset;
         bipolar handle;
         positive at;
-        for (p32 old = 0; old < ui_apps_cache.count && olds_count < UI_APPS_MOST; old++)
+        p32 max_olds = ui_apps_job.fresh_count < UI_APPS_MOST ? (p32)(UI_APPS_MOST - ui_apps_job.fresh_count) : 0;
+        for (p32 old = 0; old < ui_apps_cache.count && olds_count < max_olds; old++)
         {
                 const struct ui_apps_cache_record address_to record;
                 const unsigned int address_to pixels = ui_apps_cache_record_at(ui_apps_cache.bytes, ui_apps_cache.length, old, &record);
@@ -22302,49 +22362,50 @@ static fn ui_apps_cache_write(void)
                         olds[olds_count] = record, old_pixels[olds_count++] = pixels;
         }
         count = olds_count + (p32)ui_apps_job.fresh_count;
-        if (count > UI_APPS_MOST || !(records = (struct ui_apps_cache_record address_to)memory_checked((positive)count * sizeof(*records) + 1)))
-                return;
-        offset = (sizeof(head) + (p64)count * sizeof(*records) + 15) & ~(p64)15;
-        for (p32 k = 0; k < count; k++)
+        if (count <= UI_APPS_MOST && (records = (struct ui_apps_cache_record address_to)memory_checked((positive)count * sizeof(*records) + 1)))
         {
-                b32 fresh = k >= olds_count;
-                int side = fresh ? ui_apps_job.fresh[k - olds_count].side : (int)olds[k]->side;
-                if (fresh)
-                        string_copy_bounded((p8 address_to)records[k].id, (string_address)ui_apps_job.fresh[k - olds_count].id, sizeof(records[k].id)),
-                            records[k].modified = ui_apps_job.fresh[k - olds_count].key.modified, records[k].size = ui_apps_job.fresh[k - olds_count].key.size;
-                else
-                        records[k] = *olds[k];
-                records[k].side = (p32)side, records[k].offset = (p32)offset;
-                offset = (offset + (p64)side * side * 4 + 15) & ~(p64)15;
-        }
-        head.count = count;
-        at = string_length((string_address)ui_apps_cache_path);
-        if (offset <= UI_APPS_CACHE_MOST && at + 40 < sizeof(temp))
-        {
-                memory_copy(temp, ui_apps_cache_path, at);
-                memory_copy(temp + at, ".new.", 5), at += 5;
-                at += positive_into_string((p8 address_to)temp + at, (positive)system_call(syscall(getpid)));
-                temp[at++] = '.', at += positive_into_string((p8 address_to)temp + at, ui_apps_job.written), temp[at] = 0;
-                if ((handle = system_open_at_mode(AT_FDCWD, (string_address)temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644)) >= 0)
+                offset = (sizeof(head) + (p64)count * sizeof(*records) + 15) & ~(p64)15;
+                for (p32 k = 0; k < count; k++)
                 {
-                        static const p8 zeros[16];
-                        p64 written = sizeof(head) + (p64)count * sizeof(*records);
-                        b32 whole = system_call_2(syscall(fchmod), (positive)handle, 0644) == 0 && system_write_all((positive)handle, &head, sizeof(head)) == sizeof(head) &&
-                                    system_write_all((positive)handle, records, (positive)count * sizeof(*records)) == (positive)count * sizeof(*records);
-                        for (p32 k = 0; whole && k < count; k++)
-                        {
-                                const unsigned int address_to pixels = k >= olds_count ? ui_apps_job.fresh[k - olds_count].pixels : old_pixels[k];
-                                positive bytes = (positive)records[k].side * records[k].side * 4;
-                                whole = (written >= records[k].offset || system_write_all((positive)handle, zeros, (positive)(records[k].offset - written)) == records[k].offset - written) &&
-                                        system_write_all((positive)handle, pixels, bytes) == bytes;
-                                written = records[k].offset + bytes;
-                        }
-                        system_close(handle);
-                        if (!whole || system_rename_at(AT_FDCWD, (string_address)temp, AT_FDCWD, (string_address)ui_apps_cache_path, 0) != 0)
-                                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temp, 0);
+                        b32 fresh = k >= olds_count;
+                        int side = fresh ? ui_apps_job.fresh[k - olds_count].side : (int)olds[k]->side;
+                        if (fresh)
+                                string_copy_bounded((p8 address_to)records[k].id, (string_address)ui_apps_job.fresh[k - olds_count].id, sizeof(records[k].id)),
+                                    records[k].modified = ui_apps_job.fresh[k - olds_count].key.modified, records[k].size = ui_apps_job.fresh[k - olds_count].key.size;
+                        else
+                                records[k] = *olds[k];
+                        records[k].side = (p32)side, records[k].offset = (p32)offset;
+                        offset = (offset + (p64)side * side * 4 + 15) & ~(p64)15;
                 }
+                head.count = count;
+                at = string_length((string_address)ui_apps_cache_path);
+                if (offset <= UI_APPS_CACHE_MOST && at + 40 < sizeof(temp))
+                {
+                        memory_copy(temp, ui_apps_cache_path, at);
+                        memory_copy(temp + at, ".new.", 5), at += 5;
+                        at += positive_into_string((p8 address_to)temp + at, (positive)system_call(syscall(getpid)));
+                        temp[at++] = '.', at += positive_into_string((p8 address_to)temp + at, ui_apps_job.written), temp[at] = 0;
+                        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644)) >= 0)
+                        {
+                                static const p8 zeros[16];
+                                p64 written = sizeof(head) + (p64)count * sizeof(*records);
+                                b32 whole = system_call_2(syscall(fchmod), (positive)handle, 0644) == 0 && system_write_all((positive)handle, &head, sizeof(head)) == sizeof(head) &&
+                                            system_write_all((positive)handle, records, (positive)count * sizeof(*records)) == (positive)count * sizeof(*records);
+                                for (p32 k = 0; whole && k < count; k++)
+                                {
+                                        const unsigned int address_to pixels = k >= olds_count ? ui_apps_job.fresh[k - olds_count].pixels : old_pixels[k];
+                                        positive bytes = (positive)records[k].side * records[k].side * 4;
+                                        whole = (written >= records[k].offset || system_write_all((positive)handle, zeros, (positive)(records[k].offset - written)) == records[k].offset - written) &&
+                                                system_write_all((positive)handle, pixels, bytes) == bytes;
+                                        written = records[k].offset + bytes;
+                                }
+                                system_close(handle);
+                                if (!whole || system_rename_at(AT_FDCWD, (string_address)temp, AT_FDCWD, (string_address)ui_apps_cache_path, 0) != 0)
+                                        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temp, 0);
+                        }
+                }
+                memory_free(records, (positive)count * sizeof(*records) + 1);
         }
-        memory_free(records, (positive)count * sizeof(*records) + 1);
         for (int k = 0; k < ui_apps_job.fresh_count; k++)
                 memory_free(ui_apps_job.fresh[k].pixels, (positive)ui_apps_job.fresh[k].side * ui_apps_job.fresh[k].side * 4);
         ui_apps_job.fresh_count = 0, ui_apps_job.written++;
@@ -24143,7 +24204,16 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
                                 hi = mid;
                 }
                 if (lo > 0 && inside < l->top[lo - 1] + l->tall[lo - 1])
+                {
+                        if (l->describe)
+                        {
+                                struct ui_row said;
+                                ui_list_describe(l, l->id[lo - 1], &said);
+                                if (said.kind == UI_ROW_CAPTION)
+                                        return -1;
+                        }
                         return l->id[lo - 1];
+                }
         }
         return -1;
 }
@@ -31711,7 +31781,7 @@ static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int
                                 best = (int)b;
                 return ui_text_lay.offset[best];
         }
-        px = x - t->left + (int)t->scroll_x + row.shift;
+        px = x - ui_text_origin(t, &ui_text_lay) + row.shift;
         for (p32 k = row.from; k < row.to; k++)
                 if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
                         return ui_text_lay.offset[k];
@@ -32507,6 +32577,8 @@ static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_t
                 ui_text_wake(t);
                 return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
         case DOC_CMD_UNDO: case DOC_CMD_REDO:
+                if (t->read_only)
+                        return 0;
                 t->hex_nibble = false;
                 doc_command(&t->doc, command, t->comment);
                 ui_text_hex_reveal(t);
@@ -32652,7 +32724,8 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 doc_fold(&t->doc, doc_line_of(&t->doc, t->doc.selections[t->doc.primary].active), command == DOC_CMD_FOLD);
                 return UI_TEXT_MOVED;
         default:
-                if (t->read_only && command >= DOC_CMD_BACKSPACE && command <= DOC_CMD_SORT_DESCENDING)
+                if (t->read_only && ((command >= DOC_CMD_BACKSPACE && command <= DOC_CMD_SORT_DESCENDING) ||
+                                     command == DOC_CMD_UNDO || command == DOC_CMD_REDO))
                         return 0;
                 if (t->mode == UI_TEXT_FIELD && command == DOC_CMD_NEWLINE)
                         return UI_TEXT_SUBMIT;
@@ -34047,6 +34120,8 @@ static fn ui_findbar_open(const struct window_row address_to own, struct ui_find
 {
         p8 selected[256];
         positive length = 0;
+        if (mode == UI_FINDBAR_REPLACE && view->read_only)
+                mode = UI_FINDBAR_FIND;
         ui_findbar_begin(own, bar, view, mode, mode == UI_FINDBAR_LINE && !view->hex ? ui_field_digits : null,
                          mode == UI_FINDBAR_LINE ? 19 : UI_FINDBAR_QUERY - 1, window);
         if (mode != UI_FINDBAR_LINE && doc_any_selected(&view->doc))
@@ -34121,6 +34196,8 @@ static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_t
         if (bar->mode == UI_FINDBAR_REPLACE)
         {
                 positive slash = 0;
+                if (view->read_only)
+                        return UI_FINDBAR_SAID_NONE;
                 while (slash < length && text[slash] != '/')
                         slash++;
                 if (slash < length && doc_find_set(&bar->search, text, slash, bar->flags))
