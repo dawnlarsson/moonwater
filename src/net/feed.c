@@ -52,7 +52,7 @@
         Pinned 65-byte uncompressed SEC1 public key (0x04 || X || Y) generated
         inside the Cloudflare FeedSigner Durable Object: key id
         dawning-p256-2ff843ad9188, fingerprint (the first 8 bytes of its SHA-256)
-        2ff843ad9188fe11, as `npm run pin-pubkey` in dawning-feed printed it from
+        2ff843ad9188f48d, as `npm run pin-pubkey` in dawning-feed printed it from
         keys.mwf after the first cron publish (2026-11-24 18:00:33 UTC, sequence 1),
         and keys.mwf, wallpapers.mwf and manifest.mwf each verified against it then.
         A key turned over is a new pin here: an all-zero one fails closed in
