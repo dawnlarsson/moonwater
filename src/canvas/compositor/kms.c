@@ -2215,7 +2215,7 @@ static int compositor_cursor_inset(int span)
 }
 
 // Cached scratch keeps cursor rendering off write-combined dumb memory.
-static unsigned int compositor_cursor_scratch[CP_PLANE * CP_PLANE];
+static unsigned int compositor_cursor_scratch[CP_PLANE_MOST * CP_PLANE_MOST];
 
 static unsigned int *compositor_cursor_mapped(int which)
 {
@@ -2471,6 +2471,19 @@ static void compositor_cursor_start(void)
         {
                 compositor.cursor.soft = compositor.card >= 0;
                 return;
+        }
+        // The plane's side (CP_PLANE): the smallest of 64, 128 and 256 that holds the pointer three times its size (as a shake magnifies it), no
+        // more than the card's plane takes (DRM_CAP_CURSOR_WIDTH; a card that does not say takes 64).
+        {
+                unsigned long cap[2] = {0x8, 0};
+                int base = (compositor_px1(compositor.scale) * 256 * (compositor.cursor.size ? compositor.cursor.size : 100) + 50) / 100;
+                int need = 3 * base * CP_DYN_CELL / 256, most = 64, side = 64;
+
+                if (compositor_call(syscall(ioctl), (positive)compositor.card, 0xc010640cUL, (positive)cap, 0, 0, 0) == 0 && cap[1] >= 64) // DRM_IOCTL_GET_CAP
+                        most = cap[1] < CP_PLANE_MOST ? (int)cap[1] : CP_PLANE_MOST;
+                while (side < need && side * 2 <= most)
+                        side *= 2;
+                compositor_plane_side = side;
         }
         for (int i = 0; i < 2; i++)
                 if (drm_dumb_create(&d[i], CP_PLANE, CP_PLANE, 0) != 0)

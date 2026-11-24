@@ -179,8 +179,13 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEXT && WINDOW_POINTER_HAND == CP_HAND && WINDOW_POINTER_RESIZE == CP_RESIZE_H &&
                    WINDOW_POINTER_NOT_ALLOWED == CP_NOTALLOWED,
                "a program's pointer shapes are the compositor's CP_ codes");
-// The cursor plane is as large as the smallest a driver makes, and CP_SPAN_MOST the side of the largest picture drawn into a scene.
-#define CP_PLANE 64
+// The cursor plane's side: 64, 128 or 256 pixels, the smallest that holds the pointer at its largest (magnified, at the screen's scale) and
+// no more than the card says its plane takes (compositor_cursor_start chooses it before the plane's buffers are made; 64 until then, the
+// smallest a driver makes). A pointer larger than a plane of 64 was drawn into the scene, a present a move. CP_PLANE_MOST is the largest side,
+// which the pictures kept for the plane have room for, and CP_SPAN_MOST the side of the largest picture drawn into a scene.
+#define CP_PLANE_MOST 256
+static int compositor_plane_side = 64;
+#define CP_PLANE compositor_plane_side
 #define CP_SPAN_MOST 384
 
 /*
@@ -565,7 +570,7 @@ static struct
         int width, height;      // the copy, in device pixels
         int left, top;          // the copy's corner in its square
         int span, hot_x, hot_y; // the square's side, and the pointer's pixel of it
-        unsigned int premultiplied[CP_PLANE * CP_PLANE]; // rows CP_PLANE apart: the plane's pixels and software scene source
+        unsigned int premultiplied[CP_PLANE_MOST * CP_PLANE_MOST]; // rows CP_PLANE apart: the plane's pixels and software scene source
 } compositor_picture;
 
 // n over d rounded toward minus infinity, d above zero: a hotspot left of a picture is left of its copy too.
