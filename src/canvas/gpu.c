@@ -15,10 +15,10 @@ static struct { positive va, maps, top; } gpu_window = {GPU_AMD_VA, GPU_AMD_VA_M
 #define GPU_VA_MAPS (gpu_window.maps)
 #define GPU_VA_END (gpu_window.top) // never past GPU_VA_RECORD
 static positive gpu_map_next = GPU_AMD_VA_MAPS; // where the next map or import is placed (gpu_place_aligned): from GPU_VA_MAPS of the window
-#define GPU_BASES_AT 40960    // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
-#define GPU_SRGB_S2L_AT 43008 // 256 x u32 IEC 61966-2-1 sRGB -> 12-bit linear (0..4095), 1024 bytes (43008..44032)
-#define GPU_SRGB_L2S_AT 44032 // 4096 x u8 IEC 61966-2-1 12-bit linear -> sRGB (0..255), 4096 bytes (44032..48128)
-#define GPU_DATA 49152        // the pixels start here; before them: packets at 0, arguments after the packets, the kernels from 1024, bases at 40960, sRGB LUTs at 43008
+#define GPU_BASES_AT 57344    // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
+#define GPU_SRGB_S2L_AT 59392 // 256 x u32 IEC 61966-2-1 sRGB -> 12-bit linear (0..4095), 1024 bytes (59392..60416; gpu.asm's scene adds these two to the buffer's start)
+#define GPU_SRGB_L2S_AT 60416 // 4096 x u8 IEC 61966-2-1 12-bit linear -> sRGB (0..255), 4096 bytes (60416..64512)
+#define GPU_DATA 65536        // the pixels start here; before them: packets at 0, arguments after the packets, the kernels from 1024, bases at 57344, sRGB LUTs at 59392
 // The two slots a job is built in, used in turn so that the next job is written while one runs: slot k's packets at GPU_PACKETS * k (the driver's room for a
 // job's command words: struct gpu_backend's packets), its arguments at GPU_SLOTS * GPU_PACKETS + 256 * k, the kernels from gpu_layout.code. With amdgpu's 256
 // that is packets at 0 and 256, arguments at 512 and 768, the kernels from 1024. A slot is not written while its job may run (gpu_slot_take).
@@ -278,30 +278,30 @@ static const struct gpu_code gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
     {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)},
     {gpu_k_image, sizeof(gpu_k_image)}, {gpu_k_nv12, sizeof(gpu_k_nv12)},
-    {0, 0}, {0, 0}};
+    {gpu_k_halve, sizeof(gpu_k_halve)}, {gpu_k_rise, sizeof(gpu_k_rise)}};
 static const struct gpu_code gpu_kernels_gfx11[] = {
     {gpu_k_11_copy, sizeof(gpu_k_11_copy)}, {gpu_k_11_fill, sizeof(gpu_k_11_fill)}, {gpu_k_11_tone, sizeof(gpu_k_11_tone)}, {gpu_k_11_glass, sizeof(gpu_k_11_glass)},
     {0, 0}, {0, 0}, {gpu_k_11_scene, sizeof(gpu_k_11_scene)}, {gpu_k_11_scale, sizeof(gpu_k_11_scale)},
     {gpu_k_11_image, sizeof(gpu_k_11_image)}, {gpu_k_11_nv12, sizeof(gpu_k_11_nv12)},
-    {0, 0}, {0, 0}};
+    {gpu_k_11_halve, sizeof(gpu_k_11_halve)}, {gpu_k_11_rise, sizeof(gpu_k_11_rise)}};
 static const struct gpu_code gpu_kernels_gfx12[] = {
     {gpu_k_12_copy, sizeof(gpu_k_12_copy)}, {gpu_k_12_fill, sizeof(gpu_k_12_fill)}, {gpu_k_12_tone, sizeof(gpu_k_12_tone)}, {gpu_k_12_glass, sizeof(gpu_k_12_glass)},
     {0, 0}, {0, 0}, {gpu_k_12_scene, sizeof(gpu_k_12_scene)}, {gpu_k_12_scale, sizeof(gpu_k_12_scale)},
     {gpu_k_12_image, sizeof(gpu_k_12_image)}, {gpu_k_12_nv12, sizeof(gpu_k_12_nv12)},
-    {0, 0}, {0, 0}};
+    {gpu_k_12_halve, sizeof(gpu_k_12_halve)}, {gpu_k_12_rise, sizeof(gpu_k_12_rise)}};
 // gfx9's (Vega, and the Raven to Cezanne APUs): the same text, its literals in registers where gfx9's long encodings take none (src/build/gpuasm.c).
 static const struct gpu_code gpu_kernels_gfx9[] = {
     {gpu_k_9_copy, sizeof(gpu_k_9_copy)}, {gpu_k_9_fill, sizeof(gpu_k_9_fill)}, {gpu_k_9_tone, sizeof(gpu_k_9_tone)}, {gpu_k_9_glass, sizeof(gpu_k_9_glass)},
     {0, 0}, {0, 0}, {gpu_k_9_scene, sizeof(gpu_k_9_scene)}, {gpu_k_9_scale, sizeof(gpu_k_9_scale)},
     {gpu_k_9_image, sizeof(gpu_k_9_image)}, {gpu_k_9_nv12, sizeof(gpu_k_9_nv12)},
-    {0, 0}, {0, 0}};
+    {gpu_k_9_halve, sizeof(gpu_k_9_halve)}, {gpu_k_9_rise, sizeof(gpu_k_9_rise)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
-#define GPU_OP_HALVE 10u // a scene made its small picture, a pixel a block of 8 by 8 (gpu_halve): Intel's sets have it, amdgpu's slot is empty
-#define GPU_OP_RISE 11u  // a glass window's ground risen from its small tinted picture, with the grain (gpu_rise): the same
+#define GPU_OP_HALVE 10u // a scene made its small picture, a pixel a block of 8 by 8 (gpu_halve)
+#define GPU_OP_RISE 11u  // a glass window's ground risen from its small tinted picture, with the grain (gpu_rise)
 static unsigned int gpu_kernel_at[GPU_KERNELS];
 typedef char gpu_amd_slots_fit[GPU_SLOTS * GPU_AMD_PACKETS + 256 * GPU_SLOTS <= 1024 ? 1 : -1]; // amdgpu's packets and arguments end where its kernels begin
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + sizeof(gpu_k_nv12) + 256 * 10 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + sizeof(gpu_k_nv12) + sizeof(gpu_k_halve) + sizeof(gpu_k_rise) + 256 * 12 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (GPU_CONTROL(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 #ifndef GPU_WAIT_CS
@@ -4938,7 +4938,7 @@ static positive gpu_blit_go(positive src, unsigned int sp, positive dst, unsigne
         return gpu_go();
 }
 
-// Whether the set the card runs has a kernel for op (the halve and the rise are Intel's so far).
+// Whether the set the card runs has a kernel for op.
 static b32 gpu_has(unsigned int op)
 {
         return gpu_ready() && gpu_set && op < gpu_set->count && gpu_set->kernels[op].words && gpu_set->kernels[op].size;
@@ -4946,7 +4946,8 @@ static b32 gpu_has(unsigned int op)
 
 // The halve (op 10): the small picture w by h at dst (dp pixels a row) made from the picture at src (sp a row), each pixel its block of 8 by 8 by the
 // library's rounding. The rise (op 11): the w by h blocks of 8 by 8 at dst made from the small picture at src (the pixel of the block before the first
-// across and up), with the grain of the side. Card addresses on 64-byte lines, pitches multiples of 16 pixels. gpu_run waits, as gpu_blit does.
+// across and up), with the grain of the side. Card addresses on 64-byte lines, pitches multiples of 16 pixels (Intel's rule; amdgpu's kernels, a lane
+// a pixel, read and write any, and their rise is told its pixels, eight a block each way). gpu_run waits, as gpu_blit does.
 static b32 gpu_halve(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h)
 {
         struct gpu_args address_to a;
@@ -4968,6 +4969,8 @@ static b32 gpu_rise(positive src, unsigned int sp, positive dst, unsigned int dp
                 return false;
         gpu_slot_take(), a = GPU_ARGS;
         a->s = src, a->d = dst, a->g = 0, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = GPU_OP_RISE, a->v = light ? 1u : 0u, a->x0 = a->y0 = 0, a->rows = h, a->tab = 0;
+        if (gpu_backend == &gpu_amd)
+                a->w = 8 * w, a->rows = 8 * h;
         return gpu_run();
 }
 

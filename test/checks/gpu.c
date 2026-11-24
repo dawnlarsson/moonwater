@@ -1363,8 +1363,9 @@ b32 main(void)
                                 check("gpu halve: a set that has the kernel makes the small picture", false);
                                 continue;
                         }
+                        // (a set with its own command words, i915's, writes a row's last thread whole: eight pixels a thread; a lane a pixel writes w)
                         for (unsigned int y = 0; y < h; y++)
-                                memory_copy(gs_want + (positive)y * GS_PITCH, full + (positive)y * GS_PITCH, 8 * cols * 4);
+                                memory_copy(gs_want + (positive)y * GS_PITCH, full + (positive)y * GS_PITCH, (gpu_set->batch ? 8 * cols : w) * 4);
                         for (positive k = 0; k < (positive)GS_PITCH * (h + 4); k++)
                         {
                                 checks++;

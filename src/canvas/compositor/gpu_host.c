@@ -1646,6 +1646,11 @@ static int compositor_gpu_glass_rise(int row, const int *c)
         if (c[2] <= c[0] || c[3] <= c[1] || !compositor.tinted[row] || !compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead ||
             compositor_gpu_held() || !gpu_has(GPU_OP_RISE) || !gpu_idle() || compositor_card.on)
                 return 0;
+        // amdgpu's rise is a pixel a lane, each making its own three levels (31 of the byte means): 3.1 ms for a 1920 by 1080 ground on a
+        // Granite Ridge's card where its processor makes it in 0.5 to 0.9, the loop waiting. Its pixels are right (CHECK_gpu_scene), and it is
+        // the processor's here until the rise is two jobs (level 1 first, a quarter of the pixels), which is a fifth of the means.
+        if (gpu_backend == &gpu_amd)
+                return 0;
         if ((x0 - gx0) & 8) // the blocks' first byte on a 64-byte line of the ground: two blocks a line
                 x0 -= 8;
         w = (x1 - x0) / 8, h = (y1 - y0) / 8;
