@@ -217,11 +217,24 @@ CONFIG_INTEL_GTT=y
 CONFIG_AGP=y
 CONFIG_AGP_INTEL=y
 
-# Modern Intel Arc (Battlemage) & Lunar Lake+ driver. Note upstream Linux 7.3
-# restricts CONFIG_DRM_XE_DISPLAY to DRM_XE=m (shared i915-display objects);
-# building DRM_XE=y avoids runtime module loading and gives render/compute on
-# Xe2+ alongside i915 display+render up to Alchemist/Meteor Lake.
+# xe, the driver of Lunar Lake, Battlemage (Arc B) and Panther Lake, which
+# i915 does not drive. It is built in, and bound to no device.
+#
+# Its display needs xe to be a module (DRM_XE_DISPLAY depends on DRM_XE=m: it
+# is i915's display code, which Kconfig builds for xe as a module only), and
+# this image loads no module, so a built-in xe is render and compute with no
+# modesetting. It binds those chips without being asked (they need no
+# force_probe), and a binding xe takes the firmware's framebuffer away from
+# simpledrm before anything else (xe_device_create), display or none: the
+# machine was left with a card that has no screen and no driver for the one
+# the firmware lit, which is a dark screen. With every device blocked ("!*")
+# the firmware's framebuffer stays simpledrm's: the compositor draws on it
+# with the processor, at the firmware's mode, and a bowl's programs have no
+# card. A machine that wants the render node and needs no screen of its own
+# boots with xe.force_probe= (empty: the parameter wins over this line, and
+# xe then binds what it supports).
 CONFIG_DRM_XE=y
+CONFIG_DRM_XE_FORCE_PROBE="!*"
 
 #
 # Virtual machines
