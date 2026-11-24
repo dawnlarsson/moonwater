@@ -1692,6 +1692,57 @@ static void audio_refuse(long fd)
         system_close((int)fd);
 }
 
+/*
+        Who a client is, for the server's root: the machine's root alone. A program of a bowl is uid 0 too, as SO_PEERCRED says it
+        here (a bowl maps its own user to the machine's root, in a user namespace of its own, without root's powers), so it is told
+        apart by its user namespace: a client whose namespace is not this server's is given an id of that namespace's instead
+        (AUDIO_UID_BOWL and the namespace's inode), which is no uid of the machine's and never root. So the loopback, the monitors,
+        another program's streams and the server's defaults stay root's, and a bowl's program records a capture device and plays
+        as any user does. 1 when the namespace could not be read: such a client is not root either.
+*/
+#define AUDIO_UID_BOWL 0x40000000u
+
+static unsigned long audio_userns(long pid)
+{
+        char path[48], link[64];
+        long n = 0, got;
+        unsigned long inode = 0;
+
+        if (pid <= 0)
+                memory_copy(path, "/proc/self/ns/user", 19);
+        else
+        {
+                char digits[24];
+                int k = 0;
+
+                memory_copy(path, "/proc/", 6), n = 6;
+                for (unsigned long v = (unsigned long)pid; v || !k; v /= 10)
+                        digits[k++] = (char)('0' + v % 10);
+                while (k)
+                        path[n++] = digits[--k];
+                memory_copy(path + n, "/ns/user", 9);
+        }
+        got = audio_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)link, sizeof link - 1, 0, 0);
+        // "user:[4026531837]"
+        for (long at = 0; got > 0 && at < got; at++)
+                if (link[at] >= '0' && link[at] <= '9')
+                        inode = inode * 10 + (unsigned long)(link[at] - '0');
+        return got > 0 ? inode : 1;
+}
+
+static unsigned int audio_peer_uid(int pid, int uid)
+{
+        static unsigned long own;
+        unsigned long theirs;
+
+        if (uid != 0)
+                return (unsigned int)uid;
+        if (!own)
+                own = audio_userns(0);
+        theirs = audio_userns(pid);
+        return theirs == own && own != 1 ? 0u : AUDIO_UID_BOWL | (unsigned int)(theirs & 0x3fffffffu);
+}
+
 static void audio_accept(void)
 {
         for (int tries = 0; tries < AUDIO_ACCEPTS; tries++)
@@ -1709,7 +1760,7 @@ static void audio_accept(void)
                         system_close((int)fd);
                         continue;
                 }
-                slot = pulse_client_open(&audio_service.pulse, (unsigned int)credentials[1], credentials[0]);
+                slot = pulse_client_open(&audio_service.pulse, audio_peer_uid(credentials[0], credentials[1]), credentials[0]);
                 if (slot < 0)
                 {
                         // No memory for the client: it is told so (an error to its first command, which is its AUTH) and let go.

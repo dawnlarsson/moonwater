@@ -3263,6 +3263,40 @@ processor's microcode at 0x0b404023, below AMD's EntrySign cutoff 0xb404031.
 The kernel loads no unlisted patch below that cutoff, so they wait on a BIOS
 update. Not a bug in the tree.
 
+### MW-2026-219: the sound server took every program of a bowl for root, so any of them recorded what plays and the loopback
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-24 (the commit "Sound server: a program of a bowl is not root ...") |
+| Class | Wrong identity: a privilege granted by uid alone, where a user namespace maps another user to it |
+| Attacker | Any program run in a bowl (a browser's page through its sandbox escape, a game, a Flatpak app) |
+| Reachable | Every desktop with the sound server on: a bowl maps its own user to the machine's root, so SO_PEERCRED says uid 0 |
+
+**What happened.** The sound server's root (`pulse_client_open`, `c->root = uid == 0`, since `b711e3106`) may record the
+monitors (everything that plays) and the loopback microphone, see and kill every program's streams, and set the server's
+defaults and every device's volume. A bowl runs its programs as its user 1000, which its user namespace maps to the
+machine's uid 0 (with none of root's powers in the machine's namespace), and the kernel tells a socket's peer in the
+reader's namespace: uid 0. So every bowl program was root to the sound server. The fix of the loopback's capture in
+`1a3ef5918` ("block non-root loopback capture") held only for a program whose uid on the machine was not 0, which no bowl's
+is. Checked on the box: from the Arch bowl, `parec -d auto_null.monitor` and `parec -d moonwater.loopback` each recorded,
+and `pactl set-default-sink` changed the default.
+
+**The fix.** `audio_peer_uid` (src/audio/service.c): a client whose uid is 0 but whose user namespace
+(`/proc/PID/ns/user`) is not the server's own gets an id of its namespace's instead (`AUDIO_UID_BOWL` with the namespace's
+inode), which is no uid of the machine's and never root. A bowl's programs share it, so they see their own streams, play,
+and record a capture device (a real microphone) as any user does; the monitors, the loopback, other programs' streams and
+the defaults stay root's. A namespace that cannot be read is not root either.
+
+**Tests that fail without the fix.** None in the tree: the identity comes from the kernel. On the box (the sound server of
+the tree in namespaces of its own, the loopback on, the Arch bowl's libpulse): before, both records got their bytes and the
+default sink was set; after, both are `Access denied`, the default sink is refused, and `pacat` still plays a second.
+
+**Related.** The capture engine's rule is the same: a bowl's program shares the screen only through the ScreenCast portal
+and the person's pick in the share app; the rings are reached only through the compositor's /proc, which a bowl's program
+cannot open. Found with it, and not fixed here: a bowl's program can create and replace files in /run/moonwater (it is the
+machine's root to the file system), so the window table's link and the doors there are not the desktop's alone. The capture
+engine follows the table's link only to the compositor of its own user namespace (src/cast/service.c).
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
