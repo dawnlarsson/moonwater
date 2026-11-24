@@ -11,6 +11,7 @@
 
 #ifdef CHECK_enhance
 #include "../../src/lib.util.c"
+#include "../../src/canvas/enhance.c"
 
 #define SHARED_counted
 #include "../checks.c"
@@ -377,6 +378,235 @@ static p8 enhance_lut_hold(p8 identity)
         return holds;
 }
 
+
+/*
+        The enhancer's runtime (src/canvas/enhance.c) on a file of random weights for the architecture it was written
+        for, made here with a fixed seed (the real model is never in this tree): the parser takes it and refuses every
+        changed copy (a byte short or long, the magic, the version, the count, a kind, a layer's channels, a ReLU of 2,
+        a NaN or an infinity among the floats, a misaligned buffer); a fixed picture gives a fixed picture, the same
+        whether one thread runs it or many, and the same bytes on every machine whose multiply-add is fused (SSE2's is
+        a multiply and an add, so its bytes are held within one of them); every side from 1 to 9 and odd ones run.
+*/
+#define ENHANCE_TEST_HASH 0xaa6c03b2e804d671ull
+static p8 *enhance_file;
+static positive enhance_file_size;
+
+static fn enhance_make_file(void)
+{
+        positive size = enhance_file_bytes(enhance_shapes, ENHANCE_SHAPES), at = 16;
+
+        enhance_file_size = size;
+        enhance_file = (p8 *)memory(size + 64);
+        memory_copy(enhance_file, ENHANCE_MAGIC, 8);
+        p32 words[3] = {ENHANCE_VERSION, (p32)ENHANCE_SHAPES, 0};
+
+        memory_copy(enhance_file + 8, words, 8);
+        for (positive n = 0; n < ENHANCE_SHAPES; n++)
+        {
+                const enhance_shape *sh = enhance_shapes + n;
+                p32 head[4] = {sh->kind, sh->shuffle, sh->up, sh->count};
+
+                memory_copy(enhance_file + at, head, 16), at += 16;
+                for (p32 l = 0; l < sh->count; l++, at += 12)
+                        memory_copy(enhance_file + at, sh->layers[l], 12);
+        }
+        enhance_state = 0x2545f4914f6cdd1dull;
+        for (positive n = 0; n < ENHANCE_SHAPES; n++)
+                for (p32 l = 0; l < enhance_shapes[n].count; l++)
+                {
+                        const p32 *ly = enhance_shapes[n].layers[l];
+                        positive count = (ly[2] >= 2 ? 1 : 9) * (positive)ly[0] * ly[1];
+                        float scale = l + 1 == enhance_shapes[n].count ? 0.5f : 1.0f / (float)(3 * ly[0]);
+
+                        for (positive i = 0; i < count + ly[1]; i++, at += 4)
+                        {
+                                float v = enhance_value(false) * (i < count ? scale : 0.05f);
+
+                                memory_copy(enhance_file + at, &v, 4);
+                        }
+                }
+}
+
+static p64 enhance_hash(const p32 *pixels, positive count)
+{
+        p64 h = 0xcbf29ce484222325ull;
+
+        for (positive i = 0; i < count; i++)
+                h = (h ^ pixels[i]) * 0x100000001b3ull;
+        return h;
+}
+
+// A picture with ramps, edges and noise, the same on every machine.
+static fn enhance_test_picture(p32 *pixels, positive w, positive h)
+{
+        p64 st = 0x8a5cd789635d2dffull;
+
+        for (positive y = 0; y < h; y++)
+                for (positive x = 0; x < w; x++)
+                {
+                        st ^= st << 13, st ^= st >> 7, st ^= st << 17;
+                        p32 r = (p32)(x * 255 / w), g = (p32)((y * 255 / h + (x / 8 % 2) * 40) & 255), b = (p32)((st >> 20) & 63) + (x > w / 2 ? 150 : 20);
+
+                        pixels[y * w + x] = 0xff000000u | r << 16 | g << 8 | b;
+                }
+}
+
+static p8 enhance_refuses(positive at, p32 value)
+{
+        enhance_model m;
+        p8 *copy = (p8 *)memory(enhance_file_size + 64);
+        p32 was;
+
+        memory_copy(copy, enhance_file, enhance_file_size);
+        memory_copy(&was, copy + at, 4);
+        memory_copy(copy + at, &value, 4);
+        p8 refused = was == value || !enhance_parse(copy, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m);
+
+        memory_free(copy, enhance_file_size + 64);
+        return refused;
+}
+
+static p8 enhance_runtime_parse(void)
+{
+        enhance_model m;
+        p8 holds = enhance_parse(enhance_file, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m) && m.count == ENHANCE_SHAPES;
+        positive layers0 = 16 + 16;
+
+        holds &= !enhance_parse(enhance_file, enhance_file_size - 1, enhance_shapes, ENHANCE_SHAPES, &m);
+        holds &= !enhance_parse(enhance_file, enhance_file_size + 4, enhance_shapes, ENHANCE_SHAPES, &m);
+        holds &= !enhance_parse(enhance_file + 1, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m);
+        holds &= !enhance_parse(null, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m);
+        holds &= enhance_refuses(0, 0x4e45574du) && enhance_refuses(8, 2) && enhance_refuses(12, 3) && enhance_refuses(16, 9);
+        holds &= enhance_refuses(20, 3) && enhance_refuses(28, 99);
+        holds &= enhance_refuses(layers0, 17) && enhance_refuses(layers0 + 4, 31) && enhance_refuses(layers0 + 8, 2);
+        holds &= enhance_refuses(layers0 + 12, 15);
+        holds &= enhance_refuses(enhance_file_size - 4, 0x7fc00000u) && enhance_refuses(enhance_file_size - 8, 0x7f800000u);
+        holds &= enhance_refuses(enhance_file_size / 2 & ~(positive)3, 0xff800000u);
+        return holds;
+}
+
+#define ENHANCE_TEST_W 517
+#define ENHANCE_TEST_H 301
+static p32 *enhance_fused_picture;
+
+// The fixed picture through the random weights; its bytes kept in into when into is not null.
+static p64 enhance_runtime_hash(positive threads, p32 *into)
+{
+        enhance_model m;
+        positive w = ENHANCE_TEST_W, h = ENHANCE_TEST_H;
+        p32 *src = (p32 *)memory(w * h * 4), *dst = (p32 *)memory(w * h * 4);
+        p64 hash = 0;
+
+        enhance_test_picture(src, w, h);
+        if (enhance_parse(enhance_file, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m) &&
+            enhance_run_net(enhance_find(&m, ENHANCE_RESTORE), dst, w, src, w, w, h, threads))
+                hash = enhance_hash(dst, w * h);
+        if (into)
+                memory_copy(into, dst, w * h * 4);
+        memory_free(src, w * h * 4), memory_free(dst, w * h * 4);
+        return hash;
+}
+
+// Every side from 1 to 9 against every other, and the source left as it was.
+static p8 enhance_runtime_sides(void)
+{
+        enhance_model m;
+        p32 src[100], copy[100], dst[100];
+        p8 holds = enhance_parse(enhance_file, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m);
+        const enhance_net *net = enhance_find(&m, ENHANCE_RESTORE);
+
+        for (positive w = 1; w <= 9 && holds; w++)
+                for (positive h = 1; h <= 9; h++)
+                {
+                        enhance_test_picture(src, w, h);
+                        memory_copy(copy, src, w * h * 4);
+                        holds &= enhance_run_net(net, dst, w, src, w, w, h, 1) && !memory_compare(copy, src, w * h * 4);
+                        for (positive i = 0; i < w * h; i++)
+                                holds &= (dst[i] >> 24) == 0xff;
+                }
+        holds &= !enhance_run_net(net, dst, 1, src, 1, 0, 5, 1) && !enhance_run_net(net, dst, 1, src, 1, 5, 0, 1);
+        holds &= !enhance_run_net(null, dst, 1, src, 1, 1, 1, 1);
+        return holds;
+}
+
+
+/*
+        The grade on the random weights: s 0 leaves a picture as it was and bakes the identity table exactly; at full
+        strength every byte stays within the channel bound, 25 levels, and one more for the interpolation; the same
+        bytes whether one thread grades it or many.
+*/
+static p8 enhance_grade_hold(void)
+{
+        enhance_model m;
+        positive w = 300, h = 211;
+        p32 *src = (p32 *)memory(w * h * 4), *one = (p32 *)memory(w * h * 4), *many = (p32 *)memory(w * h * 4);
+        static p16 lut[4 * ENHANCE_LUT_NODES];
+        f64 params[6] = {0.4, -0.3, 0.2, 0.3, 0.3, -0.2};
+        p8 holds = enhance_parse(enhance_file, enhance_file_size, enhance_shapes, ENHANCE_SHAPES, &m) && enhance_find(&m, ENHANCE_GRADE);
+
+        enhance_bake(params, 0, lut);
+        for (int r = 0; r < 18; r++)
+                for (int g = 0; g < 18; g++)
+                        for (int b = 0; b < 18; b++)
+                        {
+                                const p16 *node = lut + 4 * ((r * 18 + g) * 18 + b);
+
+                                holds &= node[0] == b * 1920 && node[1] == g * 1920 && node[2] == r * 1920;
+                        }
+        enhance_test_picture(src, w, h);
+        memory_copy(one, src, w * h * 4);
+        holds &= enhance_grade(&m, one, w, w, h, 0, 1) && !memory_compare(one, src, w * h * 4);
+        memory_copy(one, src, w * h * 4), memory_copy(many, src, w * h * 4);
+        holds &= enhance_grade(&m, one, w, w, h, 1, 1) && enhance_grade(&m, many, w, w, h, 1, 0) && !memory_compare(one, many, w * h * 4);
+        for (positive i = 0; i < w * h; i++)
+                for (int b = 0; b < 24; b += 8)
+                {
+                        int d = (int)(one[i] >> b & 255) - (int)(src[i] >> b & 255);
+
+                        holds &= d <= 26 && d >= -26;
+                }
+        holds &= !enhance_grade(&m, one, w, 63, h, 1, 1) && !enhance_grade(&m, one, w, w, 63, 1, 1);
+        memory_free(src, w * h * 4), memory_free(one, w * h * 4), memory_free(many, w * h * 4);
+        return holds;
+}
+
+static p64 enhance_fused_hash;
+
+static fn enhance_runtime_tier(string_address tier, p8 fused)
+{
+        p32 *picture = (p32 *)memory(ENHANCE_TEST_W * ENHANCE_TEST_H * 4);
+        p64 one = enhance_runtime_hash(1, picture), many = enhance_runtime_hash(0, null);
+
+        string_format(log, "  %s: the enhancer's fixed picture %p (threads 1) %p (threads all)\n", tier, one, many);
+        check("enhance: a fixed picture through the random weights gives the same bytes on one thread and on all", one == many && one);
+        if (fused)
+        {
+                if (!enhance_fused_hash)
+                        enhance_fused_hash = one;
+                check("enhance: a fixed picture gives the pinned bytes on every machine whose multiply-add is fused",
+                      one == enhance_fused_hash && (!ENHANCE_TEST_HASH || one == ENHANCE_TEST_HASH));
+                if (!enhance_fused_picture)
+                        enhance_fused_picture = picture, picture = null;
+        }
+        else if (enhance_fused_picture)
+        {
+                positive off = 0, far = 0;
+
+                for (positive i = 0; i < ENHANCE_TEST_W * ENHANCE_TEST_H; i++)
+                        for (int b = 0; b < 24; b += 8)
+                        {
+                                int d = (int)(picture[i] >> b & 255) - (int)(enhance_fused_picture[i] >> b & 255);
+
+                                off += d != 0, far += d > 1 || d < -1;
+                        }
+                string_format(log, "  %s: %p of %p bytes one level from the fused machines'\n", tier, off,
+                              (positive)(3 * ENHANCE_TEST_W * ENHANCE_TEST_H));
+                check("enhance: without a fused multiply-add every byte is within one level of the fused machines'", far == 0);
+        }
+        if (picture)
+                memory_free(picture, ENHANCE_TEST_W * ENHANCE_TEST_H * 4);
+}
+
 static fn enhance_tier(string_address tier)
 {
         enhance_faults f = {0, 0, 0, 0};
@@ -395,6 +625,7 @@ static fn enhance_tier(string_address tier)
         check("picture_lut3d_u32: random tables through a stride of all 2^24 colours, alpha kept, counts to 40",
               enhance_lut_hold(false));
         check("picture_lut3d_u32: the identity table gives every colour back", enhance_lut_hold(true));
+        enhance_runtime_tier(tier, !string_equals(tier, (string_address) "sse2"));
 }
 
 b32 main()
@@ -402,6 +633,13 @@ b32 main()
         check("enhance: guard pages", enhance_guard());
         if (!enhance_region[5])
                 return test_report(null);
+        enhance_make_file();
+        check("enhance: the file of the compiled shapes parses; a byte short or long, a misaligned buffer, and every header "
+              "word, channel count, ReLU and float made wrong are refused", enhance_runtime_parse());
+        check("enhance: every side from 1 to 9 runs, keeps the source, gives alpha 0xff; an empty picture is refused",
+              enhance_runtime_sides());
+        check("enhance: the grade at 0 is the identity table and leaves the picture; at full strength within 26 levels, "
+              "the same on one thread and on all; a picture under 64 a side is refused", enhance_grade_hold());
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
 
