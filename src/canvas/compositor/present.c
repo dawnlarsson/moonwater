@@ -963,9 +963,9 @@ static struct compositor_wall_job
 {
         thread *worker;          // the thread making it, or null
         b32 done;                // the thread has made it (written last, with release)
-        unsigned int *pixels;    // what it makes into, as large as the space
+        unsigned int *pixels;    // what it makes into, as large as the space, its rows pitch pixels apart (the width in whole 64-byte lines)
         positive bytes;
-        int width, height, count;
+        int width, height, pitch, count;
         unsigned int accent;
         int screens[COMPOSITOR_WALL_SCREENS][4];
         int dark[COMPOSITOR_WALL_SCREENS]; // each screen's moon: the dark look, or the white
@@ -1006,7 +1006,7 @@ static void compositor_wall_drop(void)
         unsigned long old_bytes = (unsigned long)compositor_wall_bytes;
 
         mem_buf_free(&old, &old_bytes, MEM_BUF_GPU_FORGET);
-        compositor_wall = null, compositor_wall_bytes = 0, compositor_wall_w = compositor_wall_h = 0;
+        compositor_wall = null, compositor_wall_bytes = 0, compositor_wall_w = compositor_wall_h = compositor_wall_pitch = 0;
 }
 
 static void compositor_wall_say(const char *why, int width, int height, positive ms)
@@ -1144,13 +1144,13 @@ static void compositor_wall_make(struct compositor_wall_job *job)
                         continue;
                 if (job->picture[at][0])
                 {
-                        unsigned int *corner = job->pixels + (long)y * job->width + x;
+                        unsigned int *corner = job->pixels + (long)y * job->pitch + x;
 
                         memory_zero(job->squares[at], sizeof(job->squares[at]));
-                        if (job->step || compositor_wall_picture(job->picture[at], corner, job->width, w, h))
+                        if (job->step || compositor_wall_picture(job->picture[at], corner, job->pitch, w, h))
                                 continue;
                 }
-                taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark[at], 1, 45, 1, job->accent,
+                taskbar_wall_draw(job->pixels + (long)y * job->pitch + x, job->pitch, w, h, job->dark[at], 1, 45, 1, job->accent,
                                   job->turn, job->step, job->squares[at < COMPOSITOR_WALL_SCREENS ? at : 0]);
                 job->squares[at][0] += x, job->squares[at][1] += y;
         }
@@ -1180,7 +1180,7 @@ static void compositor_wall_take(void)
         if (job->worker)
                 thread_join(job->worker), job->worker = null;
         compositor_wall_drop();
-        compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height;
+        compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height, compositor_wall_pitch = job->pitch;
         memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
         job->pixels = null, job->done = 0, compositor_wall_turn = job->turn;
         if (job->step)
@@ -1244,7 +1244,8 @@ static void compositor_wall_start(b64 turn, int step)
         void *p = 0;
         unsigned long cap = 0;
 
-        job->bytes = (positive)compositor.width * (positive)compositor.height * 4;
+        job->pitch = (compositor.width + 15) & ~15;
+        job->bytes = (positive)job->pitch * (positive)compositor.height * 4;
         if (!mem_buf_grow(&p, &cap, (unsigned long)job->bytes, 0))
         {
                 if (!step)

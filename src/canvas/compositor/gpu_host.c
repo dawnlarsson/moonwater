@@ -94,10 +94,66 @@ static void compositor_gpu_requirements(void)
 
 // A refusal of the card: the reason is counted, and said when it is first or due. A present the card is refused is the processor's (processor 1);
 // a turned screen the card did not turn is a refusal of its own (processor 0: the present was the card's).
+// What the card's set refused a scene for (gpu.c's gpu_scene_refused: a record's kind, a picture's pitch, the place, the bins' room, the pictures'
+// count, a picture's place), said in the log the first time each is seen, 24 of them at most: a desktop's refusals are a few causes met again and
+// again, and each is a thing to mend.
+static void compositor_gpu_set_refusal_say(void)
+{
+        static unsigned int said[24], count;
+        unsigned int key = gpu_scene_refused.why << 28 | (gpu_scene_refused.kind & 0xfffu) << 16 | (gpu_scene_refused.pitch & 0xffffu);
+
+        if (!gpu_scene_refused.why || count == sizeof(said) / sizeof(said[0]))
+                return;
+        for (unsigned int i = 0; i < count; i++)
+                if (said[i] == key)
+                        return;
+        said[count++] = key;
+        string_format(log, "compositor: the card's set refused a scene for %s (record kind %p, pitch %p)\n",
+                      gpu_scene_refused.why == GPU_SCENE_NOT_KIND ? (string_address) "a record's kind" : gpu_scene_refused.why == GPU_SCENE_NOT_PITCH ? (string_address) "a picture's pitch"
+                      : gpu_scene_refused.why == GPU_SCENE_NOT_PLACE ? (string_address) "the place it draws to" : gpu_scene_refused.why == GPU_SCENE_NOT_ROOM ? (string_address) "the room of its lists"
+                      : gpu_scene_refused.why == GPU_SCENE_NOT_PICTURES ? (string_address) "more pictures than it has entries" : (string_address) "a picture's place",
+                      (positive)gpu_scene_refused.kind, (positive)gpu_scene_refused.pitch);
+        log_flush();
+}
+
+// Which of the refusals counted as "other frames, or empty damage" the present's was (moonwater debug has one word for them all), said in the log
+// (the first of each, then every fourth as many): the frame before given up for a refused job, a record the card's set does not draw, more jobs
+// than a present has, a job the set refused as it was made, more frames than the rows have, a chip of no size.
+enum
+{
+        COMPOSITOR_OTHER_NONE,
+        COMPOSITOR_OTHER_AGAIN,
+        COMPOSITOR_OTHER_SET,
+        COMPOSITOR_OTHER_STEPS,
+        COMPOSITOR_OTHER_JOB,
+        COMPOSITOR_OTHER_FRAMES,
+        COMPOSITOR_OTHER_CHIP,
+        COMPOSITOR_OTHER_COUNT
+};
+static unsigned int compositor_gpu_other, compositor_gpu_others[COMPOSITOR_OTHER_COUNT];
+
+static void compositor_gpu_other_say(void)
+{
+        static const string_address words[COMPOSITOR_OTHER_COUNT] = {
+                "a cause not named", "the frame before was given up for a job the card refused", "a record the card's set does not draw",
+                "more jobs than a present has", "a job the card's set refused as it was made", "more frames than the rows have", "a chip of no size"};
+        unsigned int which = compositor_gpu_other < COMPOSITOR_OTHER_COUNT ? compositor_gpu_other : 0, n = ++compositor_gpu_others[which];
+
+        // (the first, the fourth, the sixteenth: a cause met every present is a line every few doublings, not one a present)
+        if ((n & (n - 1)) || (n & 0xaaaaaaaau))
+                return;
+        string_format(log, "compositor: a present refused as other frames was: %s (%p so far)\n", words[which], (positive)n);
+        log_flush();
+}
+
 static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
 {
         unsigned int n = ++compositor_gpu_counts.why[why];
         b64 now = 0;
+
+        compositor_gpu_set_refusal_say();
+        if (why == COMPOSITOR_GPU_WHY_OTHER)
+                compositor_gpu_other_say();
 
         compositor_gpu_refuse_gen++;
         compositor_gpu_counts.processor += (unsigned int)processor;
@@ -383,7 +439,7 @@ static void compositor_gpu_start_hung(void)
 static enum compositor_gpu_why compositor_gpu_job_why(void)
 {
         if (gpu_end == GPU_END_NONE && gpu_last_error == 95)
-                return COMPOSITOR_GPU_WHY_OTHER;
+                return compositor_gpu_other = COMPOSITOR_OTHER_JOB, COMPOSITOR_GPU_WHY_OTHER;
         return gpu_end == GPU_END_LATE ? COMPOSITOR_GPU_WHY_BUSY : gpu_end == GPU_END_OVERFLOW ? COMPOSITOR_GPU_WHY_POOL : COMPOSITOR_GPU_WHY_HANG;
 }
 
@@ -497,6 +553,8 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
                 return 1;
         if (f->tiled_kind) // a client's tiled/DCC dma-buf sampled via image_load in scene: already imported to the card
                 return 1;
+        if (compositor_gpu_copied(f)) // read by the processor into a tile the card reads: no map of it
+                return 1;
         if (f->gpu_base) // a client's dma-buf, imported to the card (compositor_wl_lend): its address is there already
                 return 1;
         if (f->pitch >= 1ull << 29)
@@ -592,7 +650,7 @@ static b32 compositor_gpu_spots(void)
                 unsigned long cells;
 
                 if (c->w <= 0 || c->h <= 0 || c->w > 16384 || c->h > 16384)
-                        return g->why = COMPOSITOR_GPU_WHY_OTHER, false;
+                        return compositor_gpu_other = COMPOSITOR_OTHER_CHIP, g->why = COMPOSITOR_GPU_WHY_OTHER, false;
                 cells = (unsigned long)c->w * (unsigned long)c->h;
 
                 compositor_chip_place(box);
@@ -666,13 +724,20 @@ static struct
 typedef char compositor_card_steps_fit[COMPOSITOR_GPU_SCALED + COMPOSITOR_DAMAGE <= COMPOSITOR_CARD_STEPS ? 1 : -1];
 static b32 compositor_card_add(const struct compositor_card_step *step); // the present's jobs (below)
 
+// A scaled picture's pitch in the pool, in pixels: whole 4-pixel groups, and whole 64-byte lines for a card that finds a picture's row only on a
+// line (i915: gpu_i915_scene_batch refuses another pitch, and the pool's pictures at their own width were refused with every frame of a landing).
+static inline unsigned int compositor_gpu_scaled_pitch(int width)
+{
+        return gpu_backend == &gpu_i915_row ? ((unsigned int)width + 15u) & ~15u : ((unsigned int)width + 3u) & ~3u;
+}
+
 // A frame of the present that is scaled and meets the damage, so the card makes its picture: 1; 0 for one that is not; -1 for one the card cannot make.
 static int compositor_gpu_scale_wanted(const struct compositor_frame *f, const int dmg[4])
 {
         if (f->builtin || !f->pixels || !compositor_scaled(f) || (dmg && !compositor_frame_meets(f, dmg)))
                 return 0;
         if (f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 || f->source_w > 16384 ||
-            f->source_h > 16384 || f->pitch < (unsigned long)f->source_w || 4ull * (positive)((f->width + 3) & ~3) * (positive)f->height > COMPOSITOR_GPU_SCALED_MOST)
+            f->source_h > 16384 || f->pitch < (unsigned long)f->source_w || 4ull * (positive)compositor_gpu_scaled_pitch(f->width) * (positive)f->height > COMPOSITOR_GPU_SCALED_MOST)
                 return -1;
         return 1;
 }
@@ -723,7 +788,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
         positive need = 0, tabled = 0, at = 0, dst_base;
 
         if (count > COMPOSITOR_FRAMES_FOR(compositor_rows_in_use))
-                return COMPOSITOR_GPU_WHY_OTHER;
+                return compositor_gpu_other = COMPOSITOR_OTHER_FRAMES, COMPOSITOR_GPU_WHY_OTHER;
         // The room first: every picture to make and its tables, so the pool is grown once, before any frame names it.
         for (unsigned int k = first; k < count; k++)
         {
@@ -734,7 +799,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         continue;
                 if (wanted < 0 || used == COMPOSITOR_GPU_SCALED)
                         return COMPOSITOR_GPU_WHY_SCALED;
-                need += (4ull * (positive)((f->width + 3) & ~3) * (positive)f->height + 255) & ~255ull;
+                need += (4ull * (positive)compositor_gpu_scaled_pitch(f->width) * (positive)f->height + 255) & ~255ull;
                 tabled += (4ull * (positive)(f->width + f->height) + 255) & ~255ull;
                 used++;
         }
@@ -755,15 +820,33 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 positive tables_at = COMPOSITOR_GPU_BINS_AT + tabled, bytes, src_va, dst_va = dst_base + at;
                 unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + tables_at);
                 unsigned int dp;
+                // i915's scale kernel is a thread and eight messages for four pixels: a landing window's picture (1200 by 800 made 1000 by 667) took it
+                // 8.4 ms on a Haswell and an Ivy Bridge and 2.7 ms on an Alder Lake, where the processor's rows (memory_resample_u32_rect, the same
+                // pixels) took 0.9, 0.5 and 0.5 ms (CHECK_gpu_scene's scale rows). There the processor makes the picture, and the card composes with it.
+                b32 by_rows = gpu_backend == &gpu_i915_row && !f->tiled_kind;
 
                 if (compositor_gpu_scale_wanted(f, dmg) <= 0)
                         continue;
-                dp = ((unsigned int)f->width + 3u) & ~3u;
+                dp = compositor_gpu_scaled_pitch(f->width);
                 bytes = 4ull * (positive)dp * (positive)f->height;
                 source = *f;
                 source.width = f->source_w, source.height = f->source_h, source.source_w = source.source_h = 0;
-                if (!compositor_gpu_picture(&source) || !(src_va = compositor_gpu_va(&source)))
+                src_va = 0;
+                if (!by_rows && (!compositor_gpu_picture(&source) || !(src_va = compositor_gpu_va(&source))))
                         return COMPOSITOR_GPU_WHY_PICTURE;
+                if (by_rows)
+                {
+                        // The part of it the damage meets, which is all the scene's jobs read (they draw whole patches inside the damage's box).
+                        int x1 = dmg && f->x < dmg[0] ? dmg[0] : f->x, y1 = dmg && f->y < dmg[1] ? dmg[1] : f->y;
+                        int x2 = dmg && f->x + f->width > dmg[2] ? dmg[2] : f->x + f->width, y2 = dmg && f->y + f->height > dmg[3] ? dmg[3] : f->y + f->height;
+
+                        if (x2 > x1 && y2 > y1)
+                                memory_resample_u32_rect(compositor_gpu_scaled_pool.memory + at / 4 + (unsigned long)(y1 - f->y) * dp + (unsigned long)(x1 - f->x), dp,
+                                                         (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), f->pixels, f->pitch, (unsigned long)f->source_w,
+                                                         (unsigned long)f->source_h, (unsigned long)f->width, (unsigned long)f->height, (unsigned long)(x1 - f->x),
+                                                         (unsigned long)(y1 - f->y));
+                }
+                else
                 {
                         positive step_x = ((positive)f->source_w << 24) / (positive)f->width, fx = ((positive)f->source_w << 23) / (positive)f->width;
                         positive step_y = ((positive)f->source_h << 24) / (positive)f->height, fy = ((positive)f->source_h << 23) / (positive)f->height;
@@ -775,7 +858,9 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 }
                 // A client's tiled or DCC picture is scaled in place with its descriptor (gpu_image_scaled, C2 op 8's scale bit), gated on
                 // gpu_scaled_ready: the processor cannot read a tiled picture either, so a card without it refuses the frame.
-                if (f->tiled_kind)
+                if (by_rows)
+                        ;
+                else if (f->tiled_kind)
                 {
                         if (!gpu_scaled_ready() || !gpu_image_scaled(f->tiled_desc, f->tiled_kind, GPU_VA + tables_at, 0, 0, dst_va, dp,
                                                                      (unsigned int)f->width, (unsigned int)f->height))
@@ -904,6 +989,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         b32 any_nonempty = false;
         positive out;
 
+        compositor_gpu_other = COMPOSITOR_OTHER_NONE;
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
         // A job the card was late with (gpu.c's gpu_run_job: not done in a tick) has come to a bad end, or is two seconds old: the card is hung as one that did
@@ -933,7 +1019,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         // without end, and nothing reached the screen (i915 draws the taskbar's rows as a job of their own: with a picture there it refuses, the moon's
         // glow, the pointer over the taskbar did not move until something else drew).
         if (compositor_card.again_processor)
-                return compositor_card.again_processor = 0, COMPOSITOR_GPU_WHY_OTHER;
+                return compositor_card.again_processor = 0, compositor_gpu_other = COMPOSITOR_OTHER_AGAIN, COMPOSITOR_GPU_WHY_OTHER;
         // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
         // maps of the pictures and let none go, and once all were held the GPU drew nothing again.
         gpu_trim();
@@ -1053,7 +1139,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         {
                 if (!gpu.pending)
                         gpu_handed_clear();
-                return COMPOSITOR_GPU_WHY_OTHER;
+                return compositor_gpu_other = COMPOSITOR_OTHER_SET, COMPOSITOR_GPU_WHY_OTHER;
         }
         if (compositor_card.nowait && compositor_card.looped && !gpu_needs_shadow_output())
         {
@@ -1078,7 +1164,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                         {
                                                 if (!gpu.pending)
                                                         gpu_handed_clear();
-                                                return COMPOSITOR_GPU_WHY_OTHER;
+                                                return compositor_gpu_other = COMPOSITOR_OTHER_STEPS, COMPOSITOR_GPU_WHY_OTHER;
                                         }
                                         sx0 = sx1;
                                 }
@@ -1091,9 +1177,10 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 if (compositor_card_go() < 0)
                 {
                         compositor_gpu_fail(0);
-                        // Refused before a job of it ran (or after a recovery cleared gpu.pending): the processor draws the present.
+                        // Refused before a job of it ran (or after a recovery cleared gpu.pending): the processor draws the present, and no frame
+                        // was given up, so the next present is the card's to try (again_processor is for a frame given up, drawn again).
                         if (!compositor_card.submitted || !gpu.pending)
-                                return compositor_gpu_job_why();
+                                return compositor_card.again_processor = 0, compositor_gpu_job_why();
                         compositor_card.failed = 1;
                 }
                 compositor_card.on = 1;

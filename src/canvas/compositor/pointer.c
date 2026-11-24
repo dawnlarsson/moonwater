@@ -1077,7 +1077,7 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
                         // (the tile's rows on whole 64-byte lines, as the card reads a picture: compositor_gpu_i915_tile_pitch)
                         unsigned int tp = compositor_gpu_i915_tile_pitch(pw);
                         positive tile_va = 0;
-                        unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)tp * (unsigned long)ph, &tile_va);
+                        unsigned int *tile = compositor_gpu_i915_tile_alloc(tp, (unsigned long)ph, &tile_va);
 
                         if (!tile)
                                 return compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL, false;
@@ -1112,7 +1112,9 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
                 at[1] = span > 255 || !made ? 0 : compositor_gpu_slot_tag(span, count, 5, 1, 0, (unsigned int)(span * span), &table[1]);
                 if (!at[0] || !at[1])
                 {
+                        // (the one table put is taken back: its place is another table's next, so no tile kept of a cover there is that cover's)
                         compositor_gscene.kept = kept, compositor_gscene.tables_used = used;
+                        compositor_gpu_i915_tiles.static_used = 0, compositor_gpu_i915_tiles.static_count = 0;
                         compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
                         return false;
                 }

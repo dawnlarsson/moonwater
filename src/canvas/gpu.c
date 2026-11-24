@@ -3226,6 +3226,21 @@ static void gpu_i915_reloc_note(p8 address_to at, positive base)
         }
 }
 
+// Whether base is inside an import that floats (gpu_i915_reloc_note: Gen7 and Gen7.5's, listed unpinned, its place the kernel's to move).
+static b32 gpu_i915_floats(positive base)
+{
+        if (!gpu_i915.bound || gpu_backend != &gpu_i915_row || gpu.family >= 800)
+                return false;
+        for (unsigned int i = 0; i < gpu.imports; i++)
+        {
+                unsigned int h = gpu.imported[i];
+
+                if (h < GPU_I915_HANDLES && gpu_i915.bound[h].floating && base >= gpu_i915.bound[h].va && base - gpu_i915.bound[h].va < gpu_i915.bound[h].bytes)
+                        return true;
+        }
+        return false;
+}
+
 // A RENDER_SURFACE_STATE of a byte surface (R8_UNORM, 2D, the render cache read and written, the 4-row halign and valign of IGT's gen9 fill,
 // generation-appropriate MOCS, the channels R4 G5 B6 A7) at state offset at: its width and rows in bytes and rows (each minus one: fields 13:0 and 29:16), its pitch
 // in bytes (minus one, 17:0), and its base the card's address of its first byte.
@@ -3430,6 +3445,16 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
         }
 }
 
+// What the set last refused a scene for, kept for the compositor's log (a machine nobody sits at says it): why (GPU_SCENE_NOT_*), the record's
+// kind and a picture's pitch where it was a record, and how many scenes were refused for each.
+enum { GPU_SCENE_NOT_KIND = 1, GPU_SCENE_NOT_PITCH, GPU_SCENE_NOT_PLACE, GPU_SCENE_NOT_ROOM, GPU_SCENE_NOT_PICTURES, GPU_SCENE_NOT_PICTURE, GPU_SCENE_NOT_WHYS };
+static struct { unsigned int why, kind, pitch, counts[GPU_SCENE_NOT_WHYS]; } gpu_scene_refused;
+static unsigned int gpu_scene_not(unsigned int why, unsigned int kind, unsigned int pitch)
+{
+        gpu_scene_refused.why = why, gpu_scene_refused.kind = kind, gpu_scene_refused.pitch = pitch, gpu_scene_refused.counts[why]++;
+        return 0;
+}
+
 /*
         The Intel scene (op 6, the kernel gpu_i915_scene: fill 0, tone over 1, image copy 4 and premultiplied image over 11, the images with an
         optional 0x80 R/B swap, drawn in order over the damage, a thread a strip of eight 8 by 8 tiles). The damage is the patch the arguments name
@@ -3468,6 +3493,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         const struct gpu_args address_to a = gpu_i915_args(job, room);
         unsigned int damage[4], images = 0, sbase, cw, ch, cells, span, address_to cell;
         positive base, pack_va, pack_room, heads, more = 0;
+        struct { positive base; unsigned int pitch, width, rows; b32 floats; } entry[GPU_I915_SCENE_IMAGES]; // the images' surfaces, made after the lists
         p8 address_to state, address_to pack;
         const unsigned int address_to rec;
         b32 any = false;
@@ -3475,26 +3501,26 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         if (!a || !a->count || a->ops < GPU_VA || (a->ops & 63) || !a->sp || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA ||
             a->g < GPU_VA || (a->g & 63))
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0, 0);
         // The records, and the room of the bins the lists are laid in, are read and written through the CPU mapping: they must lie inside it.
         pack_va = a->g, pack_room = a->room;
         if (a->ops - GPU_VA > gpu.size || 32ull * a->count > gpu.size - (a->ops - GPU_VA) || pack_va - GPU_VA > gpu.size ||
             pack_room > gpu.size - (pack_va - GPU_VA))
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0, 0);
         damage[0] = a->x0 << 6, damage[1] = a->y0 << 2;
         damage[2] = (positive)damage[0] + (positive)a->w < a->sp ? damage[0] + a->w : a->sp;
         damage[3] = (positive)damage[1] + 4 * (positive)a->rows < a->gp ? damage[1] + 4 * a->rows : a->gp; // in 64 bits: 4 * a->rows wraps at 2^30 rows
         if (damage[0] >= damage[2] || damage[1] >= damage[3] || (damage[2] - damage[0]) > 4096u)
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0, 0);
         span = (damage[2] - damage[0] + 7) & ~7u;
         if ((positive)damage[0] + span > a->dp)
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0, 0);
         base = a->d + 4 * ((positive)damage[1] * a->dp + damage[0]);
         if (base & 31)
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_PLACE, 0, 0);
         cw = (damage[2] - damage[0] + 63) >> 6, ch = (damage[3] - damage[1] + 63) >> 6, cells = cw * ch, heads = 512ull * cells;
         if (heads + 512 > pack_room)
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_ROOM, 0, 0);
         // The cells' counts, four words a cell: its list's length, the first record listed, its first row in the long lists (all ones: its
         // rows are the cell's own eight), and the rows put so far.
         {
@@ -3504,7 +3530,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                 if (need > gpu_bin_room && gpu_buf_grow(&stage, &gpu_bin_room, need < 65536 ? 65536 : need, 0))
                         gpu_bin_stage = (unsigned int *)stage;
                 if (!gpu_bin_stage || need > gpu_bin_room)
-                        return 0;
+                        return gpu_scene_not(GPU_SCENE_NOT_ROOM, 0, 0);
                 cell = gpu_bin_stage, memory_zero(cell, need);
         }
         rec = (const unsigned int address_to)((p8 address_to)job->state_at + ((long)a->ops - (long)job->state));
@@ -3517,7 +3543,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                 memory_copy(r, rec + 8 * i, 32);
                 k = r[0] & ~0x80u;
                 if (r[0] > 1u && k != 4u && k != 11u)
-                        return 0;
+                        return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0);
                 if (!gpu_i915_scene_clip(r, damage, c))
                         continue;
                 for (unsigned int ty = (unsigned int)(c[1] - damage[1]) >> 6, ty1 = (unsigned int)(c[3] - 1 - damage[1]) >> 6; ty <= ty1; ty++)
@@ -3537,7 +3563,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         for (unsigned int n = 0; n < cells; n++)
         {
                 if (cell[4 * n] > 65535u)
-                        return 0;
+                        return gpu_scene_not(GPU_SCENE_NOT_ROOM, 0, 0);
                 cell[4 * n + 2] = ~0u;
                 if (cell[4 * n] > 8u)
                         cell[4 * n + 2] = (unsigned int)more, more += cell[4 * n];
@@ -3547,7 +3573,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                         any = true;
         }
         if (more > 16384u - 8u || 64ull * (more + 8) > pack_room - heads)
-                return 0;
+                return gpu_scene_not(GPU_SCENE_NOT_ROOM, 0, 0);
         if (!any)
         {
                 words[0] = 0x05000000u, words[1] = 0u;
@@ -3579,24 +3605,59 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                                                 // record's part of the damage, its rows, at the picture's own pitch (r[7] pixels).
                                                 positive va = (positive)r[5] | ((positive)r[6] << 32), at, line;
                                                 unsigned int rp = r[7], xo, width, rows = (unsigned int)(c[3] - c[1]);
-                                                p8 address_to surface;
 
                                                 // The card finds a row of a surface at its pitch times the row, rounded down: to a 64-byte line by
                                                 // the sampler cache's port (a row that begins elsewhere in a line is read up to 15 pixels off: a
                                                 // window 1324 wide drew sheared, a sawtooth, on a Haswell), to 8 bytes by the render cache's. So a
                                                 // picture whose pitch is not whole 64-byte lines (a window as wide as it likes) is not read as it
                                                 // is: the processor draws the scene.
-                                                if (!rp || rp > 65535u || (rp & 15) || va < GPU_VA || (va & 3) || images == GPU_I915_SCENE_IMAGES ||
-                                                    64ull * (images + 1) > pack_room - heads - 64ull * (more + 8))
-                                                        return 0;
+                                                if (!rp || rp > 65535u || (rp & 15))
+                                                        return gpu_scene_not(GPU_SCENE_NOT_PITCH, r[0], rp);
+                                                if (va < GPU_VA || (va & 3))
+                                                        return gpu_scene_not(GPU_SCENE_NOT_PICTURE, r[0], rp);
                                                 at = va + 4ull * ((positive)(c[1] - (int)r[2]) * rp + (positive)(c[0] - (int)r[1])), line = at & ~63ull;
                                                 xo = (unsigned int)(at & 63), width = xo + 4u * (unsigned int)(c[2] - c[0]);
                                                 if (at < va || line < GPU_VA || line > GPU_VA_END || width > 16384u || rows > 16384u)
-                                                        return 0;
-                                                surface = pack + pack_room - 64ull * (images + 1);
-                                                memory_zero(surface, 64);
-                                                gpu_i915_surface(surface, 0, line, width, rows, 4u * rp);
-                                                r[5] = xo - 4u * (unsigned int)c[0], r[6] = 0u - (unsigned int)c[1], r[7] = 3u + images++;
+                                                        return gpu_scene_not(GPU_SCENE_NOT_PICTURE, r[0], rp);
+                                                // A picture is read through an entry already made when one of its pitch holds it: its first pixel is
+                                                // then some rows and bytes into that surface (the record's biases say them), its row inside one of
+                                                // the surface's, and the surface is made to reach it. So the tiles of one pitch (a corner's two, a
+                                                // close button's, the pointer's: a record each, ten a window) and the strips of one picture are an
+                                                // entry, not one a record, and the 237 entries are that many pictures apart, not that many records.
+                                                // A picture inside an import whose place the kernel may move (Gen7's floating ones: the base word is
+                                                // relocated) keeps an entry of its own.
+                                                {
+                                                        b32 floats = gpu_i915_floats(at);
+                                                        unsigned int j = images, row0 = 0, col0 = 0, bytes = 4u * (unsigned int)(c[2] - c[0]);
+
+                                                        for (j = floats ? images : 0; j < images; j++)
+                                                        {
+                                                                positive delta;
+
+                                                                if (entry[j].pitch != 4u * rp || entry[j].floats || at < entry[j].base)
+                                                                        continue;
+                                                                delta = at - entry[j].base;
+                                                                if (delta / (4u * rp) >= 16384u)
+                                                                        continue;
+                                                                row0 = (unsigned int)(delta / (4u * rp)), col0 = (unsigned int)(delta % (4u * rp));
+                                                                if (row0 + rows <= 16384u && col0 + bytes <= 4u * rp && col0 + bytes <= 16384u)
+                                                                        break;
+                                                        }
+                                                        if (j < images)
+                                                        {
+                                                                entry[j].width = entry[j].width > col0 + bytes ? entry[j].width : col0 + bytes;
+                                                                entry[j].rows = entry[j].rows > row0 + rows ? entry[j].rows : row0 + rows;
+                                                                r[5] = col0 - 4u * (unsigned int)c[0], r[6] = row0 - (unsigned int)c[1], r[7] = 3u + j;
+                                                        }
+                                                        else
+                                                        {
+                                                                if (images == GPU_I915_SCENE_IMAGES || 64ull * (images + 1) > pack_room - heads - 64ull * (more + 8))
+                                                                        return gpu_scene_not(GPU_SCENE_NOT_PICTURES, r[0], rp);
+                                                                entry[images].base = line, entry[images].pitch = 4u * rp, entry[images].width = width, entry[images].rows = rows;
+                                                                entry[images].floats = floats;
+                                                                r[5] = xo - 4u * (unsigned int)c[0], r[6] = 0u - (unsigned int)c[1], r[7] = 3u + images++;
+                                                        }
+                                                }
                                         }
                                         r[1] = (unsigned int)c[0], r[2] = (unsigned int)c[1], r[3] = (unsigned int)c[2], r[4] = (unsigned int)c[3];
                                 }
@@ -3628,7 +3689,13 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         gpu_i915_put(state, GPU_I915_SCENE_TABLE, sbase + 64), gpu_i915_put(state, GPU_I915_SCENE_TABLE + 4, sbase + 256);
         gpu_i915_put(state, GPU_I915_SCENE_TABLE + 8, sbase + 320);
         for (unsigned int j = 0; j < images; j++)
+        {
+                p8 address_to surface = pack + pack_room - 64ull * (j + 1);
+
+                memory_zero(surface, 64);
+                gpu_i915_surface(surface, 0, entry[j].base, entry[j].width, entry[j].rows, entry[j].pitch);
                 gpu_i915_put(state, GPU_I915_SCENE_TABLE + 12 + 4 * j, (unsigned int)(pack_va - GPU_VA + pack_room - 64ull * (j + 1)));
+        }
         gpu_i915_surface(state, 64, base, 4u * span, damage[3] - damage[1], 4u * a->dp);
         gpu_i915_surface(state, 256, pack_va, 64u * cw, 8u * ch, 64u * cw);
         gpu_i915_surface(state, 320, pack_va + heads, 64, (unsigned int)more + 8u, 64);
@@ -3654,8 +3721,10 @@ static b32 gpu_scene_takes(const unsigned int address_to ops, unsigned int n)
 
                 memory_copy(r, ops + 8 * i, 32);
                 k = r[0] & ~0x80u;
-                if ((r[0] > 1u && k != 4u && k != 11u) || ((k == 4u || k == 11u) && (!r[7] || r[7] > 65535u || (r[7] & 15u))))
-                        return false;
+                if (r[0] > 1u && k != 4u && k != 11u)
+                        return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0) != 0;
+                if ((k == 4u || k == 11u) && (!r[7] || r[7] > 65535u || (r[7] & 15u)))
+                        return gpu_scene_not(GPU_SCENE_NOT_PITCH, r[0], r[7]) != 0;
         }
         return true;
 }

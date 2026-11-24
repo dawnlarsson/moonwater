@@ -866,7 +866,9 @@ static void gs_apply(unsigned int address_to want, const unsigned int q[8], cons
                 }
 }
 
-// n random records for a picture w by h: every kind, a seventh of them large, some off the edges, some empty; at most 200 pictures among them.
+// n random records for a picture w by h: every kind, a seventh of them large, some off the edges, some empty. Two thirds of the pictures are parts
+// of the atlas at its pitch, as many as there are (a set that reads a picture through a surface reads those of one pitch through a few); at most
+// 150 are of a pitch of their own (i915's scene has 237 surfaces for pictures).
 static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int w, unsigned int h)
 {
         static const unsigned int kinds[6] = {0, 1, 4, 11, 4 | 0x80, 11 | 0x80};
@@ -878,8 +880,6 @@ static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int
                 unsigned int rw = 1 + gs_random() % (large ? w : 96), rh = 1 + gs_random() % (large ? h : 64);
                 int x0 = (int)(gs_random() % (w + 40)) - 20, y0 = (int)(gs_random() % (h + 40)) - 20;
 
-                if (kind > 1 && pictures >= 200)
-                        kind = k & 1;
                 if (k % 13 == 5)
                         rw = 0;
                 q[0] = kind, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)(x0 + (int)rw), q[4] = (unsigned int)(y0 + (int)rh);
@@ -891,15 +891,15 @@ static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int
                         unsigned int pitch = GS_PITCH, rows;
                         positive va;
 
-                        if (gs_random() % 3 == 0)
+                        if (gs_random() % 3 == 0 && pictures < 150)
                         {
-                                pitch = rw + gs_random() % (GS_PITCH - rw);
+                                pitch = 1 + rw + gs_random() % (GS_PITCH - rw), pictures++; // (1 to GS_PITCH: an empty record's is not 0, which the rows below divide by)
                                 if (gpu_set->batch)
                                         pitch = (pitch + 15) & ~15u;
                         }
                         rows = (unsigned int)((positive)GS_PITCH * GS_ROWS / pitch);
                         va = GPU_VA + gs_src_at + 4ull * ((positive)(gs_random() % (rows - rh)) * pitch + gs_random() % (pitch - rw + 1));
-                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = pitch, pictures++;
+                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = pitch;
                 }
         }
 }
@@ -1157,6 +1157,112 @@ b32 main(void)
                                         bad += dst[k] != gs_want[k];
                                 check("gpu scene: and nothing of the picture was drawn", !bad);
                         }
+        }
+        // 6. Tiles, as a desktop's pieces are (a window's round corners, its close button, the pointer: small pictures of a few pitches, a record
+        // each, laid over and copied): 1500 of them of eight pitches, each tile at a whole number of its pitch from the atlas's start as the
+        // compositor's pool puts them, in an order that is not the atlas's, over a fill; the whole picture and a part. Far more pictures than a
+        // set has surfaces for (i915's 237): one that reads the tiles of a pitch through a surface draws them all.
+        for (unsigned int part = 0; part < 2 && !gs_quick; part++)
+        {
+                enum { TILES = 1500 };
+                static const unsigned int pitches[8] = {16, 32, 48, 64, 96, 128, 256, 272};
+                const positive half = 4ull * GS_PITCH * (GS_ROWS / 2);
+                unsigned int damage[2][4] = {{0, 0, 1920, 1080}, {333, 211, 1501, 905}};
+                positive at = 0;
+
+                ops[0] = 0, ops[1] = ops[2] = 0, ops[3] = 1920, ops[4] = 1080, ops[5] = 0xff102030u, ops[6] = ops[7] = 0;
+                for (unsigned int k = 1; k <= TILES; k++)
+                {
+                        unsigned int address_to q = ops + 8 * k, pitch = pitches[gs_random() % 8], tw = pitch - gs_random() % 16, th = 1 + gs_random() % 40;
+                        positive line = 4ull * pitch, va;
+                        int x0 = (int)(gs_random() % 1940) - 10, y0 = (int)(gs_random() % 1100) - 10;
+
+                        at = (at + line - 1) / line * line;
+                        if (at + line * th > half) // the half is full: from its start again (a picture is only read, and two records may read one)
+                                at = 0;
+                        // (every third tile from the atlas's other half, so the tiles of a pitch are not met in the order they lie in)
+                        va = GPU_VA + gs_src_at + (k % 3 ? at : at + half);
+                        q[0] = k & 1 ? 11 : 4, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)(x0 + (int)tw), q[4] = (unsigned int)(y0 + (int)th);
+                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = pitch;
+                        at += line * th;
+                }
+                gs_scene_row(part ? "tiles, part" : "tiles", 1920, 1080, TILES + 1, damage[part]);
+        }
+        // 7. A picture whose rows are as wide as its pitch and begin half way into a 64-byte line (32 bytes in): its row then ends in the next
+        // row of the surface the card reads it through. Every set must draw it or refuse it; none may draw it wrong.
+        if (!gs_quick)
+        {
+                unsigned int whole[4] = {0, 0, 1000, 701};
+                unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at);
+
+                for (unsigned int kind = 4; kind <= 11; kind += 7)
+                {
+                        positive va = GPU_VA + gs_src_at + 4ull * (5 * 912 + 8), bad = 0;
+                        b32 drawn;
+
+                        ops[0] = 0, ops[1] = ops[2] = 0, ops[3] = 1000, ops[4] = 701, ops[5] = 0xff203040u, ops[6] = ops[7] = 0;
+                        ops[8] = kind, ops[9] = 40, ops[10] = 20, ops[11] = 40 + 912, ops[12] = 620, ops[13] = (unsigned int)va, ops[14] = (unsigned int)(va >> 32), ops[15] = 912;
+                        for (positive k = 0; k < (positive)GS_PITCH * 701; k++)
+                                dst[k] = gs_want[k] = gs_random();
+                        gpu_patient = 1, drawn = gpu_scene(gs_ops_at, 2, gs_bins_at, gs_dst_at, GS_PITCH, 1000, 701, 0, 0, 1000, 701), gpu_patient = 0;
+                        if (drawn)
+                        {
+                                gs_apply(gs_want, ops, whole), gs_apply(gs_want, ops + 8, whole);
+                        }
+                        for (positive k = 0; k < (positive)GS_PITCH * 701; k++)
+                                bad += dst[k] != gs_want[k];
+                        string_format(log, "  gpu scene full rows off a line, kind %p: %s, %p pixels wrong\n", (positive)kind, drawn ? (string_address) "drawn" : (string_address) "refused", bad);
+                        check("gpu scene: a picture of full rows that begin inside a 64-byte line is drawn right or not at all", !bad && (drawn || gpu_idle()));
+                }
+        }
+        // 8. The scale (op 7, a window landing's picture made at its drawn size: nearest, the source pixel under each target pixel's centre) against
+        // the processor's memory_resample_u32_rect, whose pixels it must be: the card's time and the processor's, a landing window's size and others.
+        {
+                static const unsigned int cases[][4] = {{1200, 800, 1000, 667}, {1920, 1080, 640, 360}, {700, 500, 1400, 1000}, {9, 7, 37, 23}, {1024, 768, 1023, 767}};
+                unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at);
+                unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + gs_bins_at);
+
+                for (unsigned int i = 0; i < sizeof cases / sizeof cases[0]; i++)
+                {
+                        unsigned int sw = cases[i][0], sh = cases[i][1], w = cases[i][2], h = cases[i][3];
+                        positive step_x = ((positive)sw << 24) / w, fx = ((positive)sw << 23) / w, step_y = ((positive)sh << 24) / h, fy = ((positive)sh << 23) / h;
+                        positive bad = 0, card = ~0ull, rows = ~0ull, took;
+                        b32 done = true;
+
+                        for (unsigned int x = 0; x < w; x++, fx += step_x)
+                                tables[x] = (unsigned int)(fx >> 24);
+                        for (unsigned int y = 0; y < h; y++, fy += step_y)
+                                tables[w + y] = (unsigned int)(fy >> 24);
+                        for (positive k = 0; k < (positive)GS_PITCH * (h + 8); k++)
+                                dst[k] = gs_want[k] = gs_random();
+                        for (int round = 0; round < 4 && done; round++)
+                        {
+                                took = clock_monotonic_nanoseconds();
+                                gpu_patient = 1, done = gpu_blit(GPU_VA + gs_src_at, GS_PITCH, GPU_VA + gs_dst_at, GS_PITCH, GPU_VA + gs_bins_at, 7, w, h), gpu_patient = 0;
+                                took = clock_monotonic_nanoseconds() - took, card = took < card ? took : card;
+                                took = clock_monotonic_nanoseconds();
+                                memory_resample_u32_rect(gs_want, GS_PITCH, w, h, src, GS_PITCH, sw, sh, w, h, 0, 0);
+                                took = clock_monotonic_nanoseconds() - took, rows = took < rows ? took : rows;
+                        }
+                        for (positive until = clock_monotonic_nanoseconds() + 8000000000ull; !done && !gpu_idle() && clock_monotonic_nanoseconds() < until;)
+                                ;
+                        if (!done)
+                        {
+                                // (a set that does not scale a picture says so, and the compositor scales it on the processor)
+                                string_format(log, "  gpu scale %p by %p to %p by %p: NOT DRAWN by this card (its error %p, end %p)\n", (positive)sw, (positive)sh, (positive)w, (positive)h,
+                                              (positive)gpu_last_error, (positive)gpu_end);
+                                continue;
+                        }
+                        for (positive k = 0; k < (positive)GS_PITCH * (h + 8); k++)
+                        {
+                                checks++;
+                                if (dst[k] != gs_want[k] && (++failures, ++bad) < 4)
+                                        string_format(log, "  FAIL gpu scale: pixel %p,%p is %p, wanted %p\n", k % GS_PITCH, k / GS_PITCH, (positive)dst[k], (positive)gs_want[k]);
+                        }
+                        string_format(log, "  gpu scale %p by %p to %p by %p: card %p us best, processor %p us best, %p pixels wrong\n", (positive)sw, (positive)sh, (positive)w,
+                                      (positive)h, card / 1000, rows / 1000, bad);
+                        log_flush();
+                }
         }
         // 4. The four operations (copy, fill, tone over, glass over) on whole 64-byte rows at a 32-byte base, the place every set takes: the rows
         // around them compared too.

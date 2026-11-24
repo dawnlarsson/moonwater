@@ -931,7 +931,7 @@ static void compositor_wall_veil_keep(void)
         for (int y = 0; y < s[3]; y++)
         {
                 const unsigned int *from = compositor_wall && s[0] >= 0 && s[1] >= 0 && s[0] + s[2] <= compositor_wall_w && s[1] + s[3] <= compositor_wall_h
-                                               ? compositor_wall + (long)(s[1] + y) * compositor_wall_w + s[0] : 0;
+                                               ? compositor_wall + (long)(s[1] + y) * compositor_wall_pitch + s[0] : 0;
                 unsigned int *into = compositor_wall_editor.veil + (long)y * s[2];
 
                 for (int x = 0; x < s[2]; x++)

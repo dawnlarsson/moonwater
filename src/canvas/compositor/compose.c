@@ -230,6 +230,9 @@ HOT static void compositor_blit(const struct compositor_target *restrict t, int 
 */
 static unsigned int *compositor_wall;
 static int compositor_wall_w, compositor_wall_h;
+// Its pitch in pixels: the width in whole 64-byte lines, so a card that finds a picture's row only on a line (i915) reads it where it is
+// whatever the screen's width (a wallpaper 1366 wide at its own width was refused, or copied, with every present over the desktop).
+static int compositor_wall_pitch;
 
 static int compositor_space_all_fullscreen(void);
 
@@ -239,7 +242,7 @@ static inline unsigned int compositor_ground_at(int x, int y)
         if (compositor_space_all_fullscreen())
                 return 0xff000000u;
         return compositor_wall && x >= 0 && y >= 0 && x < compositor_wall_w && y < compositor_wall_h
-                       ? compositor_wall[(long)y * compositor_wall_w + x]
+                       ? compositor_wall[(long)y * compositor_wall_pitch + x]
                        : compositor_ground;
 }
 
@@ -260,7 +263,7 @@ static void compositor_ground_fill(const struct compositor_target *t, int x, int
                 compositor_fill(t, x1, y1, x2 - x1, y2 - y1, compositor_ground);
                 return;
         }
-        compositor_blit(t, x1, y1, x2 - x1, y2 - y1, compositor_wall + (long)y1 * compositor_wall_w + x1, (unsigned long)compositor_wall_w);
+        compositor_blit(t, x1, y1, x2 - x1, y2 - y1, compositor_wall + (long)y1 * compositor_wall_pitch + x1, (unsigned long)compositor_wall_pitch);
 }
 
 // Premultiplied ARGB8888 source-over (matching the GPU kernel's op 11: src + dst * (255 - src_a) / 255, saturating each channel at 255).
@@ -324,7 +327,7 @@ HOT static void compositor_over_ground(unsigned int *restrict into, unsigned lon
         // Over the wallpaper: its rows under the picture's, where the space has them.
         if (!fs && compositor_wall && gx >= 0 && gy >= 0 && gx + (long)width <= compositor_wall_w && gy + (long)height <= compositor_wall_h)
         {
-                over(into, (positive)into_pitch, from, (positive)from_pitch, compositor_wall + (long)gy * compositor_wall_w + gx, (positive)compositor_wall_w,
+                over(into, (positive)into_pitch, from, (positive)from_pitch, compositor_wall + (long)gy * compositor_wall_pitch + gx, (positive)compositor_wall_pitch,
                      (positive)width, (positive)height);
                 return;
         }
@@ -1396,6 +1399,9 @@ typedef char compositor_gpu_why_generation_named[COMPOSITOR_GPU_WHY_GENERATION =
 // A frame's picture's address for the GPU: in the map that holds all of it, 0 for none. A map that holds only its first byte (made when the window was
 // smaller) would have the card read its rows below from the addresses after that map's end, which are another buffer's: another window's pixels.
 #define compositor_gpu_va(f) ((f)->gpu_base ? (f)->gpu_base : gpu_va_bytes((f)->pixels, 4 * ((f)->pitch * (positive)((f)->height - 1) + (positive)(f)->width)))
+// A picture the card does not read where it is: one of i915's on a pitch that is not whole 64-byte lines, whose part of the damage the processor
+// copies to a tile on whole lines (compositor_gpu_rect). Nothing of it is mapped for the card.
+#define compositor_gpu_copied(f) (gpu_backend == &gpu_i915_row && (f)->pixels && !(f)->tiled_kind && ((f)->pitch & 15))
 struct compositor_gscene
 {
         unsigned int *ops;                  // the records, in the GPU's buffer
@@ -1526,15 +1532,19 @@ static unsigned int compositor_gpu_desc(const unsigned int desc[8])
         return g->tables_at + off;
 }
 
-// Scratch + static-solid userptr tile pool for Intel i915: materializes cover-masked ops (5/12/13) and custom RGBA cursors
-// as premultiplied op 11 tiles inside GPU_VA_MAPS so every desktop frame stays within i915's 256 MiB surface span.
-// [0, 1 MiB) caches invariant solid cover-masked tiles (borders, rounded corners, close X, cursor); [1 MiB, 2 MiB) is per-frame scratch.
+// The tiles' pool of Intel i915, the compositor's own pages the card maps: the pieces its scene's kernel has no kind for (a cover's mix, 5, 12 and
+// 13: a round corner, a close button's strokes, the drawn pointer) and the pictures on a pitch it does not read (compositor_gpu_copied), each made
+// a picture on whole 64-byte lines that kind 11 lays over (or 4 copies). The first COMPOSITOR_I915_STATIC_BYTES keep the tiles of a
+// colour through a cover, which are the same every scene; the rest are the scene's own, begun again with each scene. The pool is as large as the
+// scenes have wanted: one that found no room for a tile is the processor's, and the pool is made larger before the next (compositor_gpu_frames).
 #define COMPOSITOR_I915_STATIC_BYTES (1ul << 20)
 #define COMPOSITOR_I915_STATIC_SLOTS 256
 static struct
 {
         unsigned int *pixels;
         unsigned long bytes, used, static_used;
+        unsigned long want;  // the pool's size when it is next made (2 MiB at first)
+        unsigned long lacked; // the bytes the scene being built found no room for: the pool grows by them, at least to twice its size
         positive va;
         unsigned int epoch, va_marked, static_count;
         struct
@@ -1545,6 +1555,36 @@ static struct
         } cache[COMPOSITOR_I915_STATIC_SLOTS];
 } compositor_gpu_i915_tiles;
 
+// The pool let go of: its maps forgotten (the card is idle where a scene is built, and gpu_trim drops them), its pages unmapped, the kept tiles
+// with them. The next tile makes it again, of the size wanted.
+static void compositor_gpu_i915_tiles_drop(void)
+{
+        void *p = compositor_gpu_i915_tiles.pixels;
+        positive cap = compositor_gpu_i915_tiles.bytes;
+
+        if (p)
+                gpu_forget(p, cap), gpu_own(p, cap, 0), gpu_buf_free(&p, &cap);
+        compositor_gpu_i915_tiles.pixels = 0, compositor_gpu_i915_tiles.bytes = 0, compositor_gpu_i915_tiles.used = 0;
+        compositor_gpu_i915_tiles.va = 0, compositor_gpu_i915_tiles.va_marked = 0;
+        compositor_gpu_i915_tiles.static_used = 0, compositor_gpu_i915_tiles.static_count = 0;
+}
+
+// A scene begins: its own tiles from the pool's start again, and the pool made larger first when the last scene lacked room (no record of that
+// scene is read again: it was the processor's, and the card is idle where a scene is built).
+static void compositor_gpu_i915_tiles_begin(void)
+{
+        if (compositor_gpu_i915_tiles.lacked)
+        {
+                unsigned long had = compositor_gpu_i915_tiles.bytes, more = (compositor_gpu_i915_tiles.lacked + (1ul << 20) - 1) & ~((1ul << 20) - 1);
+
+                compositor_gpu_i915_tiles.want = had + (more > had ? more : had);
+                compositor_gpu_i915_tiles.lacked = 0;
+                compositor_gpu_i915_tiles_drop();
+        }
+        compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;
+        compositor_gpu_i915_tiles.va_marked = 0;
+}
+
 static positive compositor_gpu_i915_tiles_va(void)
 {
         positive base;
@@ -1554,10 +1594,16 @@ static positive compositor_gpu_i915_tiles_va(void)
                 void *p = 0;
                 positive cap = 0;
 
-                if (!gpu_buf_grow(&p, &cap, 2ull << 20, 0))
+                if (compositor_gpu_i915_tiles.want < (2ul << 20))
+                        compositor_gpu_i915_tiles.want = 2ul << 20;
+                // (a size the machine has no memory for is not asked for again: the pool is the first size, and the scenes it is too small for the processor's)
+                if (!gpu_buf_grow(&p, &cap, compositor_gpu_i915_tiles.want, 0) &&
+                    (compositor_gpu_i915_tiles.want = 2ul << 20, !gpu_buf_grow(&p, &cap, compositor_gpu_i915_tiles.want, 0)))
                         return 0;
                 gpu_own(p, cap, 1); // the compositor's own private pages: mapped written where the chip has no read-only maps (Gen7, Gen7.5, Gen11, Gen12)
                 compositor_gpu_i915_tiles.pixels = (unsigned int *)p, compositor_gpu_i915_tiles.bytes = (unsigned long)cap;
+                compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;
+                compositor_gpu_i915_tiles.static_used = 0, compositor_gpu_i915_tiles.static_count = 0;
                 compositor_gpu_i915_tiles.va = 0, compositor_gpu_i915_tiles.va_marked = 0;
         }
         if (compositor_gpu_i915_tiles.va && compositor_gpu_i915_tiles.va_marked && compositor_gpu_i915_tiles.epoch == gpu_epoch)
@@ -1575,35 +1621,47 @@ static positive compositor_gpu_i915_tiles_va(void)
 // A tile's pitch in pixels: its width in whole 64-byte lines. i915 finds a picture's row only where the row begins as far into a line as the first
 // does (gpu_i915_scene_batch refuses another pitch), and a tile as wide as its piece (a pointer's 21 pixels, a corner's cover) was refused with every
 // present it was in.
-#define COMPOSITOR_I915_COPIED_MOST (256ul * 256ul) // the pixels of a picture's part copied to a tile on whole lines for the card (compositor_gpu_rect)
 static inline unsigned int compositor_gpu_i915_tile_pitch(int w)
 {
         return ((unsigned int)w + 15u) & ~15u;
 }
 
-static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positive *va_out)
+// Where a tile of rows pixels' rows on a pitch (pixels, whole 64-byte lines) is put from `from` on: the next whole pitch from the pool's start.
+// Tiles of one pitch are then whole rows of it apart, so the card's scene reads them all through one surface (gpu_i915_scene_batch: a picture
+// shares an entry already made when its rows are inside that surface's rows), and a desktop of many windows' corners is a few entries, not ten a window.
+static inline unsigned long compositor_gpu_i915_tile_at(unsigned long from, unsigned int pitch)
 {
-        unsigned long bytes = (words * 4ul + 31ul) & ~31ul;
+        unsigned long line = 4ul * pitch;
+
+        return (from + line - 1) / line * line;
+}
+
+// A tile of the scene's own: rows by pitch pixels (the pitch from compositor_gpu_i915_tile_pitch), its pixels and the card's address of them; none
+// when the pool has no room, which the scene's builder is told (lacked) and the next scene finds made.
+static unsigned int *compositor_gpu_i915_tile_alloc(unsigned int pitch, unsigned long rows, positive *va_out)
+{
+        unsigned long bytes = 4ul * pitch * rows, at;
         positive base = compositor_gpu_i915_tiles_va();
 
-        if (!words || !base || bytes > compositor_gpu_i915_tiles.bytes - COMPOSITOR_I915_STATIC_BYTES)
+        if (!pitch || !rows || !base)
                 return 0;
         if (compositor_gpu_i915_tiles.used < COMPOSITOR_I915_STATIC_BYTES)
                 compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;
-        if (bytes > compositor_gpu_i915_tiles.bytes - compositor_gpu_i915_tiles.used)
-                return 0;
-        *va_out = base + compositor_gpu_i915_tiles.used;
+        at = compositor_gpu_i915_tile_at(compositor_gpu_i915_tiles.used, pitch);
+        if (at > compositor_gpu_i915_tiles.bytes || bytes > compositor_gpu_i915_tiles.bytes - at)
         {
-                unsigned int *dst = (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + compositor_gpu_i915_tiles.used);
-
-                compositor_gpu_i915_tiles.used += bytes;
-                return dst;
+                compositor_gpu_i915_tiles.lacked += bytes + 4ul * pitch;
+                return 0;
         }
+        *va_out = base + at;
+        compositor_gpu_i915_tiles.used = at + bytes;
+        return (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + at);
 }
 
 static unsigned int *compositor_gpu_i915_solid_tile(unsigned int cov_off, unsigned int colour, int w, int h, int r, positive *va_out, int *hit)
 {
-        unsigned long bytes = ((unsigned long)compositor_gpu_i915_tile_pitch(w) * (unsigned long)h * 4ul + 31ul) & ~31ul;
+        unsigned int tp = compositor_gpu_i915_tile_pitch(w);
+        unsigned long bytes = 4ul * tp * (unsigned long)h, off;
         positive base = compositor_gpu_i915_tiles_va();
 
         *hit = 0;
@@ -1620,20 +1678,20 @@ static unsigned int *compositor_gpu_i915_solid_tile(unsigned int cov_off, unsign
                         return (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + compositor_gpu_i915_tiles.cache[k].off);
                 }
         }
-        if (compositor_gpu_i915_tiles.static_count < COMPOSITOR_I915_STATIC_SLOTS &&
-            bytes <= COMPOSITOR_I915_STATIC_BYTES - compositor_gpu_i915_tiles.static_used)
+        off = compositor_gpu_i915_tile_at(compositor_gpu_i915_tiles.static_used, tp);
+        if (compositor_gpu_i915_tiles.static_count < COMPOSITOR_I915_STATIC_SLOTS && off <= COMPOSITOR_I915_STATIC_BYTES &&
+            bytes <= COMPOSITOR_I915_STATIC_BYTES - off)
         {
-                unsigned int off = (unsigned int)compositor_gpu_i915_tiles.static_used;
                 unsigned int k = compositor_gpu_i915_tiles.static_count++;
 
                 compositor_gpu_i915_tiles.cache[k].cov_off = cov_off, compositor_gpu_i915_tiles.cache[k].colour = colour;
                 compositor_gpu_i915_tiles.cache[k].w = (unsigned short)w, compositor_gpu_i915_tiles.cache[k].h = (unsigned short)h;
-                compositor_gpu_i915_tiles.cache[k].r = (unsigned short)r, compositor_gpu_i915_tiles.cache[k].off = off;
-                compositor_gpu_i915_tiles.static_used += bytes;
+                compositor_gpu_i915_tiles.cache[k].r = (unsigned short)r, compositor_gpu_i915_tiles.cache[k].off = (unsigned int)off;
+                compositor_gpu_i915_tiles.static_used = off + bytes;
                 *va_out = base + off;
                 return (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + off);
         }
-        return compositor_gpu_i915_tile_alloc((unsigned long)compositor_gpu_i915_tile_pitch(w) * (unsigned long)h, va_out);
+        return compositor_gpu_i915_tile_alloc(tp, (unsigned long)h, va_out);
 }
 
 static inline unsigned int compositor_gpu_mul255(unsigned int c, unsigned int a)
@@ -1677,7 +1735,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                         unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), tp = compositor_gpu_i915_tile_pitch(w);
                         positive tile_va = 0;
                         unsigned int *tile = !frame ? compositor_gpu_i915_solid_tile(slice_off, colour, w, h, r, &tile_va, &hit)
-                                                    : compositor_gpu_i915_tile_alloc((unsigned long)tp * (unsigned long)h, &tile_va);
+                                                    : compositor_gpu_i915_tile_alloc(tp, (unsigned long)h, &tile_va);
 
                         if (tile)
                         {
@@ -1757,16 +1815,17 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                 else
                         op[6] = g->frame_desc, op[7] = origin;
         }
-        else if (frame && gpu_backend == &gpu_i915_row && (kind == 4 || kind == 11) && frame->pixels && (frame->pitch & 15) &&
-                 (unsigned long)(cx1 - cx0) * (unsigned long)(cy1 - cy0) <= COMPOSITOR_I915_COPIED_MOST)
+        else if (frame && (kind == 4 || kind == 11) && compositor_gpu_copied(frame))
         {
-                // i915 reads a picture only on a pitch of whole 64-byte lines, and the scene's batch refuses another. A small picture made at its own
-                // width (the moon's glow, a menu, a corner) has its part of the damage copied to a tile on whole lines, which the card reads; a large
-                // one (a client's buffer of an odd stride) is left as it is, and that scene is the processor's.
+                // i915 reads a picture only on a pitch of whole 64-byte lines, and the scene's batch refuses another. A picture on another pitch (one
+                // made at its own width: the moon's glow, a menu, a Scene's small wallpaper; a client's buffer of any stride; a wallpaper 1366 wide)
+                // has its part of the damage copied to a tile on whole lines, which the card reads: a copy of what the damage holds of it, where the
+                // processor composing the present would copy as much to the screen, and the rest of the scene stays the card's. With no room in the
+                // pool the record is left as it is: that scene is the processor's, and the pool is larger for the next.
                 int w = cx1 - cx0, h = cy1 - cy0;
                 unsigned int tp = compositor_gpu_i915_tile_pitch(w);
                 positive tile_va = 0;
-                unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)tp * (unsigned long)h, &tile_va);
+                unsigned int *tile = compositor_gpu_i915_tile_alloc(tp, (unsigned long)h, &tile_va);
 
                 if (tile)
                 {
@@ -1903,7 +1962,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         if (!compositor_frame_meets(f, g->clip))
                 return true;
         // A frame of no area has no picture to read (a snap preview's lifted frame is one: its tint is in compositor_gpu_frames).
-        if (!f->builtin && !f->tiled_kind && f->pixels && w > 0 && h > 0 && !compositor_gpu_va(f))
+        if (!f->builtin && !f->tiled_kind && f->pixels && w > 0 && h > 0 && !compositor_gpu_copied(f) && !compositor_gpu_va(f))
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (compositor_scaled(f))
                 return g->why = COMPOSITOR_GPU_WHY_SCALED, false;
@@ -1938,7 +1997,7 @@ static b32 compositor_gpu_wall_frame(struct compositor_frame *wall)
         if (compositor_space_all_fullscreen() || !compositor_wall ||
             compositor_wall_w < (int)compositor_gscene.width || compositor_wall_h < (int)compositor_gscene.height)
                 return false;
-        wall->pixels = compositor_wall, wall->pitch = (unsigned long)compositor_wall_w, wall->width = compositor_wall_w, wall->height = compositor_wall_h;
+        wall->pixels = compositor_wall, wall->pitch = (unsigned long)compositor_wall_pitch, wall->width = compositor_wall_w, wall->height = compositor_wall_h;
         return true;
 }
 
@@ -1954,8 +2013,7 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
         int skip_ground = 0, has_tint = 0;
 
         g->count = 0, g->why = COMPOSITOR_GPU_WHY_DRAWN;
-        compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;
-        compositor_gpu_i915_tiles.va_marked = 0;
+        compositor_gpu_i915_tiles_begin();
         // The tables of the last scenes let go when the pool is half full, by count or by bytes: a scene is under that, so it never finds the pool shut.
         if (g->kept > COMPOSITOR_GPU_TABLES / 2 || g->tables_used > g->tables_size / 2)
                 g->kept = 0, g->tables_used = 0, compositor_gpu_i915_tiles.static_used = 0, compositor_gpu_i915_tiles.static_count = 0;

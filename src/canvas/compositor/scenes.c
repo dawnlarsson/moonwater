@@ -685,7 +685,7 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
                         compositor_scenes_kept.wall_half = (unsigned int *)p;
                 }
                 memory_halve_u32(compositor_scenes_kept.wall_half, (positive)pitch,
-                                 compositor_wall + (long)s[1] * compositor_wall_w + s[0], (positive)compositor_wall_w,
+                                 compositor_wall + (long)s[1] * compositor_wall_pitch + s[0], (positive)compositor_wall_pitch,
                                  (positive)sw, (positive)sh);
                 while (sw >= w * 2 && sh >= h * 2)
                 {
@@ -700,7 +700,7 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
         else
         {
                 memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)w, (positive)w, (positive)h,
-                                         compositor_wall + (long)s[1] * compositor_wall_w + s[0], (positive)compositor_wall_w,
+                                         compositor_wall + (long)s[1] * compositor_wall_pitch + s[0], (positive)compositor_wall_pitch,
                                          (positive)s[2], (positive)s[3], (positive)w, (positive)h, 0, 0);
         }
         compositor_scenes_kept.wall_of = compositor_wall, compositor_scenes_kept.wall_turn = compositor_wall_turn;
