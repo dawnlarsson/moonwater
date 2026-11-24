@@ -64,7 +64,7 @@
         X(XEMBED, "_XEMBED", 0) X(XEMBED_INFO, "_XEMBED_INFO", 0) X(NET_ICON, "_NET_WM_ICON", 0) X(X_MANAGER, "MANAGER", 0) \
         X(FRAME_EXTENTS, "_NET_FRAME_EXTENTS", COMPOSITOR_XWM_AF_SUP) X(REQ_FRAME_EXTENTS, "_NET_REQUEST_FRAME_EXTENTS", COMPOSITOR_XWM_AF_SUP) \
         X(WORKAREA, "_NET_WORKAREA", COMPOSITOR_XWM_AF_SUP) X(ABOVE, "_NET_WM_STATE_ABOVE", COMPOSITOR_XWM_AF_SUP) \
-        X(MOTIF_HINTS, "_MOTIF_WM_HINTS", 0)
+        X(MOTIF_HINTS, "_MOTIF_WM_HINTS", 0) X(EMU_RECTS, "_XWAYLAND_RANDR_EMU_MONITOR_RECTS", 0)
 
 enum {
 #define X(id, name, flags) COMPOSITOR_XWM_A_##id,
@@ -104,6 +104,7 @@ enum compositor_xwm_prop
         COMPOSITOR_XWM_PROP_XDND_PROXY, COMPOSITOR_XWM_PROP_XDND_PROXIED, COMPOSITOR_XWM_PROP_XDND_ACTIONS,
         COMPOSITOR_XWM_PROP_XDND_WORDS, COMPOSITOR_XWM_PROP_STEAM, COMPOSITOR_XWM_PROP_STEAM_OPEN,
         COMPOSITOR_XWM_PROP_CLASS, COMPOSITOR_XWM_PROP_EXT, COMPOSITOR_XWM_PROP_MOTIF, COMPOSITOR_XWM_PROP_SHAPE,
+        COMPOSITOR_XWM_PROP_EMU,
 };
 #define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
                                         ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
@@ -166,6 +167,11 @@ struct compositor_xwm_window
         unsigned int width, height, sent_w, sent_h, restore_w, restore_h, min_w, min_h, max_w, max_h;
         unsigned char closes, placed, no_input;
         unsigned char left_fullscreen; // the person took it out of fullscreen (F11, Super+F11): its own asks to go back are refused till they put it back
+        // The monitor as the window's own client sees it under Xwayland's resolution emulation (_XWAYLAND_RANDR_EMU_MONITOR_RECTS): a game
+        // that set a mode of 1600x900 on a 1920x1080 screen is made fullscreen at 1600x900, and Xwayland scales its surface to the screen
+        // (a viewport, which the plane scales for nothing). 0 by 0 when it set none.
+        int emu_x, emu_y;
+        unsigned int emu_w, emu_h;
         char title[COMPOSITOR_XWM_TITLE];
         char app[WINDOWS_APP_ID];
 };
@@ -709,6 +715,7 @@ static const struct { unsigned char what, flags; signed short atom; unsigned int
         {COMPOSITOR_XWM_PROP_ICON, XWM_PF_NOTIFY | XWM_PF_TRAY, COMPOSITOR_XWM_A_NET_ICON, COMPOSITOR_XWM_ALLOW_TYPE, 0},
         {COMPOSITOR_XWM_PROP_TYPE, XWM_PF_MAP, COMPOSITOR_XWM_A_TYPE, COMPOSITOR_XWM_ATOM_TYPE, COMPOSITOR_XWM_PROPS_READ},
         {COMPOSITOR_XWM_PROP_MOTIF, XWM_PF_MAP | XWM_PF_NOTIFY, COMPOSITOR_XWM_A_MOTIF_HINTS, 0, 0},
+        {COMPOSITOR_XWM_PROP_EMU, XWM_PF_MAP | XWM_PF_NOTIFY, COMPOSITOR_XWM_A_EMU_RECTS, 0, 0},
 };
 
 static unsigned int xwm_prop_atom(const struct compositor_xwm *x, unsigned int idx)
@@ -885,6 +892,28 @@ static void compositor_xwm_tray_icon_set(struct compositor_xwm *x, unsigned int 
                 }
 }
 
+/*
+        Where a fullscreen window goes, in X's coordinates: the monitor its own client sees when it set a mode under Xwayland's resolution
+        emulation (Xwayland then scales the window's surface to the screen, and the plane scales that for nothing), else the compositor's
+        row. A game that set 1600x900 was made 1920x1080 here, its own size asks were then dropped while it was fullscreen, and SDL 3 gave
+        fullscreen up (Counter-Strike 2's "fullscreen" never took, 2026-11-24): Mutter and KWin size it to the emulated monitor as this does.
+*/
+static void xwm_fullscreen_place(const struct compositor_xwm_window *w, struct xwm_configure *c)
+{
+        struct compositor_row_facts f;
+        int has_f = w->row >= 0 && compositor_row_facts(w->row, &f) == 0;
+
+        c->mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
+        if (w->emu_w && w->emu_h)
+        {
+                c->x = w->emu_x, c->y = w->emu_y, c->width = w->emu_w, c->height = w->emu_h;
+                return;
+        }
+        c->x = compositor_xwm_to_x(has_f ? f.x : 0, 0), c->y = compositor_xwm_to_x(has_f ? f.y : 0, 1);
+        c->width = has_f && f.want_width ? f.want_width : has_f && f.width ? f.width : (compositor.width > 0 ? (unsigned int)compositor.width : 1u);
+        c->height = has_f && f.want_height ? f.want_height : has_f && f.height ? f.height : (compositor.height > 0 ? (unsigned int)compositor.height : 1u);
+}
+
 static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *p)
 {
         struct compositor_xwm_window *w;
@@ -1058,6 +1087,35 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 else
                         w->state &= ~COMPOSITOR_XWM_BORDERLESS;
                 break;
+        case COMPOSITOR_XWM_PROP_EMU:
+        {
+                // CARDINAL[4n]: each monitor as the window's client sees it (x, y, width, height); the one the window is on, else the first.
+                int had_x = w->emu_x, had_y = w->emu_y;
+                unsigned int had_w = w->emu_w, had_h = w->emu_h;
+
+                w->emu_x = w->emu_y = 0, w->emu_w = w->emu_h = 0;
+                for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 16 <= (unsigned long)r.value_len; at += 16)
+                {
+                        int ex = (int)xwm_get32(r.value + at), ey = (int)xwm_get32(r.value + at + 4);
+                        unsigned int ew = xwm_get32(r.value + at + 8), eh = xwm_get32(r.value + at + 12);
+
+                        if (!ew || !eh || ew > 65535 || eh > 65535)
+                                continue;
+                        if (!w->emu_w || (w->x >= ex && w->y >= ey && w->x < ex + (int)ew && w->y < ey + (int)eh))
+                                w->emu_x = ex, w->emu_y = ey, w->emu_w = ew, w->emu_h = eh;
+                }
+                // A fullscreen window follows the mode its client set while it is fullscreen.
+                if ((w->state & COMPOSITOR_XWM_FULLSCREEN) &&
+                    (w->emu_x != had_x || w->emu_y != had_y || w->emu_w != had_w || w->emu_h != had_h))
+                {
+                        struct xwm_configure c;
+
+                        xwm_fullscreen_place(w, &c);
+                        compositor_xwm_configure(x, w->id, &c);
+                        w->sent_x = w->x = c.x, w->sent_y = w->y = c.y, w->sent_w = w->width = c.width, w->sent_h = w->height = c.height;
+                }
+                break;
+        }
         case COMPOSITOR_XWM_PROP_NORMAL_HINTS:
                 w->min_w = w->min_h = w->max_w = w->max_h = 0, w->placed = 0;
                 if (r.format == XWM_FORMAT_32 && r.value_len >= 4)
@@ -1418,7 +1476,6 @@ static int compositor_xwm_may_show(struct compositor_xwm *x, const struct compos
 
 static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct compositor_xwm_window *w, int on)
 {
-        struct compositor_row_facts f;
         struct xwm_configure c;
 
         w->state &= ~COMPOSITOR_XWM_COVERED;
@@ -1434,18 +1491,12 @@ static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct composito
         }
         if (on)
         {
-                int has_f;
-
                 if (!(w->state & COMPOSITOR_XWM_MAXIMIZED))
                         w->restore_w = w->width, w->restore_h = w->height;
                 w->state |= COMPOSITOR_XWM_FULLSCREEN;
                 if (w->row >= 0)
                         compositor_fullscreen_row(w->row);
-                has_f = compositor_row_facts(w->row, &f) == 0;
-                c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
-                c.x = compositor_xwm_to_x(has_f ? f.x : 0, 0), c.y = compositor_xwm_to_x(has_f ? f.y : 0, 1);
-                c.width = has_f && f.want_width ? f.want_width : has_f && f.width ? f.width : (compositor.width > 0 ? (unsigned int)compositor.width : 1u);
-                c.height = has_f && f.want_height ? f.want_height : has_f && f.height ? f.height : (compositor.height > 0 ? (unsigned int)compositor.height : 1u);
+                xwm_fullscreen_place(w, &c);
                 compositor_xwm_configure(x, w->id, &c);
                 w->sent_x = c.x, w->sent_y = c.y, w->sent_w = c.width, w->sent_h = c.height;
                 compositor_xwm_net_state(x, w->id, (int)w->state);
@@ -1511,6 +1562,9 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
                         compositor_xwm_wm_state(x, w->id, f.minimized ? COMPOSITOR_XWM_STATE_ICONIC : COMPOSITOR_XWM_STATE_NORMAL);
         }
         c.x = compositor_xwm_to_x(f.x, 0), c.y = compositor_xwm_to_x(f.y, 1);
+        //      A fullscreen window whose client set a mode is the emulated monitor's size and place, not the screen's (xwm_fullscreen_place).
+        if ((w->state & COMPOSITOR_XWM_FULLSCREEN) && w->emu_w && w->emu_h)
+                c.x = w->emu_x, c.y = w->emu_y, f.want_width = w->emu_w, f.want_height = w->emu_h;
         if (c.x != w->sent_x || c.y != w->sent_y || c.x != w->x || c.y != w->y)
                 c.mask |= XWM_CONFIGURE_X | XWM_CONFIGURE_Y;
         if (f.want_width && f.want_height)
@@ -3159,7 +3213,8 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 prev_w = w ? w->width : 0, prev_h = w ? w->height : 0;
                 if (w && (w->state & COMPOSITOR_XWM_COVERED) && (w->state & COMPOSITOR_XWM_FULLSCREEN) && w->row >= 0 &&
                     (e->value_mask & (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT)) == (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT) &&
-                    (e->width != compositor.w[w->row] || e->height != compositor.h[w->row]))
+                    (e->width != compositor.w[w->row] || e->height != compositor.h[w->row]) &&
+                    !(w->emu_w && e->width == w->emu_w && e->height == w->emu_h))
                         w->restore_w = e->width, w->restore_h = e->height, compositor_xwm_fullscreen(x, w, 0);
                 c.mask = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
                                           XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
