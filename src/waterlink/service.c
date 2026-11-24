@@ -246,6 +246,11 @@ static p64 link_keepalive = 10000000ull;
         nothing with it, and says nothing, so the two stay as they were. */
 #define LINK_KEY_NAME 6
 #define LINK_KEY_HWID 9
+//      The cast engine's channels in a session two listeners keep (cast.c); the pad's are 10 to 12 (pad.c).
+#define LINK_KEY_CAST_CONTROL 13
+#define LINK_KEY_CAST_SOUND 14
+#define LINK_KEY_CAST_MIC 15
+#define LINK_KEY_CAST_SPEAKERS 16
 #define LINK_HWID_BYTES 16
 #define LINK_NAME_SAY 'M'
 #define LINK_NAMES_MOST 8 // names one session may change its record by: a peer can rename itself, and a file is written for each
@@ -328,6 +333,9 @@ static const link_grant link_grants[] = {
     {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_FS},
     {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0, 0},
     {"input", WATERLINK_MAY_PAD, LINK_ASK_PAD, 0, 0},
+    {"screen", WATERLINK_MAY_SCREEN, 0, 0, 0},
+    {"mic", WATERLINK_MAY_MIC, 0, 0, 0},
+    {"speakers", WATERLINK_MAY_SPEAKERS, 0, 0, 0},
 };
 
 // The grant a word names, or 0. pad is input's old word, still taken.
@@ -624,8 +632,13 @@ static bipolar link_peers_save(link_peers address_to peers)
                                  true);
 }
 
-#define LINK_POLICY_ALL WATERLINK_MAY_ALL
+/*      The machine's own switch of each grant (a grant a peer has does
+        nothing while it is off here). The cast grants are on in it from the
+        start, as every grant was: a policy written before they were (no V3)
+        has them on, since nobody turned them off; each peer's are still off. */
+#define LINK_POLICY_ALL (WATERLINK_MAY_ALL | WATERLINK_MAY_CAST)
 #define LINK_POLICY_V2  0x40000000u
+#define LINK_POLICY_V3  0x20000000u
 
 static p32 link_policy_load(void)
 {
@@ -642,6 +655,8 @@ static p32 link_policy_load(void)
         {
                 if (!(mask & LINK_POLICY_V2) && (mask & WATERLINK_MAY_ALL) == WATERLINK_MAY_LEGACY_ALL)
                         mask |= WATERLINK_MAY_PAD;
+                if (!(mask & LINK_POLICY_V3))
+                        mask |= WATERLINK_MAY_CAST;
                 return mask & LINK_POLICY_ALL;
         }
         // Fail closed if the policy file exists but is unreadable, tampered, or malformed.
@@ -650,7 +665,7 @@ static p32 link_policy_load(void)
 
 static p8 link_policy_save(p32 mask)
 {
-        p32 clean = (mask & LINK_POLICY_ALL) | LINK_POLICY_V2;
+        p32 clean = (mask & LINK_POLICY_ALL) | LINK_POLICY_V2 | LINK_POLICY_V3;
 
         return link_file_replace(LINK_POLICY_PATH, address_of clean, sizeof clean, true) >= 0;
 }
@@ -1144,6 +1159,7 @@ struct link_session {
         struct link_fs_state address_to fs;
         struct link_fs_client address_to fs_client;
         struct link_pad address_to pad; // a pad session's, at either end (pad.c)
+        struct link_cast address_to cast; // a session two listeners keep: the cast engine's channels (cast.c)
 };
 
 /*
@@ -1825,11 +1841,20 @@ static fn link_fs_state_free(struct link_session address_to s)
 }
 
 static fn link_pad_close(struct link_session address_to s);
+static fn link_cast_close(struct link_session address_to s);
+static fn link_cast_hear(struct link_session address_to s, p8 key, p8 address_to payload, positive length);
+static fn link_cast_session_turn(struct link_session address_to s, p64 now);
+static fn link_cast_session_watch(struct link_session address_to s, system_poll_descriptor address_to watch,
+                                  p8 address_to address_to quiet, positive address_to count);
+static fn link_cast_watch(system_poll_descriptor address_to watch, p8 address_to address_to quiet, positive address_to count);
+static fn link_cast_turn(p64 now);
+static p64 link_cast_due(struct link_session address_to s, p64 due);
 
 static fn link_session_close(struct link_session address_to s)
 {
         link_fs_state_free(s);
         link_pad_close(s);
+        link_cast_close(s);
         if (s->part[0])
                 link_part_discard(s->writes[0].fd, s->part);
         //      Signalled before it is waited for, as the group is: once the
@@ -4319,6 +4344,11 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                 link_pad_hear(s, head->key, payload, length);
                 return true;
         }
+        if (link_self.server && head->key >= LINK_KEY_CAST_CONTROL && head->key <= LINK_KEY_CAST_SPEAKERS)
+        {
+                link_cast_hear(s, head->key, payload, length);
+                return true;
+        }
         for (positive at = 0; at < 2; at++)
                 if (s->writes[at].key == head->key)
                         return link_stream_take(s, s->writes + at, payload,
@@ -4417,6 +4447,7 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
 
         if (s->pad)
                 link_pad_turn(s, now);
+        link_cast_session_turn(s, now);
 
         if (link_self.server && s->kind == LINK_KIND_FS && s->fs)
         {
@@ -4571,6 +4602,7 @@ static fn link_keep_heard(p8 address_to key)
 static fn link_secrets_forget(void);
 
 #include "nearby.c"
+#include "cast.c"
 
 // The handshake, at the machine's end -----------------------------------------
 
@@ -5555,7 +5587,7 @@ static p64 link_sessions_turn(p64 now)
                                 link_session_say(s, WATERLINK_KIND_CARRY);
                 }
 
-                due = link_pad_due(s, waterlink_wake(s->link, now));
+                due = link_cast_due(s, link_pad_due(s, waterlink_wake(s->link, now)));
                 //      With the modem's queue full, nothing this session sends
                 //      can go until the queue plays: wait for it, do not spin.
                 if (((link_modem_carrying() && !link_modem_free()) ||
@@ -5585,10 +5617,16 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
         link_watch(watch, quiet, address_of count, link_nearby.lan.socket,
                    SYSTEM_POLL_READ, null);
         link_tcp_watch(watch, quiet, address_of count);
+        if (link_self.server)
+                link_cast_watch(watch, quiet, address_of count);
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
+                {
                         link_session_watch(link_self.session + at, watch, quiet,
                                            address_of count);
+                        link_cast_session_watch(link_self.session + at, watch, quiet,
+                                                address_of count);
+                }
         return count;
 }
 
@@ -5709,8 +5747,10 @@ static p64 link_keep_turn(p64 now);
 
 static b32 link_serve(string_address ready_text)
 {
-        system_poll_descriptor watch[3 + LINK_SESSIONS * 5 + 1 + LINK_TCP_MOST];
-        p8 address_to quiet[3 + LINK_SESSIONS * 5 + 1 + LINK_TCP_MOST];
+        //      A session's five, and its cast streams' wakes (cast.c: three
+        //      kinds, each way); the listener's own, and the sound server's.
+        system_poll_descriptor watch[3 + LINK_SESSIONS * (5 + 6) + 2 + LINK_TCP_MOST];
+        p8 address_to quiet[3 + LINK_SESSIONS * (5 + 6) + 2 + LINK_TCP_MOST];
         p8 signals_quiet = false;
         bipolar lock;
         bipolar signals;
@@ -5773,6 +5813,7 @@ static b32 link_serve(string_address ready_text)
                         break;
 
                 link_tcp_listen(port, now);
+                link_cast_turn(now);
                 wake = link_sessions_turn(now);
                 {
                         p64 keep = link_keep_turn(now);

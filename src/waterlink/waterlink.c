@@ -290,6 +290,16 @@ struct waterlink_frame {
 
 #define WATERLINK_MAY_DEFAULT WATERLINK_MAY_ALL
 
+/*      The cast engine's grants (cast.c): each is off for every machine
+        until it is allowed by name, and a pairing, a group or `all` never
+        gives one, because each lets a far machine into a room: what this
+        machine plays (screen, with its video when that comes), its
+        microphone, and its speakers (what the far machine plays here). */
+#define WATERLINK_MAY_SCREEN 0x0100u
+#define WATERLINK_MAY_MIC 0x0200u
+#define WATERLINK_MAY_SPEAKERS 0x0400u
+#define WATERLINK_MAY_CAST (WATERLINK_MAY_SCREEN | WATERLINK_MAY_MIC | WATERLINK_MAY_SPEAKERS)
+
 /*      AES-128-GCM, and not 256: it is the key size lib.c carries in assembly
         on all three machines, with a bitsliced floor that a kernel build
         keeps. With no cipher agility the choice is made once, and it is made

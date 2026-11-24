@@ -800,7 +800,7 @@ static b32 link_grant_locked(string_address name, p8 allow,
 
         if (!link_grants_parse(words, count, address_of change, address_of bad))
                 return host_refuse("%s is not a grant: shell run files "
-                                   "log input\n",
+                                   "log input screen mic speakers\n",
                                    bad);
         if (allow)
                 found->may |= change;

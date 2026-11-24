@@ -7679,10 +7679,10 @@ static fn names_and_words(void)
                                !link_name_good("help");
 
                 //      Every verb that takes a fixed number of words is a row
-                //      of link_shapes: a verb added there and not to
+                //      of link_verbs: a verb added there and not to
                 //      link_words is a machine nobody can reach by its name.
-                for (positive at = 0; at < array_count(link_shapes); at++)
-                        refused &= !link_name_good(link_shapes[at].word);
+                for (positive at = 0; at < array_count(link_verbs); at++)
+                        refused &= !link_name_good(link_verbs[at].word);
                 check("and none of the verbs link has, port among them",
                       refused);
                 check("nor discovery or network, which were the link's verbs and "
@@ -15761,6 +15761,186 @@ done:
 }
 
 
+/*
+        The cast engine's channels (cast.c): the grants off for every machine
+        a pairing, a group or a new record gives, and on in the machine's own
+        switch from the start; the frames on the cast keys judged before a byte
+        is believed (a fuzz of them, every kind and length), a block written
+        into the stream's ring only when this side asked for it, the copy of
+        the block before it filling a loss, the far side's numbers held to
+        the ring, and the grants said again when they change, with a grant
+        taken away ending what it gave.
+*/
+static fn cast_channels(void)
+{
+        static link_peers peers;
+        struct link_session address_to s = link_self.session;
+        struct waterlink_frame head;
+        p8 key[32];
+        p8 payload[WATERLINK_FRAME_MAX];
+        p8 server = link_self.server;
+        p32 policy;
+        bipolar fd;
+        positive posted;
+
+        check("a machine paired, grouped or added gets no cast grant", !(WATERLINK_MAY_DEFAULT & WATERLINK_MAY_CAST) &&
+                                                                         !(WATERLINK_MAY_ALL & WATERLINK_MAY_CAST));
+        check("the cast grants have their words",
+              link_grant_bit("screen") == WATERLINK_MAY_SCREEN && link_grant_bit("mic") == WATERLINK_MAY_MIC &&
+                      link_grant_bit("speakers") == WATERLINK_MAY_SPEAKERS);
+        (void)system_remove_at(AT_FDCWD, LINK_POLICY_PATH, 0);
+        check("with no policy file the machine's switch has the cast grants on", (link_policy_load() & WATERLINK_MAY_CAST) == WATERLINK_MAY_CAST);
+        policy = WATERLINK_MAY_ALL | LINK_POLICY_V2;
+        (void)wls_write(LINK_POLICY_PATH, address_of policy, sizeof policy, 0600);
+        check("a policy written before them has them on", (link_policy_load() & WATERLINK_MAY_CAST) == WATERLINK_MAY_CAST &&
+                                                            (link_policy_load() & WATERLINK_MAY_ALL) == WATERLINK_MAY_ALL);
+        check("and one that turned the microphone off keeps it off",
+              link_policy_save(LINK_POLICY_ALL & ~WATERLINK_MAY_MIC) && !(link_policy_load() & WATERLINK_MAY_MIC) &&
+                      (link_policy_load() & WATERLINK_MAY_SPEAKERS));
+        (void)system_remove_at(AT_FDCWD, LINK_POLICY_PATH, 0);
+
+        link_self.server = true;
+        if (s->used)
+                link_session_close(s);
+        if (!link_session_open(s))
+        {
+                check("a session opens for the cast keys", false);
+                link_self.server = server;
+                return;
+        }
+        wls_seeded(key, 32, 41);
+        memory_zero(address_of peers, sizeof peers);
+        string_copy(peers.peer[0].name, "desk");
+        memory_copy(peers.peer[0].key, key, 32);
+        peers.peer[0].may = WATERLINK_MAY_DEFAULT;
+        peers.count = 1;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        memory_copy(s->peer, key, 32);
+        string_copy((string_address)s->name, "desk");
+        s->now.live = true;
+        s->dialed = true;
+
+        //      Grants said: none to a machine granted none of them, and the name it is known by.
+        link_cast_session_turn(s, link_now());
+        check("a session two listeners keep has its cast state and says what it grants: nothing",
+              s->cast && s->cast->grants_said == 0 && s->link->posted >= 1);
+        //      A fuzz of the cast keys: nothing breaks, and nothing is believed that should not be.
+        {
+                p64 seed = 0x9e3779b97f4a7c15ull;
+
+                for (positive round = 0; round < 60000; round++)
+                {
+                        positive length;
+
+                        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                        length = (positive)(seed >> 33) % (1 + LINK_CAST_HEAD + 2 * LINK_CAST_BLOCK_BYTES + 8);
+                        for (positive at = 0; at < length; at++)
+                        {
+                                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                                payload[at] = (p8)(seed >> 56);
+                        }
+                        if (length && round % 3 == 0)
+                                payload[0] = "GOCANEPQB"[(seed >> 20) % 9];
+                        if (length > 1 && round % 6 == 0)
+                                payload[1] = (p8)((seed >> 12) % 5);
+                        head.key = (p8)(LINK_KEY_CAST_CONTROL + (seed >> 40) % 4);
+                        head.length = (p16)length;
+                        head.flags = WATERLINK_FRAME_DURABLE;
+                        head.sequence = (p32)round + 1;
+                        (void)link_hear(s, address_of head, payload);
+                }
+        }
+        check("after the fuzz no stream of a machine granted nothing is up, none asked is up, and the session holds",
+              s->used && s->cast && s->cast->give[1].state == 0 && s->cast->give[2].state == 0 && s->cast->give[3].state == 0 &&
+                      s->cast->ask[1].state == 0 && s->cast->ask[2].state == 0 && s->cast->ask[3].state == 0 &&
+                      !s->cast->ask[2].frames);
+        s->cast->heard = false;
+        s->cast->grants = 0;
+
+        //      An ask of a microphone not granted: the answer is no, with the line to run here.
+        posted = s->link->posted;
+        payload[0] = 'O', payload[1] = LINK_CAST_MIC;
+        head.key = LINK_KEY_CAST_CONTROL, head.length = 2, head.sequence = 70001;
+        (void)link_hear(s, address_of head, payload);
+        check("a microphone not granted is refused", s->cast->give[LINK_CAST_MIC].state == 0 && s->link->posted == posted + 1);
+
+        //      A stream asked of the far side: blocks into its ring; the one before in each frame fills a loss.
+        s->cast->ask[LINK_CAST_MIC].state = LINK_CAST_LIVE;
+        s->cast->ask[LINK_CAST_MIC].in = link_cast_ring_make(address_of fd);
+        if (fd >= 0)
+                system_close(fd);
+        check("a ring is made for what comes", s->cast->ask[LINK_CAST_MIC].in != null);
+        if (s->cast->ask[LINK_CAST_MIC].in)
+        {
+                struct cast_sound_ring address_to in = s->cast->ask[LINK_CAST_MIC].in;
+                struct cast_sound_slot slot;
+                p32 far[] = {5000, 5001, 5003, 5004, 4990, 9000, 9001};
+                p8 two[] = {1, 2, 2, 2, 2, 2, 2};
+
+                for (positive k = 0; k < array_count(far); k++)
+                {
+                        payload[0] = 'B', payload[1] = 1, payload[2] = two[k];
+                        memory_store_unaligned(p32, payload + 3, far[k]);
+                        memory_store_unaligned(p64, payload + 7, 1000000000ull + far[k] * CAST_SOUND_BLOCK_NS);
+                        for (positive at = 0; at < 2 * LINK_CAST_BLOCK_BYTES; at++)
+                                payload[1 + LINK_CAST_HEAD + at] = (p8)(far[k] - (at >= LINK_CAST_BLOCK_BYTES));
+                        head.key = LINK_KEY_CAST_MIC, head.length = (p16)(1 + LINK_CAST_HEAD + two[k] * LINK_CAST_BLOCK_BYTES);
+                        head.flags = WATERLINK_FRAME_REPLACEABLE, head.sequence = (p32)k + 1;
+                        (void)link_hear(s, address_of head, payload);
+                }
+                check("the first block is the ring's 0, and the ones after it follow", cast_sound_read(in, 0, address_of slot) &&
+                                                                                          ((p8 address_to)slot.pcm)[0] == (p8)5000 &&
+                                                                                          cast_sound_read(in, 1, address_of slot));
+                check("a block lost (5002) comes in the next frame's copy", cast_sound_read(in, 2, address_of slot) &&
+                                                                              ((p8 address_to)slot.pcm)[0] == (p8)5002 &&
+                                                                              cast_sound_read(in, 3, address_of slot));
+                check("a block from before the ring's start is not written", !cast_sound_has(in, (p64)(p32)(4990 - 5000)));
+                check("a block far ahead (9000) is the sender begun again: it goes on from the ring, and so does the next",
+                      cast_sound_read(in, 5, address_of slot) && ((p8 address_to)slot.pcm)[0] == (p8)9000 &&
+                              cast_sound_read(in, 6, address_of slot) && in->written == 7 && s->cast->ask[LINK_CAST_MIC].jumps == 1);
+                //      Shapes that are not a block: each dropped.
+                {
+                        static const struct { p8 type, version, count; positive length; } bad[] = {
+                            {'B', 2, 1, 1 + LINK_CAST_HEAD + LINK_CAST_BLOCK_BYTES}, {'B', 1, 3, 1 + LINK_CAST_HEAD + 3 * LINK_CAST_BLOCK_BYTES},
+                            {'B', 1, 1, LINK_CAST_HEAD + LINK_CAST_BLOCK_BYTES},     {'B', 1, 2, 1 + LINK_CAST_HEAD + LINK_CAST_BLOCK_BYTES},
+                            {'X', 1, 1, 1 + LINK_CAST_HEAD + LINK_CAST_BLOCK_BYTES}, {'B', 1, 0, 1 + LINK_CAST_HEAD},
+                        };
+                        p64 frames = s->cast->ask[LINK_CAST_MIC].frames;
+
+                        for (positive k = 0; k < array_count(bad); k++)
+                        {
+                                payload[0] = bad[k].type, payload[1] = bad[k].version, payload[2] = bad[k].count;
+                                memory_store_unaligned(p32, payload + 3, 9002u);
+                                head.length = (p16)bad[k].length, head.sequence = (p32)(100 + k);
+                                (void)link_hear(s, address_of head, payload);
+                        }
+                        check("a frame of another version, count or length is no block", s->cast->ask[LINK_CAST_MIC].frames == frames &&
+                                                                                            in->written == 7);
+                }
+                //      A key with no stream: what plays here was never granted.
+                payload[0] = 'B', payload[1] = 1, payload[2] = 1;
+                head.key = LINK_KEY_CAST_SPEAKERS, head.length = (p16)(1 + LINK_CAST_HEAD + LINK_CAST_BLOCK_BYTES), head.sequence = 200;
+                (void)link_hear(s, address_of head, payload);
+                check("a block on a key with no stream is dropped", s->cast->give[LINK_CAST_SPEAKERS].frames == 0);
+        }
+
+        //      Granted, said; taken away, said again, and what it gave ended.
+        peers.peer[0].may = WATERLINK_MAY_DEFAULT | WATERLINK_MAY_MIC;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        s->cast->looked = 0;
+        link_cast_session_turn(s, link_now());
+        check("a microphone granted is said", s->cast->grants_said == WATERLINK_MAY_MIC);
+        s->cast->give[LINK_CAST_MIC].state = LINK_CAST_LIVE;
+        peers.peer[0].may = WATERLINK_MAY_DEFAULT;
+        (void)wls_write(LINK_PEERS_PATH, peers.peer, sizeof peers.peer[0], 0600);
+        s->cast->looked = 0;
+        link_cast_session_turn(s, link_now());
+        check("taken away, it is said, and the microphone's stream ends", s->cast->grants_said == 0 && s->cast->give[LINK_CAST_MIC].state == 0);
+        link_session_close(s);
+        check("a session closed lets its cast state go", !s->used || !s->cast);
+        link_self.server = server;
+}
+
 b32 main(void)
 {
         bipolar listener;
@@ -15834,6 +16014,7 @@ b32 main(void)
         greeting_freshness(listener, port);
         renamed_records();
         renamed_sessions();
+        cast_channels();
         renamed_looks();
         renamed_greetings(listener, port);
         renamed_regreets(listener, port);
