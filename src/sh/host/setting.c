@@ -463,21 +463,50 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
 
         Bare, the Scenes' words and the pictures remembered. edit [on|off] opens the editor over the desktop, shuts it, or turns it. scene N
         CHOICE [SCREEN] is Scene N's: auto, dark or white (the moon), colour:RRGGBB (a solid colour, six hex digits in either case, kept in
-        lower case), or the name of a picture remembered; on SCREEN by its connector's name, or on the screen you are on. picture FILE remembers a PNG (a copy of it in SETTING_WALLPAPER_DIR as NAME.png, its miniature beside
-        it, its name first in the list) and makes it the wallpaper of the Scene you are on; the name is the file's, in letters, digits and
-        dashes, and another picture of the same name already remembered gives it a number after. forget NAME remembers the picture no more:
-        its copy and miniature are taken away, and a Scene that had it has the moon again. The compositor alone writes the Scenes' words, so
-        what changes one is asked of it in a file of SETTING_WALLPAPER_ASK's name; the list is this command's alone.
+        lower case), or the name of a picture remembered; on SCREEN by its connector's name, or on the screen you are on. picture FILE
+        remembers a PNG or a JPEG (a copy of it in SETTING_WALLPAPER_DIR as NAME.png or NAME.jpg, by what its bytes are and never by its name,
+        its miniature beside it, its name first in the list) and makes it the wallpaper of the Scene you are on; the name is the file's, in
+        letters, digits and dashes, and another picture of the same name already remembered gives it a number after. forget NAME remembers
+        the picture no more: its copy and miniature are taken away, and a Scene that had it has the moon again. The compositor alone writes
+        the Scenes' words, so what changes one is asked of it in a file of SETTING_WALLPAPER_ASK's name; the list is this command's alone.
 
-        A file that is not a PNG the desktop can read, or one over 64 MiB, is refused before root is asked for.
+        A file that is not a picture the desktop can read, or one over 64 MiB, is refused before root is asked for. Its miniature is made
+        from a decode at the fewest eighths that still give SETTING_WALLPAPER_MINI each way, so a 50-megapixel photograph is read in a
+        moment.
 */
 #define LOCALE_WALLPAPER_MOST (64ul << 20)
 #define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE, forget NAME or curated [fetch|get HEX]\n"
 
 #ifndef SHELL_UTILITY_PROGRAM
-static unsigned int address_to ui_png_decode_most(const p8 address_to restrict file, positive size, int address_to restrict width_out,
-                                                  int address_to restrict height_out, unsigned int most);
+static unsigned int ui_image_kind(const p8 address_to file, positive size);
+static unsigned int address_to ui_image_decode_at(const p8 address_to file, positive size, int address_to width_out, int address_to height_out,
+                                                  unsigned int most, unsigned int want_w, unsigned int want_h);
 #endif
+
+// The file name's end of a picture's bytes: .png or .jpg, as ui_image_kind tells them; null for neither.
+static string_address locale_wallpaper_suffix(const p8 address_to bytes, positive size)
+{
+#ifndef SHELL_UTILITY_PROGRAM
+        unsigned int kind = ui_image_kind(bytes, size);
+
+        return kind == 1 ? (string_address) ".png" : kind == 2 ? (string_address) ".jpg" : null;
+#else
+        (void)bytes, (void)size;
+        return null;
+#endif
+}
+
+// A picture's bytes decoded for its miniature: at the fewest eighths that still give SETTING_WALLPAPER_MINI each way (a JPEG; a PNG
+// is decoded whole), at most 16384 a side before that.
+static unsigned int address_to locale_wallpaper_decoded(const p8 address_to bytes, positive size, int address_to width, int address_to height)
+{
+#ifndef SHELL_UTILITY_PROGRAM
+        return ui_image_decode_at(bytes, size, width, height, 16384, SETTING_WALLPAPER_MINI, SETTING_WALLPAPER_MINI);
+#else
+        (void)bytes, (void)size, (void)width, (void)height;
+        return null;
+#endif
+}
 
 // A file of /root read whole, whatever its length, and ended: null when it is not there (memory_free it with *room).
 static p8 address_to locale_wallpaper_text(string_address path, positive address_to used, positive address_to room)
@@ -648,17 +677,18 @@ static bipolar locale_wallpaper_mini(string_address path, const unsigned int add
         return failed;
 }
 
-// canvas wallpaper picture FILE: the PNG read, judged, unpacked for its miniature, named, kept, listed first and asked for the Scene you are on.
+// canvas wallpaper picture FILE: the picture read, judged, unpacked for its miniature, named, kept, listed first and asked for the Scene
+// you are on.
 static b32 locale_wallpaper_remember(string_address file)
 {
-        static const p8 signature[8] = {137, 'P', 'N', 'G', 13, 10, 26, 10};
         p8 name[SETTING_WALLPAPER_NAME], stem[SETTING_WALLPAPER_NAME], target[sizeof(SETTING_WALLPAPER_DIR "/") + SETTING_WALLPAPER_NAME + 8];
-        p8 mini[sizeof(target)], word[SETTING_WALLPAPER_WORD];
+        p8 mini[sizeof(target)], other[sizeof(target)], word[SETTING_WALLPAPER_WORD];
         p8 address_to bytes = null, address_to list;
         unsigned int address_to picture = null;
         int width = 0, height = 0;
         positive got = 0, used, room, from, to;
         bipolar failed, handle;
+        string_address suffix = null;
 
         handle = system_open_at(AT_FDCWD, file, FILE_READ | O_CLOEXEC);
         if (handle < 0)
@@ -673,15 +703,13 @@ static b32 locale_wallpaper_remember(string_address file)
                 got += (positive)read;
         }
         system_close(handle);
-#ifndef SHELL_UTILITY_PROGRAM
-        if (bytes && got <= LOCALE_WALLPAPER_MOST && got >= 33 && !memory_compare(bytes, signature, 8) && !memory_compare(bytes + 12, "IHDR", 4))
-                picture = ui_png_decode_most(bytes, got, &width, &height, 16384);
-#endif
+        if (bytes && got <= LOCALE_WALLPAPER_MOST && (suffix = locale_wallpaper_suffix(bytes, got)))
+                picture = locale_wallpaper_decoded(bytes, got, &width, &height);
         if (!picture)
         {
                 if (bytes)
                         memory_free(bytes, LOCALE_WALLPAPER_MOST + 1);
-                return host_refuse("%s is not a PNG of at most 64 MiB the desktop can read: a wallpaper is a PNG picture\n", file);
+                return host_refuse("%s is not a picture of at most 64 MiB the desktop can read: a wallpaper is a PNG or a JPEG\n", file);
         }
         if (!bowl_is_root())
         {
@@ -704,9 +732,13 @@ static b32 locale_wallpaper_remember(string_address file)
         if (list)
                 memory_free(list, room);
         string_join(target, sizeof(target), (string_address)SETTING_WALLPAPER_DIR "/", name);
-        string_append_bounded(target, (string_address) ".png", sizeof(target));
+        string_append_bounded(target, suffix, sizeof(target));
         string_join(mini, sizeof(mini), (string_address)SETTING_WALLPAPER_DIR "/", name);
         string_append_bounded(mini, (string_address) ".mini", sizeof(mini));
+        // A copy in the other form left by an earlier picture of the name is not this one's: the compositor reads .png first.
+        string_join(other, sizeof(other), (string_address)SETTING_WALLPAPER_DIR "/", name);
+        string_append_bounded(other, string_equals(suffix, ".png") ? (string_address) ".jpg" : (string_address) ".png", sizeof(other));
+        (void)system_remove_at(AT_FDCWD, other, 0);
         failed = host_make_directory((string_address)SETTING_WALLPAPER_DIR, 0755, false);
         if (failed >= 0)
                 failed = host_write_file(target, bytes, got, 0644, true);
@@ -745,10 +777,10 @@ static b32 locale_wallpaper_forget(string_address name)
         host_need_root();
         if (locale_wallpaper_list_put(null, name))
                 return 1;
-        for (positive k = 0; k < 2; k++)
+        for (positive k = 0; k < 3; k++)
         {
                 string_join(path, sizeof(path), (string_address)SETTING_WALLPAPER_DIR "/", name);
-                string_append_bounded(path, k ? (string_address) ".mini" : (string_address) ".png", sizeof(path));
+                string_append_bounded(path, k == 2 ? (string_address) ".mini" : k ? (string_address) ".jpg" : (string_address) ".png", sizeof(path));
                 (void)system_remove_at(AT_FDCWD, path, 0);
         }
         host_say(log, host_label "%s is remembered no more\n", name);
@@ -762,8 +794,9 @@ static b32 locale_wallpaper_forget(string_address name)
         key, the highest sequence seen (kept in LOCALE_CURATED_SEQUENCE, so an older feed is refused) and the clock (an expired feed is none)
         before a byte of it is read, keeps it, and for each wallpaper whose id is a name fetches its thumbnail, checks its size and digest
         against the feed's, and makes its miniature (curated/HEX.mini, HEX the picture's digest); then the list the compositor shows
-        (SETTING_WALLPAPER_CURATED_PATH). get HEX fetches that wallpaper's picture, checked the same, into curated/HEX.png, and asks the
-        compositor to make the wallpaper again with it. Bare, the wallpapers of the feed kept, verified again. Every failure is closed: no
+        (SETTING_WALLPAPER_CURATED_PATH). get HEX fetches that wallpaper's picture, checked the same, into curated/HEX.png or curated/HEX.jpg
+        by what its bytes are (the feed says no form: a PNG or a JPEG is taken, anything else is not kept), and asks the compositor to make
+        the wallpaper again with it. Bare, the wallpapers of the feed kept, verified again. Every failure is closed: no
         feed that verifies is an empty list and no curated card, and a picture whose digest is not the feed's is never kept. The editor runs
         fetch when it opens and get when a curated card is pressed.
 */
@@ -841,16 +874,15 @@ static bool locale_curated_text(mwfd_slice slice, p8 address_to into, positive r
         return true;
 }
 
-// A PNG of the feed's (verified bytes) unpacked and made a miniature at path.
+// A picture of the feed's (verified bytes, a PNG or a JPEG by what they are) unpacked and made a miniature at path.
 static bipolar locale_curated_mini(string_address path, const p8 address_to bytes, positive size)
 {
         unsigned int address_to picture = null;
         int width = 0, height = 0;
         bipolar failed;
 
-#ifndef SHELL_UTILITY_PROGRAM
-        picture = ui_png_decode_most(bytes, size, &width, &height, 16384);
-#endif
+        if (locale_wallpaper_suffix(bytes, size))
+                picture = locale_wallpaper_decoded(bytes, size, &width, &height);
         if (!picture)
                 return -EBADMSG;
         failed = locale_wallpaper_mini(path, picture, width, height);
@@ -1023,13 +1055,24 @@ static b32 locale_curated_get(string_address want)
                 string_append_bounded(path, (string_address) ".png", sizeof(path));
                 if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                         break;
+                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", hex);
+                string_append_bounded(path, (string_address) ".jpg", sizeof(path));
+                if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
+                        break;
                 if (items[k].bytes > LOCALE_WALLPAPER_MOST || !locale_curated_text(items[k].url, url, sizeof(url)))
                         failed = -EFBIG;
                 else if (!(failed = mwfd_fetch_asset((string_address)url, items[k].bytes, items[k].sha256, address_of body)))
                 {
-                        failed = host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false);
+                        // The digest and the count are the feed's; what the bytes are is theirs: a PNG or a JPEG, kept under its name.
+                        string_address suffix = locale_wallpaper_suffix(body.bytes, body.used);
+
+                        failed = suffix ? host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false) : -EBADMSG;
                         if (failed >= 0)
+                        {
+                                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", hex);
+                                string_append_bounded(path, suffix, sizeof(path));
                                 failed = host_write_file(path, body.bytes, body.used, 0644, true);
+                        }
                         byte_store_release(address_of body);
                 }
         }
@@ -1104,7 +1147,19 @@ static b32 locale_canvas_wallpaper(string_address address_to arguments, positive
                                 stop++;
                         text[stop] = end;
                         if (setting_wallpaper_name_ok((const char address_to)text + at, stop - at))
-                                host_say(log, host_label "picture %s: " SETTING_WALLPAPER_DIR "/%s.png\n", (string_address)text + at, (string_address)text + at);
+                        {
+                                p8 path[sizeof(SETTING_WALLPAPER_DIR "/") + SETTING_WALLPAPER_NAME + 8];
+                                file_facts facts;
+
+                                string_join(path, sizeof(path), (string_address)SETTING_WALLPAPER_DIR "/", text + at);
+                                string_append_bounded(path, (string_address) ".png", sizeof(path));
+                                if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
+                                {
+                                        string_join(path, sizeof(path), (string_address)SETTING_WALLPAPER_DIR "/", text + at);
+                                        string_append_bounded(path, (string_address) ".jpg", sizeof(path));
+                                }
+                                host_say(log, host_label "picture %s: %s\n", (string_address)text + at, (string_address)path);
+                        }
                         at = stop + 1;
                 }
                 if (text)

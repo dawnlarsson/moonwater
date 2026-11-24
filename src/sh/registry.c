@@ -138,8 +138,8 @@
 // Each Scene's wallpaper (the compositor's wallpaper.c). The Scenes' words, a line a Scene (the screen's name, the Scene's number among its
 // desktop Scenes from 1, and its word), written by the compositor alone: the command asks it to with a file of its own whose name starts
 // SETTING_WALLPAPER_ASK (wallpaper.c's compositor_walls_asks). The pictures remembered, a name a line, the most recent first, written by the
-// command alone. And their directory: a picture is NAME.png with its miniature NAME.mini beside it (setting_wallpaper_mini_read), and one
-// of the feed's is curated/HEX.png by its digest.
+// command alone. And their directory: a picture is NAME.png or NAME.jpg (a PNG or a JPEG, by what its bytes are) with its miniature
+// NAME.mini beside it (setting_wallpaper_mini_read), and one of the feed's is curated/HEX.png or curated/HEX.jpg by its digest.
 #define SETTING_WALLPAPER_SCENES_PATH "/root/canvas.wallpaper.scenes"
 #define SETTING_WALLPAPER_PICTURES_PATH "/root/canvas.wallpaper.pictures"
 // The feed's curated wallpapers the command verified (canvas wallpaper curated fetch): a line each, the digest of its picture in hex and its id,
@@ -1905,7 +1905,7 @@ static fn setting_wallpaper_colour_word(unsigned int colour, char address_to wor
         word[13] = 0;
 }
 
-// The file of a word's picture (SETTING_WALLPAPER_DIR/NAME.png or curated/HEX.png, with suffix in place of .png): false for the moon's words.
+// The file of a word's picture (SETTING_WALLPAPER_DIR/NAME or curated/HEX, then suffix: .png, .jpg, .mini): false for the moon's words.
 static bool setting_wallpaper_file(const char address_to word, const char address_to suffix, char address_to path, positive room)
 {
         positive length = string_length((string_address)word);
@@ -2036,7 +2036,7 @@ static bool setting_wallpaper_line(const char address_to text, positive size, po
 }
 
 /*
-        A picture's miniature (NAME.mini beside NAME.png, made by `canvas wallpaper picture`): "MWMI", its width and height (little end
+        A picture's miniature (NAME.mini beside NAME.png or NAME.jpg, made by `canvas wallpaper picture`): "MWMI", its width and height (little end
         first, each 1 to SETTING_WALLPAPER_MINI) and four bytes of none, then its pixels, opaque, a row after a row. The window and the
         compositor read it, never the picture, for a thumbnail: the picture is megabytes to unpack, this a few hundred kilobytes to read.
         Answers its pixels (memory_free them with *bytes), null when it is not there or not one.

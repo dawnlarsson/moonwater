@@ -175,7 +175,7 @@ static inline b32 files_in_rect(int x, int y, int rx, int ry, int rw, int rh) { 
 static inline fn files_clear_msg(void) { files.said = 0, files.big->note[0] = 0; }
 
 /*
-        Pick mode. files -pick image, which the wallpaper's editor starts: a PNG opened is the wallpaper of the Scene you are on, and Files
+        Pick mode. files -pick image, which the wallpaper's editor starts: a picture opened is the wallpaper of the Scene you are on, and Files
         ends. files -pick open|folder|save, which the session bus's FileChooser portal starts for a program (src/dbus/service.c): what the
         person picks is written to standard output, each path ended by a NUL, and Files ends; Cancel, or the window shut, writes nothing.
         open picks a file (Enter, a double press, or Open on the bar), and with -multiple every file chosen when more than one is; folder
@@ -1919,11 +1919,16 @@ static fn files_sheet_open(b32 folder, int x, int y)
         files_sheet_show();
 }
 
-static b32 files_is_png(struct files_model address_to m, const struct files_entry address_to e)
+// A file a wallpaper may be, by its name: .png, .jpg or .jpeg in any case (what it is, `canvas wallpaper picture` reads from its bytes).
+static b32 files_is_picture(struct files_model address_to m, const struct files_entry address_to e)
 {
         const char address_to name = (const char address_to)files_model_name(m, e);
         positive len = e ? e->length : 0;
-        return len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'p' && (name[len - 2] | 32) == 'n' && (name[len - 1] | 32) == 'g';
+        b32 png = len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'p' && (name[len - 2] | 32) == 'n' && (name[len - 1] | 32) == 'g';
+        b32 jpg = len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'j' && (name[len - 2] | 32) == 'p' && (name[len - 1] | 32) == 'g';
+        b32 jpeg = len > 5 && name[len - 5] == '.' && (name[len - 4] | 32) == 'j' && (name[len - 3] | 32) == 'p' && (name[len - 2] | 32) == 'e' &&
+                   (name[len - 1] | 32) == 'g';
+        return png || jpg || jpeg;
 }
 
 static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name, p64 total);
@@ -1958,7 +1963,7 @@ static fn files_open_with(b32 editor)
         }
 }
 
-// Set as Wallpaper: the PNG remembered and made the wallpaper of the Scene you are on (setting.c's canvas wallpaper picture).
+// Set as Wallpaper: the picture remembered and made the wallpaper of the Scene you are on (setting.c's canvas wallpaper picture).
 static fn files_wallpaper(void)
 {
         struct files_model address_to m = &files.big->model;
@@ -1966,7 +1971,7 @@ static fn files_wallpaper(void)
         static p8 path[FILES_PATH];
         string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
                                    (string_address)path, null};
-        if (!files_model_is_remote(m) && e && e->kind != FILES_KIND_DIRECTORY && files_is_png(m, e) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
+        if (!files_model_is_remote(m) && e && e->kind != FILES_KIND_DIRECTORY && files_is_picture(m, e) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
                 (void)ui_start_apart(words, 5);
 }
 
@@ -1985,7 +1990,7 @@ static b32 files_pick_say(const p8 address_to path)
         return path[0] == '/' && system_write_all(1, path, length) == (bipolar)length;
 }
 
-// A file opened in pick mode. The wallpaper's: a PNG of this machine is remembered and the Scene's (Set as Wallpaper's verb), the editor
+// A file opened in pick mode. The wallpaper's: a picture of this machine is remembered and the Scene's (Set as Wallpaper's verb), the editor
 // shown again with it, and Files ends; anything else is not a picture, and it says so. A program's open: the file, or every file chosen
 // when it takes many and more than one is, and Files ends. A program's save: the file's name is the one to save under. A folder pick
 // takes no file.
@@ -2020,7 +2025,7 @@ static fn files_pick(struct files_model address_to m, const struct files_entry a
                 files_picked = true;
                 return;
         }
-        if (files_model_is_remote(m) || !files_is_png(m, e) || !files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
+        if (files_model_is_remote(m) || !files_is_picture(m, e) || !files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
                 return (void)(files.said = LANGUAGE_files_pick, files.dirty = true);
         (void)ui_start_apart(words, 5);
         files_pick_back(), files_picked = true;
@@ -2132,11 +2137,11 @@ static fn files_menu_open(b32 on, int x, int y)
         menu->count = 0, files.sheet = false;
         if (on && e)
         {
-                b32 png = !folder && !files_model_is_remote(m) && files_is_png(m, e);
+                b32 picture = !folder && !files_model_is_remote(m) && files_is_picture(m, e);
                 const struct ui_menu_spec head[] = {
                     {WORDS(menu_open), "Enter", 0, FILES_MENU_OPEN, false},
                     {WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR, folder},
-                    {WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER, !png},
+                    {WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER, !picture},
                 };
                 b32 remote = files_model_is_remote(m);
                 const struct ui_menu_spec tail[] = {

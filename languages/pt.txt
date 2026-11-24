@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language pt
 @name Português
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	Isto não é uma pasta
 files_nothing_to_paste	c9d4	A área de transferência não tem arquivos
 files_nothing_to_redo	b2a4	Nada para refazer
 files_nothing_to_undo	1433	Nada para desfazer
-files_pick	8f59	Abra uma imagem PNG para a tornar o fundo desta cena
+files_pick	5ed6	Abra uma imagem PNG ou JPEG para a tornar o fundo desta cena
 files_pick_cancel	ca3b	Cancelar
 files_pick_folder	1108	Escolher esta pasta
 files_pick_replace	a2d7	Já existe um ficheiro com este nome: guarde de novo para o substituir

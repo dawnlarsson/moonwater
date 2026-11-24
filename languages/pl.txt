@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language pl
 @name Polski
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	To nie jest folder
 files_nothing_to_paste	c9d4	Schowek nie zawiera plików
 files_nothing_to_redo	b2a4	Nie ma czego ponowić
 files_nothing_to_undo	1433	Nie ma czego cofnąć
-files_pick	8f59	Otwórz obraz PNG, aby był tapetą tej sceny
+files_pick	5ed6	Otwórz obraz PNG lub JPEG, aby był tapetą tej sceny
 files_pick_cancel	ca3b	Anuluj
 files_pick_folder	1108	Wybierz ten folder
 files_pick_replace	a2d7	Plik o tej nazwie już istnieje: zapisz ponownie, aby go zastąpić

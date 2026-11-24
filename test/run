@@ -12766,6 +12766,18 @@ if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
         esac
 fi
 
+#       The JPEG decoder of the kit the frames above link (ui.c's ui_jpeg_*), the same way: libFuzzer where clang has it, else its own
+#       coverage-guided driver under a compiler with ASan and UBSan (MOONWATER_FUZZ_CC, MOONWATER_FUZZ_RUN). A minute here;
+#       MOONWATER_FUZZ_SECONDS lengthens it. Not run without such a compiler, which is not a failure.
+if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
+        python3 test/differential.py --harness jpeg_fuzz > "$work/jpeg-fuzz.out" 2>&1
+        case $? in
+        0) won ;;
+        2) note "jpeg_fuzz: skipped (soft) -- does not downgrade term" ;;
+        *) lost 'the JPEG decoder under fuzz' "$(head -3 "$work/jpeg-fuzz.out" | tr '\n' ' ')" ;;
+        esac
+fi
+
 section ""
 
 total=$((pass + fail))

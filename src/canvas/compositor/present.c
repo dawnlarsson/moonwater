@@ -968,15 +968,16 @@ static struct
 } compositor_wall_rows;
 
 /*
-        A picture wallpaper (`canvas wallpaper picture FILE`, which puts a copy of the PNG in COMPOSITOR_WALL_DIR, or one of the feed's): the
-        file of the word of the Scene a screen shows (registry.c's setting_wallpaper_file). It covers the screen, cut at its long sides to the
-        screen's shape, and is made on the wallpaper's thread as the moon is; a file that is not a PNG the kit reads, or larger than the
-        limits, is the moon.
+        A picture wallpaper (`canvas wallpaper picture FILE`, which puts a copy of the PNG or JPEG in COMPOSITOR_WALL_DIR, or one of the
+        feed's): the file of the word of the Scene a screen shows (registry.c's setting_wallpaper_file). It covers the screen, cut at its long
+        sides to the screen's shape, and is made on the wallpaper's thread as the moon is; a JPEG is decoded at the fewest eighths of it that
+        still cover the screen (a 50-megapixel original is decoded at a half or a quarter for 4K, straight from its DCT), and a file that is
+        not a picture the kit reads, or larger than the limits as it is decoded, is the moon.
 */
 #define COMPOSITOR_WALL_DIR SETTING_WALLPAPER_DIR
 #define COMPOSITOR_WALL_KEY 9
 #define COMPOSITOR_WALL_FILE_MOST (64ul << 20)       // the bytes of a picture's file
-#define COMPOSITOR_WALL_PIXELS_MOST (48ul << 20)     // and its pixels, 8K by 4K and more
+#define COMPOSITOR_WALL_PIXELS_MOST (48ul << 20)     // and its pixels as decoded, 8K by 4K and more
 #define COMPOSITOR_WALL_SIDE_MOST 16384u
 
 #define COMPOSITOR_WALL_SCREENS WINDOWS_OUTPUTS
@@ -1075,10 +1076,15 @@ static int compositor_wall_picture_of(const char *word, char *path, positive roo
 {
         if (setting_wallpaper_file(word, ".png", path, room) && compositor_wall_look(path, null) == 0100000u)
                 return 1;
+        if (setting_wallpaper_file(word, ".jpg", path, room) && compositor_wall_look(path, null) == 0100000u)
+                return 1;
         return path[0] = 0, 0;
 }
 
-static unsigned int *ui_png_decode_most(const p8 *file, positive size, int *width_out, int *height_out, unsigned int most);
+static b32 ui_image_measure(const p8 *file, positive size, unsigned int most, unsigned int want_w, unsigned int want_h, unsigned int *width,
+                            unsigned int *height);
+static unsigned int *ui_image_decode_at(const p8 *file, positive size, int *width_out, int *height_out, unsigned int most, unsigned int want_w,
+                                        unsigned int want_h);
 
 static int compositor_wall_picture(const char *path, unsigned int *into, int pitch, int w, int h)
 {
@@ -1102,13 +1108,9 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
         system_close(handle);
         if (!file)
                 return 0;
-        if (got >= 24 && got < COMPOSITOR_WALL_FILE_MOST)
-        {
-                pw = (unsigned int)file[16] << 24 | (unsigned int)file[17] << 16 | (unsigned int)file[18] << 8 | file[19];
-                ph = (unsigned int)file[20] << 24 | (unsigned int)file[21] << 16 | (unsigned int)file[22] << 8 | file[23];
-                if (pw && ph && pw <= COMPOSITOR_WALL_SIDE_MOST && ph <= COMPOSITOR_WALL_SIDE_MOST && (positive)pw * ph <= COMPOSITOR_WALL_PIXELS_MOST)
-                        picture = ui_png_decode_most(file, got, &width, &height, COMPOSITOR_WALL_SIDE_MOST);
-        }
+        if (got < COMPOSITOR_WALL_FILE_MOST && ui_image_measure(file, got, COMPOSITOR_WALL_SIDE_MOST, (unsigned int)w, (unsigned int)h, &pw, &ph) &&
+            (positive)pw * ph <= COMPOSITOR_WALL_PIXELS_MOST)
+                picture = ui_image_decode_at(file, got, &width, &height, COMPOSITOR_WALL_SIDE_MOST, (unsigned int)w, (unsigned int)h);
         memory_free(file, COMPOSITOR_WALL_FILE_MOST);
         if (!picture)
                 return 0;

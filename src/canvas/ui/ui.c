@@ -6631,7 +6631,7 @@ LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
 LANGUAGE_ID(files_nothing_to_redo, "Nothing to do again") \
 LANGUAGE_ID(files_nothing_to_undo, "Nothing to undo") \
-LANGUAGE_ID(files_pick, "Open a PNG picture to make it the wallpaper of this Scene") \
+LANGUAGE_ID(files_pick, "Open a PNG or JPEG picture to make it the wallpaper of this Scene") \
 LANGUAGE_ID(files_pick_cancel, "Cancel") \
 LANGUAGE_ID(files_pick_folder, "Choose this folder") \
 LANGUAGE_ID(files_pick_replace, "A file of this name is here: Save again to replace it") \
@@ -21811,10 +21811,9 @@ static int ui_apps_match(const char address_to window)
         return -1;
 }
 
-/* ---- apps: their pictures ---- */
+/* ---- pictures: PNG ---- */
 
 // A PNG file (the W3C's Portable Network Graphics), decoded to premultiplied 0xaarrggbb:
-#define UI_PNG_MOST 1024
 
 static positive ui_png_inflate(const p8 address_to from, positive size, p8 address_to into, positive room)
 {
@@ -22084,14 +22083,1320 @@ refused:
         return null;
 }
 
-// A picture of the kit's (an app's icon): at most UI_PNG_MOST each way.
-static unsigned int address_to ui_png_decode(const p8 address_to file, positive size, int address_to width_out, int address_to height_out)
+
+/* ---- pictures: JPEG ----
+
+        A JPEG file (ITU-T T.81, ISO/IEC 10918-1, in its JFIF or EXIF wrapping) decoded to what ui_png_decode_most gives: opaque
+        0xffrrggbb words, a row after a row. Baseline, extended sequential and progressive Huffman coding of 8-bit samples; one
+        component (grey) or three (YCbCr, or RGB where an Adobe APP14 marker says transform 0 or the components are named R, G and B, as
+        libjpeg reads them); every sampling factor a frame may give (4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1, and the fractional ones libjpeg
+        refuses); restart intervals. Refused, each before a pixel is made: arithmetic coding, lossless and hierarchical frames, 12-bit
+        samples, two or four components (CMYK and YCCK), and a height only a DNL marker gives. An EXIF orientation turns and mirrors the
+        picture to stand as it was taken; an ICC profile is passed by.
+
+        The arithmetic is libjpeg's, so a well-made file is what djpeg makes of it, bit for bit: the islow inverse DCT, or for a decode
+        at a half, a quarter or an eighth (ui_jpeg_scale) its reduced forms straight from the coefficients, so a 50-megapixel original
+        meant for a 4K screen is never made whole; triangle ("fancy") upsampling of chroma by two each way, a box for any other ratio
+        and at an eighth; and JFIF's YCbCr to RGB. Where libjpeg's C would index its range table with a value no honest file makes, these
+        saturate, as its SIMD does.
+
+        The bytes are a stranger's (a feed's asset, a file a person opens). Every read is held to the file, every table checked as it
+        is read (a Huffman code over-subscribed, a quantization or Huffman table named that is not there, a component named twice or not
+        in the frame, a spectral band or successive approximation no encoder can make, sampling factors past 4 or an MCU of more than 10
+        blocks), and the sizes are checked before anything is allocated: each side at most `most`, every product in 64 bits. Running out
+        of data ends the image where it ends, the rest grey (a progressive file's later scans simply never come), and no loop's count
+        is the data's: an MCU decodes at most 64 symbols a block, a scan at most the frame's MCUs, and the scans together visit each
+        block at most UI_JPEG_PASSES times (an honest progressive file visits each about six), so a file of many tiny scans cannot buy
+        unbounded work.
+*/
+#define UI_JPEG_SIDE_MOST 16384u // libjpeg's JPEG_MAX_DIMENSION is 65500; nothing here is larger than the PNG's bound
+#define UI_JPEG_PASSES 32u       // block visits a block at the most, over all the scans
+#define UI_JPEG_LOOKAHEAD 9      // bits a Huffman code is looked up by at once; longer codes are walked
+
+// The coefficients of a block in the order a scan sends them (zigzag), as their place in the block, and 16 more of 63 for the run
+// a broken block may take past its end (libjpeg's jpeg_natural_order, which absorbs the same overrun the same way).
+static const p8 ui_jpeg_natural[64 + 16] = {
+        0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,  12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6,  7,  14, 21, 28,
+        35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+        63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63};
+
+/* ---- the kernels: what the lib.c routines of the same contract do (jpeg_idct_*, pixels_*, samples_*) ---- */
+
+// libjpeg's islow constants, at CONST_BITS 13: FIX(x) is x * 8192 rounded.
+#define UI_JPEG_F0298 2446
+#define UI_JPEG_F0390 3196
+#define UI_JPEG_F0541 4433
+#define UI_JPEG_F0765 6270
+#define UI_JPEG_F0899 7373
+#define UI_JPEG_F1175 9633
+#define UI_JPEG_F1501 12299
+#define UI_JPEG_F1847 15137
+#define UI_JPEG_F1961 16069
+#define UI_JPEG_F2053 16819
+#define UI_JPEG_F2562 20995
+#define UI_JPEG_F3072 25172
+// and jidctred's, for the reduced ones.
+#define UI_JPEG_F0211 1730
+#define UI_JPEG_F0509 4176
+#define UI_JPEG_F0601 4926
+#define UI_JPEG_F0720 5906
+#define UI_JPEG_F0850 6967
+#define UI_JPEG_F1061 8697
+#define UI_JPEG_F1272 10426
+#define UI_JPEG_F1451 11893
+#define UI_JPEG_F2172 17799
+#define UI_JPEG_F3624 29692
+
+static inline INLINE CONST b16 ui_jpeg_held16(b32 value)
 {
-        return ui_png_decode_most(file, size, width_out, height_out, UI_PNG_MOST);
+        return (b16)(value > 32767 ? 32767 : value < -32768 ? -32768 : value);
 }
 
+static inline INLINE CONST p8 ui_jpeg_sample(b32 value)
+{
+        return (p8)((value > 127 ? 127 : value < -128 ? -128 : value) + 128);
+}
+
+// A coefficient times its quantizer, kept to 16 bits as a 16-bit multiply keeps it (pmullw): an honest file's never needs more.
+static inline INLINE CONST b16 ui_jpeg_dequantized(b16 coefficient, p16 quantizer)
+{
+        return (b16)(p16)((p32)(p16)coefficient * quantizer);
+}
+
+/*
+        One dimension of the islow IDCT over in[0..7] (16-bit, each in[k] at stride apart), its eight sums (before the descale) into
+        out[]: libjpeg's jidctint.c with its rotations written as sums of two products, which is the same arithmetic exactly (every
+        product fits 32 bits) and what a pair of 16-bit lanes multiplied and added does in one instruction. in[0] + in[4], in[0] - in[4],
+        in[7] + in[3] and in[5] + in[1] are 16-bit sums, wrapping as a 16-bit add wraps; everything after is 32 bits, wrapping.
+*/
+static inline INLINE fn ui_jpeg_islow(const b16 address_to in, positive stride, p32 address_to out)
+{
+        b32 i0 = in[0], i1 = in[stride], i2 = in[2 * stride], i3 = in[3 * stride], i4 = in[4 * stride], i5 = in[5 * stride],
+            i6 = in[6 * stride], i7 = in[7 * stride];
+        b32 s04 = (b16)(p16)(i0 + i4), d04 = (b16)(p16)(i0 - i4), z3 = (b16)(p16)(i7 + i3), z4 = (b16)(p16)(i5 + i1);
+        p32 tmp0 = (p32)(s04 * 8192), tmp1 = (p32)(d04 * 8192);
+        p32 tmp3 = (p32)(i2 * (UI_JPEG_F0541 + UI_JPEG_F0765)) + (p32)(i6 * UI_JPEG_F0541);
+        p32 tmp2 = (p32)(i2 * UI_JPEG_F0541) + (p32)(i6 * (UI_JPEG_F0541 - UI_JPEG_F1847));
+        p32 tmp10 = tmp0 + tmp3, tmp13 = tmp0 - tmp3, tmp11 = tmp1 + tmp2, tmp12 = tmp1 - tmp2;
+        p32 z3r = (p32)(z3 * (UI_JPEG_F1175 - UI_JPEG_F1961)) + (p32)(z4 * UI_JPEG_F1175);
+        p32 z4r = (p32)(z3 * UI_JPEG_F1175) + (p32)(z4 * (UI_JPEG_F1175 - UI_JPEG_F0390));
+        p32 o0 = (p32)(i7 * (UI_JPEG_F0298 - UI_JPEG_F0899)) + (p32)(i1 * -UI_JPEG_F0899) + z3r;
+        p32 o3 = (p32)(i7 * -UI_JPEG_F0899) + (p32)(i1 * (UI_JPEG_F1501 - UI_JPEG_F0899)) + z4r;
+        p32 o1 = (p32)(i5 * (UI_JPEG_F2053 - UI_JPEG_F2562)) + (p32)(i3 * -UI_JPEG_F2562) + z4r;
+        p32 o2 = (p32)(i5 * -UI_JPEG_F2562) + (p32)(i3 * (UI_JPEG_F3072 - UI_JPEG_F2562)) + z3r;
+        out[0] = tmp10 + o3, out[7] = tmp10 - o3, out[1] = tmp11 + o2, out[6] = tmp11 - o2;
+        out[2] = tmp12 + o1, out[5] = tmp12 - o1, out[3] = tmp13 + o0, out[4] = tmp13 - o0;
+}
+
+/*
+        jpeg_idct_8x8(into, pitch, coefficients, quantization): a block's 64 coefficients (natural order) times its quantizers, inverse
+        transformed (libjpeg's islow: columns, their results descaled by 11 bits and held to 16, then rows, descaled by 18 bits), held to
+        -128..127 and lifted by 128, into 8 rows of 8 bytes pitch apart. Every input is defined: what wraps or saturates does so as said.
+*/
+static fn ui_jpeg_idct_8x8(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
+{
+        b16 in[64], work[64];
+        p32 out[8];
+
+        for (int k = 0; k < 64; k++)
+                in[k] = ui_jpeg_dequantized(coefficients[k], quantization[k]);
+        for (int column = 0; column < 8; column++)
+        {
+                ui_jpeg_islow(in + column, 8, out);
+                for (int row = 0; row < 8; row++)
+                        work[row * 8 + column] = ui_jpeg_held16((b32)(out[row] + 1024u) >> 11);
+        }
+        for (int row = 0; row < 8; row++, into += pitch)
+        {
+                ui_jpeg_islow(work + row * 8, 1, out);
+                for (int column = 0; column < 8; column++)
+                        into[column] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[column] + (1u << 17)) >> 18));
+        }
+}
+
+/*
+        jpeg_idct_4x4: the same block made 4 by 4 (libjpeg's jidctred.c jpeg_idct_4x4, for a decode at a half): the coefficients of rows
+        and columns 0 to 3, 5, 6 and 7 (4 is not wanted at this size), columns descaled by 12 bits and held to 16, rows by 19.
+*/
+static inline INLINE fn ui_jpeg_reduced4(const b16 address_to in, positive stride, p32 address_to out)
+{
+        b32 i0 = in[0], i1 = in[stride], i2 = in[2 * stride], i3 = in[3 * stride], i5 = in[5 * stride], i6 = in[6 * stride],
+            i7 = in[7 * stride];
+        p32 tmp0 = (p32)(i0 * 16384), tmp2 = (p32)(i2 * UI_JPEG_F1847) + (p32)(i6 * -UI_JPEG_F0765);
+        p32 tmp10 = tmp0 + tmp2, tmp12 = tmp0 - tmp2;
+        p32 o0 = (p32)(i7 * -UI_JPEG_F0211) + (p32)(i5 * UI_JPEG_F1451) + (p32)(i3 * -UI_JPEG_F2172) + (p32)(i1 * UI_JPEG_F1061);
+        p32 o2 = (p32)(i7 * -UI_JPEG_F0509) + (p32)(i5 * -UI_JPEG_F0601) + (p32)(i3 * UI_JPEG_F0899) + (p32)(i1 * UI_JPEG_F2562);
+        out[0] = tmp10 + o2, out[3] = tmp10 - o2, out[1] = tmp12 + o0, out[2] = tmp12 - o0;
+}
+
+static fn ui_jpeg_idct_4x4(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
+{
+        b16 in[64], work[32];
+        p32 out[4];
+
+        for (int k = 0; k < 64; k++)
+                in[k] = ui_jpeg_dequantized(coefficients[k], quantization[k]);
+        for (int column = 0; column < 8; column++)
+        {
+                if (column == 4)
+                        continue;
+                ui_jpeg_reduced4(in + column, 8, out);
+                for (int row = 0; row < 4; row++)
+                        work[row * 8 + column] = ui_jpeg_held16((b32)(out[row] + 2048u) >> 12);
+        }
+        for (int row = 0; row < 4; row++, into += pitch)
+        {
+                ui_jpeg_reduced4(work + row * 8, 1, out);
+                for (int column = 0; column < 4; column++)
+                        into[column] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[column] + (1u << 18)) >> 19));
+        }
+}
+
+// jpeg_idct_2x2: made 2 by 2 (jidctred.c's jpeg_idct_2x2, for a quarter) from rows and columns 0, 1, 3, 5 and 7; columns by 13 bits
+// held to 16, rows by 20.
+static inline INLINE fn ui_jpeg_reduced2(const b16 address_to in, positive stride, p32 address_to out)
+{
+        p32 even = (p32)(in[0] * 32768);
+        p32 odd = (p32)(in[7 * stride] * -UI_JPEG_F0720) + (p32)(in[5 * stride] * UI_JPEG_F0850) + (p32)(in[3 * stride] * -UI_JPEG_F1272) +
+                  (p32)(in[stride] * UI_JPEG_F3624);
+        out[0] = even + odd, out[1] = even - odd;
+}
+
+static fn ui_jpeg_idct_2x2(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
+{
+        b16 in[64], work[16];
+        p32 out[2];
+
+        for (int k = 0; k < 64; k++)
+                in[k] = ui_jpeg_dequantized(coefficients[k], quantization[k]);
+        memory_zero(work, sizeof(work));
+        for (int column = 0; column < 8; column++)
+        {
+                if (column == 2 || column == 4 || column == 6)
+                        continue;
+                ui_jpeg_reduced2(in + column, 8, out);
+                work[column] = ui_jpeg_held16((b32)(out[0] + 4096u) >> 13);
+                work[8 + column] = ui_jpeg_held16((b32)(out[1] + 4096u) >> 13);
+        }
+        for (int row = 0; row < 2; row++, into += pitch)
+        {
+                ui_jpeg_reduced2(work + row * 8, 1, out);
+                into[0] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[0] + (1u << 19)) >> 20));
+                into[1] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[1] + (1u << 19)) >> 20));
+        }
+}
+
+// jpeg_idct_1x1: the DC alone, for an eighth: (DC times its quantizer + 4) >> 3, held and lifted.
+static fn ui_jpeg_idct_1x1(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
+{
+        (void)pitch;
+        into[0] = ui_jpeg_sample(((b32)ui_jpeg_dequantized(coefficients[0], quantization[0]) + 4) >> 3);
+}
+
+// A block with only its DC set, as each IDCT makes it (every one of them makes it flat): the one sample it is.
+static inline INLINE CONST p8 ui_jpeg_flat(b16 coefficient, p16 quantizer, unsigned int scale)
+{
+        b32 dc = ui_jpeg_dequantized(coefficient, quantizer);
+
+        if (scale == 1)
+                return ui_jpeg_sample((dc + 4) >> 3);
+        return ui_jpeg_sample((ui_jpeg_held16(dc * 4) + 16) >> 5);
+}
+
+static inline INLINE CONST p8 ui_jpeg_byte(b32 value)
+{
+        return (p8)(value < 0 ? 0 : value > 255 ? 255 : value);
+}
+
+/*
+        pixels_from_ycbcr(into, y, cb, cr, count): count opaque 0xffrrggbb words from JFIF's YCbCr (libjpeg's jdcolor.c, 16-bit
+        fixed point: R = Y + 1.402 Cr', G = Y - 0.34414 Cb' - 0.71414 Cr', B = Y + 1.772 Cb', with Cb' and Cr' the samples less 128,
+        each rounded as its tables round, then held to 0..255).
+*/
+static fn ui_jpeg_from_ycbcr(unsigned int address_to into, const p8 address_to y, const p8 address_to cb, const p8 address_to cr, positive count)
+{
+        for (positive x = 0; x < count; x++)
+        {
+                b32 l = y[x], u = (b32)cb[x] - 128, v = (b32)cr[x] - 128;
+
+                into[x] = 0xff000000u | (unsigned int)ui_jpeg_byte(l + ((91881 * v + 32768) >> 16)) << 16 |
+                          (unsigned int)ui_jpeg_byte(l + ((-22554 * u - 46802 * v + 32768) >> 16)) << 8 | ui_jpeg_byte(l + ((116130 * u + 32768) >> 16));
+        }
+}
+
+// pixels_from_grey(into, y, count): a sample each, grey and opaque.
+static fn ui_jpeg_from_grey(unsigned int address_to into, const p8 address_to y, positive count)
+{
+        for (positive x = 0; x < count; x++)
+                into[x] = 0xff000000u | (unsigned int)y[x] * 0x010101u;
+}
+
+// pixels_from_planes(into, r, g, b, count): three planes of one sample each made opaque words.
+static fn ui_jpeg_from_planes(unsigned int address_to into, const p8 address_to r, const p8 address_to g, const p8 address_to b, positive count)
+{
+        for (positive x = 0; x < count; x++)
+                into[x] = 0xff000000u | (unsigned int)r[x] << 16 | (unsigned int)g[x] << 8 | b[x];
+}
+
+/*
+        samples_double(into, from, count): count samples made 2 * count by libjpeg's h2v1 triangle filter (each new sample 3/4 its
+        nearer one and 1/4 the other neighbour, rounding alternately up and down; the ends copied). count is at least 2.
+*/
+static fn ui_jpeg_double(p8 address_to into, const p8 address_to from, positive count)
+{
+        into[0] = from[0];
+        into[1] = (p8)((from[0] * 3 + from[1] + 2) >> 2);
+        for (positive x = 1; x + 1 < count; x++)
+        {
+                unsigned int near = from[x] * 3u;
+
+                into[2 * x] = (p8)((near + from[x - 1] + 1) >> 2);
+                into[2 * x + 1] = (p8)((near + from[x + 1] + 2) >> 2);
+        }
+        into[2 * count - 2] = (p8)((from[count - 1] * 3 + from[count - 2] + 1) >> 2);
+        into[2 * count - 1] = from[count - 1];
+}
+
+/*
+        samples_double_rows(into, near, far, count): one row of libjpeg's h2v2 triangle filter: the column sums 3 near + far, then across
+        as samples_double does with 16 for 4 (bias 8 and 7). count is at least 2.
+*/
+static fn ui_jpeg_double_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count)
+{
+        unsigned int last = near[0] * 3u + far[0], this = last, next;
+
+        for (positive x = 0; x < count; x++)
+        {
+                next = x + 1 < count ? near[x + 1] * 3u + far[x + 1] : this;
+                into[2 * x] = (p8)(x ? (this * 3 + last + 8) >> 4 : (this * 4 + 8) >> 4);
+                into[2 * x + 1] = (p8)(x + 1 < count ? (this * 3 + next + 7) >> 4 : (this * 4 + 7) >> 4);
+                last = this, this = next;
+        }
+}
+
+// samples_blend_rows(into, near, far, count, bias): libjpeg's h1v2 triangle filter's row: (3 near + far + bias) / 4, bias 1 for the
+// upper of the two rows a row makes and 2 for the lower.
+static fn ui_jpeg_blend_rows(p8 address_to into, const p8 address_to near, const p8 address_to far, positive count, unsigned int bias)
+{
+        for (positive x = 0; x < count; x++)
+                into[x] = (p8)((near[x] * 3u + far[x] + bias) >> 2);
+}
+
+/* ---- the entropy-coded data ---- */
+
+struct ui_jpeg_huffman
+{
+        p16 fast[1 << UI_JPEG_LOOKAHEAD];    // a code of at most UI_JPEG_LOOKAHEAD bits: its length << 8 | its symbol; 0 a longer one
+        b16 fast_ac[1 << UI_JPEG_LOOKAHEAD]; // an AC code and its value together where both fit: value << 8 | run << 4 | bits; 0 none
+        p32 limit[18];                       // one past the last code of each length, left aligned to 16 bits; limit[17] past all
+        b32 delta[17];                       // a code c of length l is symbols[(c >> (16 - l)) + delta[l]]
+        p8 symbols[256];
+        b32 defined;
+};
+
+// What is read of a segment of a scan's data, its stuffing taken out: the bits above count in window are the next ones.
+struct ui_jpeg_bits
+{
+        const p8 address_to start, address_to at, address_to stop;
+        p64 window;
+        unsigned int count, past; // past: the zero bytes given after the end
+};
+
+// The bits topped up to at least 57 (Fabian Giesen's refill: the bytes loaded below count are the right ones, so they may be
+// loaded again); within 8 bytes of the end a byte at a time, and zeros after it, counted.
+static inline INLINE fn ui_jpeg_fill(struct ui_jpeg_bits address_to b)
+{
+        if (likely(b->stop - b->at >= 8))
+        {
+                b->window |= network_load_64(b->at) >> b->count;
+                b->at += (63 - b->count) >> 3;
+                b->count |= 56;
+                return;
+        }
+        while (b->count <= 56)
+        {
+                p64 byte = 0;
+
+                if (b->at < b->stop)
+                        byte = *b->at++;
+                else
+                        b->past++;
+                b->window |= byte << (56 - b->count);
+                b->count += 8;
+        }
+}
+
+// Whether every bit of the segment has been taken: its end, and more.
+static inline INLINE b32 ui_jpeg_spent(const struct ui_jpeg_bits address_to b)
+{
+        return (positive)(b->at - b->start + b->past) * 8 - b->count >= (positive)(b->stop - b->start) * 8;
+}
+
+static inline INLINE fn ui_jpeg_take(struct ui_jpeg_bits address_to b, unsigned int bits)
+{
+        b->window <<= bits, b->count -= bits;
+}
+
+// The next bits bits (1 to 16) as a number; at least that many are there (a symbol's read leaves 40).
+static inline INLINE unsigned int ui_jpeg_bits_of(struct ui_jpeg_bits address_to b, unsigned int bits)
+{
+        unsigned int value = (unsigned int)(b->window >> (64 - bits));
+
+        ui_jpeg_take(b, bits);
+        return value;
+}
+
+// Those bits as the signed value of a coefficient of that size (T.81's EXTEND).
+static inline INLINE b32 ui_jpeg_value(struct ui_jpeg_bits address_to b, unsigned int bits)
+{
+        b32 value = (b32)ui_jpeg_bits_of(b, bits);
+
+        return value - ((((value >> (bits - 1)) & 1) - 1) & ((1 << bits) - 1));
+}
+
+// One bit, topped up first.
+static inline INLINE unsigned int ui_jpeg_bit(struct ui_jpeg_bits address_to b)
+{
+        if (b->count < 1)
+                ui_jpeg_fill(b);
+        return ui_jpeg_bits_of(b, 1);
+}
+
+// The next symbol of a table, with at least 40 bits left after it for its value; a code that is none of the table's is 16 bits
+// taken and the symbol 0 (libjpeg's "fake a zero").
+static inline INLINE unsigned int ui_jpeg_symbol(struct ui_jpeg_bits address_to b, const struct ui_jpeg_huffman address_to h)
+{
+        unsigned int fast, code, length;
+
+        if (b->count < 32)
+                ui_jpeg_fill(b);
+        fast = h->fast[b->window >> (64 - UI_JPEG_LOOKAHEAD)];
+        if (likely(fast))
+        {
+                ui_jpeg_take(b, fast >> 8);
+                return fast & 255;
+        }
+        code = (unsigned int)(b->window >> 48);
+        for (length = UI_JPEG_LOOKAHEAD + 1; code >= h->limit[length]; length++)
+                ;
+        if (length > 16)
+        {
+                ui_jpeg_take(b, 16);
+                return 0;
+        }
+        ui_jpeg_take(b, length);
+        return h->symbols[(code >> (16 - length)) + (unsigned int)h->delta[length]];
+}
+
+/*
+        A DHT's table (16 counts, then the symbols) made a decoding table. Refused: more than 256 symbols, a count that claims more codes
+        than its length has room for, or a DC symbol over 15. The codes are T.81's canonical ones (Annex C), assigned length by length;
+        libjpeg's check that no code is all ones is kept, as no encoder makes one.
+*/
+static b32 ui_jpeg_huffman_make(struct ui_jpeg_huffman address_to h, const p8 address_to counts, const p8 address_to symbols, positive total, b32 ac)
+{
+        unsigned int code = 0, at = 0;
+
+        memory_zero(h, sizeof(*h));
+        if (total > 256)
+                return false;
+        memory_copy(h->symbols, symbols, total);
+        for (unsigned int each = 0; !ac && each < total; each++)
+                if (symbols[each] > 15)
+                        return false;
+        for (unsigned int length = 1; length <= 16; length++)
+        {
+                unsigned int many = counts[length - 1];
+
+                // Refused before a code of the length is placed: more of them than its codes have room for, or one of all ones.
+                if (many && code + many >= 1u << length)
+                        return false;
+                h->delta[length] = (b32)at - (b32)code;
+                for (unsigned int each = 0; each < many; each++, code++, at++)
+                {
+                        if (length <= UI_JPEG_LOOKAHEAD)
+                        {
+                                unsigned int first = code << (UI_JPEG_LOOKAHEAD - length), span = 1u << (UI_JPEG_LOOKAHEAD - length);
+                                unsigned int symbol = symbols[at], size = symbol & 15;
+
+                                for (unsigned int fill = 0; fill < span; fill++)
+                                {
+                                        h->fast[first + fill] = (p16)(length << 8 | symbol);
+                                        if (ac && size && size <= 7 && length + size <= UI_JPEG_LOOKAHEAD)
+                                        {
+                                                b32 bits = (b32)((first + fill) >> (UI_JPEG_LOOKAHEAD - length - size)) & ((1 << size) - 1);
+                                                b32 value = bits - ((((bits >> (size - 1)) & 1) - 1) & ((1 << size) - 1));
+
+                                                h->fast_ac[first + fill] = (b16)(p16)((p32)value << 8 | (symbol >> 4) << 4 | (length + size));
+                                        }
+                                }
+                        }
+                }
+                h->limit[length] = code << (16 - length);
+                code <<= 1;
+        }
+        h->limit[17] = 0xffffffffu;
+        h->defined = true;
+        return true;
+}
+
+/* ---- the decoder ---- */
+
+struct ui_jpeg_component
+{
+        unsigned int id, h, v, table;  // the frame's: its id, sampling factors and quantization table's number
+        unsigned int scale;            // the side of its blocks as decoded: the picture's scale, or more where that spares upsampling
+        unsigned int dc, ac;           // the scan's Huffman tables
+        b32 latched, seen;             // its quantizers taken (at its first scan, as libjpeg latches them); in a scan yet
+        p16 quantization[64];          // natural order
+        p16 predictor;                 // the DC's, wrapping as the coefficient it makes does
+        positive blocks_w, blocks_h;   // the blocks its samples are in
+        positive grid_w, grid_h;       // the blocks of the frame's MCUs (blocks_w by blocks_h in a frame of one component)
+        positive width, height;        // its samples at its scale
+        p8 address_to plane;           // grid_w * scale by grid_h * scale samples (its scale), pitch apart
+        positive pitch, plane_bytes;
+        b16 address_to coefficients;   // progressive: grid_w * grid_h blocks of 64, natural order
+        positive coefficient_bytes;
+};
+
+struct ui_jpeg
+{
+        const p8 address_to file;
+        positive size, at;
+        struct ui_jpeg_huffman dc[4], ac[4];
+        p16 quantization[4][64];
+        b32 quantization_defined[4];
+        struct ui_jpeg_component component[3];
+        unsigned int components, hmax, vmax, width, height, scale, out_w, out_h, restart, orientation, transform;
+        positive mcus_w, mcus_h;
+        b32 frame, progressive, decoded, jfif, adobe;
+        // The scan.
+        unsigned int scan_count, scan[4], ss, se, ah, al;
+        positive eobrun, visits, visits_most;
+        b32 more;                      // the segment ended at a restart marker, so another follows
+        p8 address_to data;            // a segment's bytes, their stuffing taken out
+        positive data_room;
+        struct ui_jpeg_bits bits;
+};
+
+static inline INLINE unsigned int ui_jpeg_be16(const p8 address_to at)
+{
+        return (unsigned int)at[0] << 8 | at[1];
+}
+
+/*
+        The next segment of a scan's data from j->at into j->data, its stuffing (FF 00) made FF and its fill (FF FF) dropped, ended by
+        the next marker: a restart marker is passed (j->more), any other is left for the markers' loop (j->at on its FF), and the file's
+        end ends it too. Each FF is found by memory_first_of and each stretch between them copied whole.
+*/
+static fn ui_jpeg_segment(struct ui_jpeg address_to j)
+{
+        positive used = 0;
+
+        j->more = false;
+        while (j->at < j->size)
+        {
+                const p8 address_to from = j->file + j->at;
+                positive left = j->size - j->at;
+                const p8 address_to mark = (const p8 address_to)memory_first_of(from, (b8)0xff, left);
+                positive run = mark ? (positive)(mark - from) : left;
+
+                memory_copy(j->data + used, from, run);
+                used += run, j->at += run;
+                if (!mark)
+                        break;
+                while (j->at + 1 < j->size && j->file[j->at + 1] == 0xff)
+                        j->at++;
+                if (j->at + 1 >= j->size)
+                {
+                        j->at = j->size;
+                        break;
+                }
+                if (!j->file[j->at + 1])
+                {
+                        j->data[used++] = 0xff, j->at += 2;
+                        continue;
+                }
+                if ((j->file[j->at + 1] & 0xf8) == 0xd0)
+                        j->more = true, j->at += 2;
+                break;
+        }
+        j->bits.start = j->bits.at = j->data, j->bits.stop = j->data + used;
+        j->bits.window = 0, j->bits.count = 0, j->bits.past = 0;
+}
+
+// The modes a scan decodes in.
+#define UI_JPEG_SEQUENTIAL 0
+#define UI_JPEG_DC_FIRST 1
+#define UI_JPEG_DC_REFINE 2
+#define UI_JPEG_AC_FIRST 3
+#define UI_JPEG_AC_REFINE 4
+
+// A block's samples at the decoded scale (all of one value for a block whose data never came: grey).
+static fn ui_jpeg_put(struct ui_jpeg_component address_to c, positive bx, positive by, const b16 address_to block, unsigned int last)
+{
+        unsigned int scale = c->scale;
+        p8 address_to into = c->plane + by * scale * c->pitch + bx * scale;
+
+        if (block && last)
+        {
+                if (scale == 8)
+                        ui_jpeg_idct_8x8(into, c->pitch, block, c->quantization);
+                else if (scale == 4)
+                        ui_jpeg_idct_4x4(into, c->pitch, block, c->quantization);
+                else if (scale == 2)
+                        ui_jpeg_idct_2x2(into, c->pitch, block, c->quantization);
+                else
+                        ui_jpeg_idct_1x1(into, c->pitch, block, c->quantization);
+                return;
+        }
+        p8 value = block ? ui_jpeg_flat(block[0], c->quantization[0], scale) : 128;
+        for (unsigned int row = 0; row < scale; row++, into += c->pitch)
+                memory_fill(into, value, scale);
+}
+
+/*
+        One block of a scan, by its mode, into block (a sequential scan's, zeroed before) or the component's coefficients (a progressive
+        one's): the index of the last coefficient it set (0 for a DC alone) for a sequential scan, else 0. Each mode is T.81's (G.1.2 for
+        the progressive ones) as libjpeg's jdhuff.c and jdphuff.c decode it, its loops bounded by the band whatever the data says.
+*/
+static inline INLINE unsigned int ui_jpeg_block(struct ui_jpeg address_to j, struct ui_jpeg_component address_to c, b16 address_to block, unsigned int mode)
+{
+        struct ui_jpeg_bits address_to b = &j->bits;
+        unsigned int last = 0, s, r;
+
+        if (mode == UI_JPEG_SEQUENTIAL || mode == UI_JPEG_DC_FIRST)
+        {
+                s = ui_jpeg_symbol(b, &j->dc[c->dc]);
+                c->predictor = (p16)(c->predictor + (p32)(s ? ui_jpeg_value(b, s) : 0));
+                if (mode == UI_JPEG_DC_FIRST)
+                {
+                        block[0] = (b16)(p16)(c->predictor << j->al);
+                        return 0;
+                }
+                block[0] = (b16)c->predictor;
+                const struct ui_jpeg_huffman address_to ac = &j->ac[c->ac];
+                for (unsigned int k = 1; k < 64; k++)
+                {
+                        if (b->count < 32)
+                                ui_jpeg_fill(b);
+                        b32 fast = ac->fast_ac[b->window >> (64 - UI_JPEG_LOOKAHEAD)];
+                        if (fast)
+                        {
+                                k += (unsigned int)(fast >> 4) & 15;
+                                ui_jpeg_take(b, (unsigned int)fast & 15);
+                                block[ui_jpeg_natural[k]] = (b16)(fast >> 8);
+                                last = k;
+                                continue;
+                        }
+                        s = ui_jpeg_symbol(b, ac), r = s >> 4, s &= 15;
+                        if (s)
+                        {
+                                k += r;
+                                block[ui_jpeg_natural[k]] = (b16)ui_jpeg_value(b, s);
+                                last = k;
+                        }
+                        else if (r != 15)
+                                break;
+                        else
+                                k += 15;
+                }
+                return last;
+        }
+        if (mode == UI_JPEG_DC_REFINE)
+        {
+                if (ui_jpeg_bit(b))
+                        block[0] = (b16)(p16)((p16)block[0] | 1u << j->al);
+                return 0;
+        }
+        if (mode == UI_JPEG_AC_FIRST)
+        {
+                if (j->eobrun)
+                {
+                        j->eobrun--;
+                        return 0;
+                }
+                for (unsigned int k = j->ss; k <= j->se; k++)
+                {
+                        s = ui_jpeg_symbol(b, &j->ac[c->ac]), r = s >> 4, s &= 15;
+                        if (s)
+                        {
+                                k += r;
+                                block[ui_jpeg_natural[k]] = (b16)(p16)((p32)ui_jpeg_value(b, s) << j->al);
+                        }
+                        else if (r == 15)
+                                k += 15;
+                        else
+                        {
+                                j->eobrun = (positive)1 << r;
+                                if (r)
+                                        j->eobrun += ui_jpeg_bits_of(b, r);
+                                j->eobrun--;
+                                break;
+                        }
+                }
+                return 0;
+        }
+        // A refinement of AC: each coefficient already set takes a correction bit as the band is walked; a new one is +-1 << al.
+        p16 plus = (p16)(1u << j->al), minus = (p16)(0xffffu << j->al);
+        unsigned int k = j->ss;
+        if (!j->eobrun)
+        {
+                for (; k <= j->se; k++)
+                {
+                        p16 value = 0;
+
+                        s = ui_jpeg_symbol(b, &j->ac[c->ac]), r = s >> 4, s &= 15;
+                        if (s)
+                                value = ui_jpeg_bits_of(b, 1) ? plus : minus;
+                        else if (r != 15)
+                        {
+                                j->eobrun = (positive)1 << r;
+                                if (r)
+                                        j->eobrun += ui_jpeg_bits_of(b, r);
+                                break;
+                        }
+                        do
+                        {
+                                b16 address_to at = block + ui_jpeg_natural[k];
+
+                                if (*at)
+                                {
+                                        if (ui_jpeg_bit(b) && !((p16)*at & plus))
+                                                *at = (b16)(p16)((p16)*at + (*at >= 0 ? plus : minus));
+                                }
+                                else if (!r--)
+                                        break;
+                                k++;
+                        } while (k <= j->se);
+                        if (value)
+                                block[ui_jpeg_natural[k]] = (b16)value;
+                }
+        }
+        if (j->eobrun)
+        {
+                for (; k <= j->se; k++)
+                {
+                        b16 address_to at = block + ui_jpeg_natural[k];
+
+                        if (*at && ui_jpeg_bit(b) && !((p16)*at & plus))
+                                *at = (b16)(p16)((p16)*at + (*at >= 0 ? plus : minus));
+                }
+                j->eobrun--;
+        }
+        return 0;
+}
+
+/*
+        A scan's data, from j->at: its MCUs in order, an interval of j->restart of them a segment (a new one after each restart marker,
+        the predictors and the EOB run begun again), each block decoded by its mode. A segment that runs out leaves the rest of its
+        interval undecoded: grey in a sequential scan, the coefficients as they were in a progressive one. j->at is left on the marker
+        that ends the scan.
+*/
+static fn ui_jpeg_scan_data(struct ui_jpeg address_to j, unsigned int mode)
+{
+        struct ui_jpeg_component address_to only = &j->component[j->scan[0]];
+        b32 single = j->scan_count == 1;
+        positive across = single ? only->blocks_w : j->mcus_w, total = across * (single ? only->blocks_h : j->mcus_h);
+        positive left = 0;
+        b32 dry = false;
+        b16 block[64];
+
+        for (positive m = 0; m < total; m++)
+        {
+                positive mx = m % across, my = m / across;
+
+                if (!left)
+                {
+                        if (m && !j->more)
+                                dry = true;
+                        else
+                        {
+                                ui_jpeg_segment(j);
+                                dry = false;
+                        }
+                        for (unsigned int each = 0; each < j->scan_count; each++)
+                                j->component[j->scan[each]].predictor = 0;
+                        j->eobrun = 0;
+                        left = j->restart ? j->restart : total;
+                }
+                left--;
+                dry = dry || ui_jpeg_spent(&j->bits);
+                if (dry && mode != UI_JPEG_SEQUENTIAL && !j->restart)
+                        break;
+                for (unsigned int each = 0; each < j->scan_count; each++)
+                {
+                        struct ui_jpeg_component address_to c = &j->component[j->scan[each]];
+                        unsigned int across_mcu = single ? 1 : c->h, down_mcu = single ? 1 : c->v;
+
+                        for (unsigned int k = 0; k < across_mcu * down_mcu; k++)
+                        {
+                                positive bx = single ? mx : mx * c->h + k % c->h, by = single ? my : my * c->v + k / c->h;
+
+                                if (mode == UI_JPEG_SEQUENTIAL)
+                                {
+                                        if (dry)
+                                        {
+                                                ui_jpeg_put(c, bx, by, null, 0);
+                                                continue;
+                                        }
+                                        memory_zero(block, sizeof(block));
+                                        ui_jpeg_put(c, bx, by, block, ui_jpeg_block(j, c, block, mode));
+                                }
+                                else if (!dry)
+                                        ui_jpeg_block(j, c, c->coefficients + (by * c->grid_w + bx) * 64, mode);
+                        }
+                }
+                j->decoded = true;
+        }
+        // Past the scan's data to the marker that ends it, through any segments its MCUs did not reach.
+        while (j->more)
+                ui_jpeg_segment(j);
+}
+
+/*
+        The frame's header (SOF0, SOF1 or SOF2): 8-bit samples, a height that is there, one or three components, each with an id of its
+        own, sampling factors 1 to 4 and a quantization table 0 to 3, and every size the decode needs worked out and allocated here,
+        before anything else, at the scale asked.
+*/
+static b32 ui_jpeg_frame(struct ui_jpeg address_to j, const p8 address_to at, positive length, unsigned int most)
+{
+        unsigned int count;
+
+        if (j->frame || length < 6)
+                return false;
+        j->height = ui_jpeg_be16(at + 1), j->width = ui_jpeg_be16(at + 3), count = at[5];
+        if (at[0] != 8 || !j->width || !j->height || j->width > most || j->height > most || (count != 1 && count != 3) || length < 6 + 3 * count)
+                return false;
+        j->components = count, j->hmax = j->vmax = 1;
+        for (unsigned int each = 0; each < count; each++)
+        {
+                struct ui_jpeg_component address_to c = &j->component[each];
+
+                c->id = at[6 + 3 * each], c->h = at[7 + 3 * each] >> 4, c->v = at[7 + 3 * each] & 15, c->table = at[8 + 3 * each];
+                if (c->h < 1 || c->h > 4 || c->v < 1 || c->v > 4 || c->table > 3)
+                        return false;
+                for (unsigned int other = 0; other < each; other++)
+                        if (j->component[other].id == c->id)
+                                return false;
+                j->hmax = c->h > j->hmax ? c->h : j->hmax, j->vmax = c->v > j->vmax ? c->v : j->vmax;
+        }
+        if (count == 1)
+                j->component[0].h = j->component[0].v = j->hmax = j->vmax = 1;
+        else
+        {
+                unsigned int blocks = 0;
+
+                for (unsigned int each = 0; each < count; each++)
+                        blocks += j->component[each].h * j->component[each].v;
+                if (blocks > 10)
+                        return false;
+        }
+        j->mcus_w = ((positive)j->width + 8 * j->hmax - 1) / (8 * j->hmax), j->mcus_h = ((positive)j->height + 8 * j->vmax - 1) / (8 * j->vmax);
+        j->out_w = (j->width * j->scale + 7) / 8, j->out_h = (j->height * j->scale + 7) / 8;
+        positive blocks = 0;
+        for (unsigned int each = 0; each < count; each++)
+        {
+                struct ui_jpeg_component address_to c = &j->component[each];
+                positive full_w = ((positive)j->width * c->h + j->hmax - 1) / j->hmax, full_h = ((positive)j->height * c->v + j->vmax - 1) / j->vmax;
+
+                c->blocks_w = (full_w + 7) / 8, c->blocks_h = (full_h + 7) / 8;
+                c->grid_w = count == 1 ? c->blocks_w : j->mcus_w * c->h, c->grid_h = count == 1 ? c->blocks_h : j->mcus_h * c->v;
+                // A component sampled at a half or a quarter is decoded with blocks two or four times the picture's (libjpeg's
+                // jpeg_core_output_dimensions): at a reduced scale its samples are then the picture's own and nothing is upsampled.
+                for (c->scale = j->scale; c->scale < 8 && (j->hmax * j->scale) % (c->h * c->scale * 2) == 0 &&
+                                          (j->vmax * j->scale) % (c->v * c->scale * 2) == 0;)
+                        c->scale *= 2;
+                c->width = ((positive)j->width * c->h * c->scale + 8 * j->hmax - 1) / (8 * j->hmax);
+                c->height = ((positive)j->height * c->v * c->scale + 8 * j->vmax - 1) / (8 * j->vmax);
+                c->pitch = (c->grid_w * c->scale + 63) & ~(positive)63, c->plane_bytes = c->pitch * c->grid_h * c->scale;
+                if (!(c->plane = (p8 address_to)memory_checked(c->plane_bytes)))
+                        return false;
+                if (j->progressive)
+                {
+                        c->coefficient_bytes = c->grid_w * c->grid_h * 128;
+                        if (!(c->coefficients = (b16 address_to)memory_checked(c->coefficient_bytes)))
+                                return false;
+                }
+                blocks += c->blocks_w * c->blocks_h;
+        }
+        j->visits_most = blocks * UI_JPEG_PASSES;
+        j->data_room = j->size;
+        j->frame = true;
+        return (j->data = (p8 address_to)memory_checked(j->data_room)) != null;
+}
+
+/*
+        A scan's header (SOS): one to the frame's count of components, each the frame's and named once, with tables that are there;
+        and for a progressive frame a band and approximation T.81 allows (G.1.1.1.1), a band of AC for one component alone. Then its data.
+        False: no more is decoded (a header the frame does not allow, or the scans' visits spent).
+*/
+static b32 ui_jpeg_scan(struct ui_jpeg address_to j, const p8 address_to at, positive length)
+{
+        unsigned int count, mode;
+        positive visits = 0;
+
+        if (!j->frame || length < 1 || !(count = at[0]) || count > j->components || length < 4 + 2 * count)
+                return false;
+        for (unsigned int each = 0; each < count; each++)
+        {
+                unsigned int which = 0;
+
+                while (which < j->components && j->component[which].id != at[1 + 2 * each])
+                        which++;
+                if (which == j->components)
+                        return false;
+                for (unsigned int other = 0; other < each; other++)
+                        if (j->scan[other] == which)
+                                return false;
+                j->scan[each] = which;
+                j->component[which].dc = at[2 + 2 * each] >> 4, j->component[which].ac = at[2 + 2 * each] & 15;
+                if (j->component[which].dc > 3 || j->component[which].ac > 3)
+                        return false;
+        }
+        j->scan_count = count;
+        j->ss = at[1 + 2 * count], j->se = at[2 + 2 * count], j->ah = at[3 + 2 * count] >> 4, j->al = at[3 + 2 * count] & 15;
+        if (!j->progressive)
+                mode = UI_JPEG_SEQUENTIAL, j->ss = 0, j->se = 63, j->ah = j->al = 0;
+        else
+        {
+                if (j->se > 63 || j->ss > j->se || (j->ss == 0 && j->se != 0) || (j->ss && count != 1) || j->al > 13 || (j->ah && j->al != j->ah - 1))
+                        return false;
+                mode = j->ss ? (j->ah ? UI_JPEG_AC_REFINE : UI_JPEG_AC_FIRST) : (j->ah ? UI_JPEG_DC_REFINE : UI_JPEG_DC_FIRST);
+        }
+        for (unsigned int each = 0; each < count; each++)
+        {
+                struct ui_jpeg_component address_to c = &j->component[j->scan[each]];
+
+                if ((mode <= UI_JPEG_DC_FIRST && !j->dc[c->dc].defined) || ((mode == UI_JPEG_SEQUENTIAL || mode >= UI_JPEG_AC_FIRST) && !j->ac[c->ac].defined))
+                        return false;
+                if (!c->latched)
+                {
+                        if (!j->quantization_defined[c->table])
+                                return false;
+                        memory_copy(c->quantization, j->quantization[c->table], sizeof(c->quantization));
+                        c->latched = true;
+                }
+                c->seen = true;
+                visits += count == 1 ? c->blocks_w * c->blocks_h : j->mcus_w * j->mcus_h * c->h * c->v;
+        }
+        if ((j->visits += visits) > j->visits_most)
+                return false;
+        ui_jpeg_scan_data(j, mode);
+        return true;
+}
+
+/*
+        An EXIF block's orientation (TIFF tag 274 in IFD0, 1 to 8), 1 when it says none or says it wrong: the TIFF header, IFD0's offset
+        and each entry read inside the block.
+*/
+static unsigned int ui_jpeg_orientation(const p8 address_to tiff, positive size)
+{
+        b32 little;
+        positive ifd, count;
+
+        if (size < 8 || !((tiff[0] == 'I' && tiff[1] == 'I') || (tiff[0] == 'M' && tiff[1] == 'M')))
+                return 1;
+        little = tiff[0] == 'I';
+#define UI_JPEG_TIFF16(p) (little ? (unsigned int)(p)[0] | (unsigned int)(p)[1] << 8 : (unsigned int)(p)[0] << 8 | (p)[1])
+#define UI_JPEG_TIFF32(p) (little ? (positive)(p)[0] | (positive)(p)[1] << 8 | (positive)(p)[2] << 16 | (positive)(p)[3] << 24 \
+                                  : (positive)(p)[0] << 24 | (positive)(p)[1] << 16 | (positive)(p)[2] << 8 | (p)[3])
+        if (UI_JPEG_TIFF16(tiff + 2) != 42 || (ifd = UI_JPEG_TIFF32(tiff + 4)) > size - 2)
+                return 1;
+        count = UI_JPEG_TIFF16(tiff + ifd);
+        for (positive each = 0; each < count && ifd + 2 + each * 12 <= size - 12; each++)
+        {
+                const p8 address_to entry = tiff + ifd + 2 + each * 12;
+                unsigned int value = UI_JPEG_TIFF16(entry + 8);
+
+                if (UI_JPEG_TIFF16(entry) == 274)
+                        return UI_JPEG_TIFF16(entry + 2) == 3 && UI_JPEG_TIFF32(entry + 4) >= 1 && value >= 1 && value <= 8 ? value : 1;
+        }
+#undef UI_JPEG_TIFF16
+#undef UI_JPEG_TIFF32
+        return 1;
+}
+
+/*
+        The markers from after SOI: the tables as they come, the frame, each scan and its data, EXIF's orientation and Adobe's
+        transform, the rest passed by their lengths. With measure set it stops at the frame's header, having read only the sizes.
+        False: nothing of a picture.
+*/
+static b32 ui_jpeg_markers(struct ui_jpeg address_to j, unsigned int most, b32 measure)
+{
+        j->at = 2;
+        while (j->at < j->size)
+        {
+                unsigned int marker;
+                positive length;
+                const p8 address_to at;
+
+                // Anything that is not a marker is passed by (libjpeg warns of "extraneous bytes"), and FF fill before one.
+                const p8 address_to mark = (const p8 address_to)memory_first_of(j->file + j->at, (b8)0xff, j->size - j->at);
+                if (!mark)
+                        break;
+                j->at = (positive)(mark - j->file);
+                while (j->at < j->size && j->file[j->at] == 0xff)
+                        j->at++;
+                if (j->at >= j->size)
+                        break;
+                marker = j->file[j->at++];
+                if (!marker || (marker >= 0xd0 && marker <= 0xd7) || marker == 0x01)
+                        continue;
+                if (marker == 0xd9 || marker == 0xd8)
+                        break;
+                if (j->at + 2 > j->size || (length = ui_jpeg_be16(j->file + j->at)) < 2 || length > j->size - j->at)
+                        break;
+                at = j->file + j->at + 2, length -= 2, j->at += length + 2;
+                if (marker == 0xc0 || marker == 0xc1 || marker == 0xc2)
+                {
+                        j->progressive = marker == 0xc2;
+                        if (measure)
+                        {
+                                if (length < 6 || at[0] != 8 || !(j->height = ui_jpeg_be16(at + 1)) || !(j->width = ui_jpeg_be16(at + 3)) ||
+                                    j->width > most || j->height > most || (at[5] != 1 && at[5] != 3))
+                                        return false;
+                                return true;
+                        }
+                        if (!ui_jpeg_frame(j, at, length, most))
+                                return false;
+                }
+                else if ((marker >= 0xc3 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc))
+                        return false; // lossless, hierarchical and arithmetic frames
+                else if (marker == 0xc4)
+                {
+                        for (positive k = 0; k < length;)
+                        {
+                                positive total = 0;
+
+                                if (length - k < 17 || (at[k] >> 4) > 1 || (at[k] & 15) > 3)
+                                        return j->decoded;
+                                for (unsigned int each = 0; each < 16; each++)
+                                        total += at[k + 1 + each];
+                                if (length - k - 17 < total)
+                                        return j->decoded;
+                                struct ui_jpeg_huffman address_to h = at[k] >> 4 ? &j->ac[at[k] & 15] : &j->dc[at[k] & 15];
+                                if (!ui_jpeg_huffman_make(h, at + k + 1, at + k + 17, total, at[k] >> 4))
+                                        return j->decoded;
+                                k += 17 + total;
+                        }
+                }
+                else if (marker == 0xdb)
+                {
+                        for (positive k = 0; k < length;)
+                        {
+                                unsigned int wide = at[k] >> 4, which = at[k] & 15;
+
+                                if (wide > 1 || which > 3 || length - k < 1 + 64 * (wide + 1))
+                                        return j->decoded;
+                                for (unsigned int each = 0; each < 64; each++)
+                                        j->quantization[which][ui_jpeg_natural[each]] = (p16)(wide ? ui_jpeg_be16(at + k + 1 + 2 * each) : at[k + 1 + each]);
+                                j->quantization_defined[which] = true;
+                                k += 1 + 64 * (wide + 1);
+                        }
+                }
+                else if (marker == 0xdd)
+                {
+                        if (length < 2)
+                                return j->decoded;
+                        j->restart = ui_jpeg_be16(at);
+                }
+                else if (marker == 0xda)
+                {
+                        if (!ui_jpeg_scan(j, at, length))
+                                return j->decoded;
+                }
+                else if (marker == 0xe0 && length >= 5 && !memory_compare(at, "JFIF\0", 5))
+                        j->jfif = true;
+                else if (marker == 0xe1 && length >= 6 && !memory_compare(at, "Exif\0\0", 6) && j->orientation == 0)
+                        j->orientation = ui_jpeg_orientation(at + 6, length - 6);
+                else if (marker == 0xee && length >= 12 && !memory_compare(at, "Adobe", 5))
+                        j->adobe = true, j->transform = at[11];
+        }
+        return measure ? false : j->decoded;
+}
+
+static fn ui_jpeg_release(struct ui_jpeg address_to j)
+{
+        for (unsigned int each = 0; each < 3; each++)
+        {
+                if (j->component[each].plane)
+                        memory_free(j->component[each].plane, j->component[each].plane_bytes);
+                if (j->component[each].coefficients)
+                        memory_free(j->component[each].coefficients, j->component[each].coefficient_bytes);
+        }
+        if (j->data)
+                memory_free(j->data, j->data_room);
+        memory_free(j, sizeof(*j));
+}
+
+/*
+        A component's row y of the picture, at the picture's width: its plane's own row where it is full size, else made in into by the
+        triangle filters (by two down, or by two across or both where its plane is more than two samples wide, at a scale above an
+        eighth, as libjpeg chooses them) or a box of its samples for any other ratio. The rows above the first and below the last are those rows again, as libjpeg's
+        context rows are.
+*/
+static const p8 address_to ui_jpeg_row(struct ui_jpeg address_to j, struct ui_jpeg_component address_to c, positive y, p8 address_to into)
+{
+        unsigned int across = c->h * c->scale, across_out = j->hmax * j->scale, down = c->v * c->scale, down_out = j->vmax * j->scale;
+        b32 fancy = j->scale > 1, wide = c->width > 2;
+        const p8 address_to near;
+
+        if (across == across_out && down == down_out)
+                return c->plane + y * c->pitch;
+        if (fancy && down * 2 == down_out && (across == across_out || (wide && across * 2 == across_out)))
+        {
+                positive row = y / 2, other = y & 1 ? (row + 1 < c->height ? row + 1 : row) : (row ? row - 1 : row);
+
+                near = c->plane + row * c->pitch;
+                if (across == across_out)
+                        ui_jpeg_blend_rows(into, near, c->plane + other * c->pitch, c->width, y & 1 ? 2 : 1);
+                else
+                        ui_jpeg_double_rows(into, near, c->plane + other * c->pitch, c->width);
+                return into;
+        }
+        near = c->plane + (y * down / down_out) * c->pitch;
+        if (fancy && wide && down == down_out && across * 2 == across_out)
+        {
+                ui_jpeg_double(into, near, c->width);
+                return into;
+        }
+        if (across == across_out)
+                return near;
+        for (positive x = 0; x < j->out_w; x++)
+                into[x] = near[x * across / across_out];
+        return into;
+}
+
+// Which scale a decode is at: the eighths of the whole (1, 2, 4 or 8) the fewest of which still give at least want_w by want_h
+// (both 0: the whole picture).
+static unsigned int ui_jpeg_scale(unsigned int width, unsigned int height, unsigned int want_w, unsigned int want_h)
+{
+        for (unsigned int scale = 1; (want_w || want_h) && scale < 8; scale *= 2)
+                if ((width * scale + 7) / 8 >= want_w && (height * scale + 7) / 8 >= want_h)
+                        return scale;
+        return 8;
+}
+
+/*
+        The picture turned to stand as its EXIF orientation says (1 to 8: as it is; mirrored; a half turn; flipped; turned about its
+        diagonal; a quarter turn clockwise; about its other diagonal; a quarter turn back), into a new block when it moves; its width and
+        height into *w and *h. Null: no memory for it, and the picture given is freed.
+*/
+static unsigned int address_to ui_picture_orient(unsigned int address_to pixels, unsigned int address_to w, unsigned int address_to h, unsigned int orientation)
+{
+        positive width = *w, height = *h, bytes = width * height * 4;
+        unsigned int address_to turned;
+
+        if (orientation < 2 || orientation > 8)
+                return pixels;
+        if (!(turned = (unsigned int address_to)memory_checked(bytes)))
+        {
+                memory_free(pixels, bytes);
+                return null;
+        }
+        switch (orientation)
+        {
+        case 2:
+                memory_copy_rect_reverse_u32(turned, (long)width, pixels, (long)width, width, height);
+                break;
+        case 3:
+                memory_copy_rect_reverse_u32(turned + (height - 1) * width, -(long)width, pixels, (long)width, width, height);
+                break;
+        case 4:
+                for (positive y = 0; y < height; y++)
+                        memory_copy(turned + (height - 1 - y) * width, pixels + y * width, width * 4);
+                break;
+        case 5:
+                memory_transpose_u32(turned, height, pixels, (long)width, 1, width, height);
+                break;
+        case 6:
+                memory_transpose_u32(turned, height, pixels + (height - 1) * width, -(long)width, 1, width, height);
+                break;
+        case 7:
+                memory_transpose_u32(turned, height, pixels + (height - 1) * width + width - 1, -(long)width, -1, width, height);
+                break;
+        default:
+                memory_transpose_u32(turned, height, pixels + width - 1, (long)width, -1, width, height);
+                break;
+        }
+        memory_free(pixels, bytes);
+        if (orientation >= 5)
+                *w = (unsigned int)height, *h = (unsigned int)width;
+        return turned;
+}
+
+/*
+        A JPEG file decoded: at most most each way (UI_JPEG_SIDE_MOST at the most) before it is scaled, at the fewest eighths that still
+        give want_w by want_h as it will stand (0 by 0: whole), turned as its EXIF says. Null for no JPEG, or one this cannot decode.
+*/
+static unsigned int address_to ui_jpeg_decode_at(const p8 address_to file, positive size, int address_to width_out, int address_to height_out, unsigned int most,
+                                                 unsigned int want_w, unsigned int want_h)
+{
+        struct ui_jpeg address_to j;
+        unsigned int address_to pixels = null, w, h;
+        p8 address_to rows = null;
+        positive row_room = 0;
+
+        if (most > UI_JPEG_SIDE_MOST)
+                most = UI_JPEG_SIDE_MOST;
+        if (!file || !width_out || !height_out || size < 4 || file[0] != 0xff || file[1] != 0xd8 || !(j = (struct ui_jpeg address_to)memory_checked(sizeof(*j))))
+                return null;
+        j->file = file, j->size = size, j->scale = 8;
+        if (want_w || want_h)
+        {
+                // The sizes first, so the scale is chosen before a byte is allocated.
+                if (!ui_jpeg_markers(j, most, true))
+                        return ui_jpeg_release(j), null;
+                if (j->orientation >= 5)
+                        j->scale = ui_jpeg_scale(j->width, j->height, want_h, want_w);
+                else
+                        j->scale = ui_jpeg_scale(j->width, j->height, want_w, want_h);
+                unsigned int scale = j->scale;
+                memory_zero(j, sizeof(*j));
+                j->file = file, j->size = size, j->scale = scale;
+        }
+        if (!ui_jpeg_markers(j, most, false))
+                return ui_jpeg_release(j), null;
+        // A sequential scan made its blocks' samples as it went; a progressive frame's are made now, from all its scans together. A
+        // component no scan named is grey.
+        for (unsigned int each = 0; each < j->components; each++)
+        {
+                struct ui_jpeg_component address_to c = &j->component[each];
+
+                if (!c->seen)
+                        memory_fill(c->plane, 128, c->plane_bytes);
+                else if (j->progressive)
+                        for (positive by = 0; by < c->blocks_h; by++)
+                                for (positive bx = 0; bx < c->blocks_w; bx++)
+                                {
+                                        const b16 address_to block = c->coefficients + (by * c->grid_w + bx) * 64;
+                                        unsigned int last = 0;
+
+                                        for (unsigned int k = 1; k < 64 && !last; k++)
+                                                last = block[k] ? k : 0;
+                                        ui_jpeg_put(c, bx, by, block, last);
+                                }
+        }
+        w = j->out_w, h = j->out_h;
+        row_room = ((positive)w + 64) * 2 + 64;
+        pixels = (unsigned int address_to)memory_checked((positive)w * h * 4);
+        rows = (p8 address_to)memory_checked(row_room * 3);
+        if (pixels && rows)
+                for (positive y = 0; y < h; y++)
+                {
+                        unsigned int address_to into = pixels + y * w;
+                        const p8 address_to first = ui_jpeg_row(j, &j->component[0], y, rows);
+
+                        if (j->components == 1)
+                        {
+                                ui_jpeg_from_grey(into, first, w);
+                                continue;
+                        }
+                        const p8 address_to second = ui_jpeg_row(j, &j->component[1], y, rows + row_room);
+                        const p8 address_to third = ui_jpeg_row(j, &j->component[2], y, rows + 2 * row_room);
+                        if (!j->jfif && ((j->adobe && j->transform == 0) ||
+                                         (!j->adobe && j->component[0].id == 'R' && j->component[1].id == 'G' && j->component[2].id == 'B')))
+                                ui_jpeg_from_planes(into, first, second, third, w);
+                        else
+                                ui_jpeg_from_ycbcr(into, first, second, third, w);
+                }
+        else if (pixels)
+                memory_free(pixels, (positive)w * h * 4), pixels = null;
+        if (rows)
+                memory_free(rows, row_room * 3);
+        if (pixels)
+                pixels = ui_picture_orient(pixels, &w, &h, j->orientation);
+        ui_jpeg_release(j);
+        if (!pixels)
+                return null;
+        *width_out = (int)w, *height_out = (int)h;
+        return pixels;
+}
+
+/* ---- pictures: a PNG or a JPEG, by what the file begins with ----
+
+        One way in for every picture the system reads (an app's icon, a wallpaper, a curated one's thumbnail): ui_image_kind by the
+        file's first bytes, never its name; ui_image_measure for the size before a byte is decoded, so a caller can refuse a picture
+        larger than it can hold before it is made; ui_image_decode_at to decode, a JPEG at the fewest eighths that still give the size
+        wanted; ui_image_decode for the kit's own pictures.
+*/
+#define UI_IMAGE_PNG 1
+#define UI_IMAGE_JPEG 2
+#define UI_IMAGE_MOST 1024                  // an app's icon each way, at the most
+#define UI_IMAGE_FILE_MOST (4 * 1024 * 1024) // and the bytes of its file
+
+static unsigned int ui_image_kind(const p8 address_to file, positive size)
+{
+        static const p8 png[8] = {137, 'P', 'N', 'G', 13, 10, 26, 10};
+
+        if (file && size >= 8 + 25 && !memory_compare(file, png, 8) && !memory_compare(file + 12, "IHDR", 4))
+                return UI_IMAGE_PNG;
+        if (file && size >= 4 && file[0] == 0xff && file[1] == 0xd8 && file[2] == 0xff)
+                return UI_IMAGE_JPEG;
+        return 0;
+}
+
+/*
+        A picture's size as it will be decoded for want_w by want_h (0 by 0: whole) and stand, from its header alone: a PNG's IHDR, a
+        JPEG's frame at the scale ui_jpeg_scale picks, turned by its EXIF orientation. False for neither, a size of 0, or a side over
+        most.
+*/
+static b32 ui_image_measure(const p8 address_to file, positive size, unsigned int most, unsigned int want_w, unsigned int want_h,
+                            unsigned int address_to width, unsigned int address_to height)
+{
+        unsigned int kind = ui_image_kind(file, size), w, h;
+
+        if (kind == UI_IMAGE_PNG)
+        {
+                w = (unsigned int)file[16] << 24 | (unsigned int)file[17] << 16 | (unsigned int)file[18] << 8 | file[19];
+                h = (unsigned int)file[20] << 24 | (unsigned int)file[21] << 16 | (unsigned int)file[22] << 8 | file[23];
+                if (!w || !h || w > most || h > most)
+                        return false;
+                *width = w, *height = h;
+                return true;
+        }
+        if (kind != UI_IMAGE_JPEG)
+                return false;
+        struct ui_jpeg address_to j = (struct ui_jpeg address_to)memory_checked(sizeof(*j));
+        b32 found;
+        if (!j)
+                return false;
+        j->file = file, j->size = size;
+        found = ui_jpeg_markers(j, most > UI_JPEG_SIDE_MOST ? UI_JPEG_SIDE_MOST : most, true);
+        if (found)
+        {
+                b32 turned = j->orientation >= 5;
+                unsigned int scale = turned ? ui_jpeg_scale(j->width, j->height, want_h, want_w) : ui_jpeg_scale(j->width, j->height, want_w, want_h);
+
+                w = (j->width * scale + 7) / 8, h = (j->height * scale + 7) / 8;
+                *width = turned ? h : w, *height = turned ? w : h;
+        }
+        ui_jpeg_release(j);
+        return found;
+}
+
+static unsigned int address_to ui_image_decode_at(const p8 address_to file, positive size, int address_to width_out, int address_to height_out,
+                                                  unsigned int most, unsigned int want_w, unsigned int want_h)
+{
+        unsigned int kind = ui_image_kind(file, size);
+
+        if (kind == UI_IMAGE_PNG)
+                return ui_png_decode_most(file, size, width_out, height_out, most);
+        if (kind == UI_IMAGE_JPEG)
+                return ui_jpeg_decode_at(file, size, width_out, height_out, most, want_w, want_h);
+        return null;
+}
+
+// A picture of the kit's (an app's icon): at most UI_IMAGE_MOST each way.
+static unsigned int address_to ui_image_decode(const p8 address_to file, positive size, int address_to width_out, int address_to height_out)
+{
+        return ui_image_decode_at(file, size, width_out, height_out, UI_IMAGE_MOST, 0, 0);
+}
+
+/* ---- apps: their pictures ---- */
+
 // An entry's picture file, by its Icon as the Icon Theme Specification finds one without a theme of its own:
-#define UI_PNG_FILE_MOST (4 * 1024 * 1024)
 
 static inline b32 ui_apps_is_local(const struct ui_app_entry address_to app)
 {
@@ -22109,7 +23414,9 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                 return -1;
         if (icon[0] == '/')
         {
-                if (length > 4 && !memory_compare(icon + length - 4, ".png", 4))
+                // A picture of its own by its path: a PNG or a JPEG (ui_image_decode reads either by its first bytes).
+                if (memory_has_suffix((string_address)icon, length, ".png") || memory_has_suffix((string_address)icon, length, ".jpg") ||
+                    memory_has_suffix((string_address)icon, length, ".jpeg"))
                         handle = system_open_resolved(inside, (string_address)icon, FILE_READ | O_CLOEXEC | O_NONBLOCK,
                                                       SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
         }
@@ -22122,8 +23429,10 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                 // picture's: a Flatpak app's Icon is its id, whose last part may be three letters (com.heroicgameslauncher.hgl), and
                 // cut there it named no file at all.
                 if (nlen > 4 && (memory_has_suffix((string_address)name, nlen, ".png") || memory_has_suffix((string_address)name, nlen, ".svg") ||
-                                 memory_has_suffix((string_address)name, nlen, ".xpm")))
+                                 memory_has_suffix((string_address)name, nlen, ".xpm") || memory_has_suffix((string_address)name, nlen, ".jpg")))
                         name[nlen - 4] = 0;
+                else if (nlen > 5 && memory_has_suffix((string_address)name, nlen, ".jpeg"))
+                        name[nlen - 5] = 0;
                 // A bowl's icons, then its Flatpak apps' (exports/share/icons, links into each app's tree, resolved inside the root).
                 for (positive at = 0; at <= 2 * (sizeof(sides) / sizeof(sides[0])) && handle < 0; at++)
                 {
@@ -22144,6 +23453,15 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                                 string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "pixmaps/" : "usr/share/pixmaps/"), sizeof(path));
                         string_append_bounded((p8 address_to)path, (string_address)name, sizeof(path));
                         string_append_bounded((p8 address_to)path, (string_address) ".png", sizeof(path));
+                        handle = system_open_resolved(inside, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK,
+                                                      SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+                }
+                // A pixmap that is a photograph (a few programs keep a JPEG there).
+                if (handle < 0)
+                {
+                        string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "pixmaps/" : "usr/share/pixmaps/"), sizeof(path));
+                        string_append_bounded((p8 address_to)path, (string_address)name, sizeof(path));
+                        string_append_bounded((p8 address_to)path, (string_address) ".jpg", sizeof(path));
                         handle = system_open_resolved(inside, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK,
                                                       SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
                 }
@@ -22188,17 +23506,18 @@ static b32 ui_apps_picture_keyed(bipolar handle, struct ui_apps_picture_key addr
 }
 
 // A picture made from an icon's open file: UI_APP_PICTURE each way at most, premultiplied, its side into *side; null none. It reads
-// and decodes a file (a PNG of up to UI_PNG_MOST a side: milliseconds), so a draw never calls it: ui_apps_picture_kept asks a worker.
+// and decodes a file (a PNG or a JPEG of up to UI_IMAGE_MOST a side: milliseconds), so a draw never calls it: ui_apps_picture_kept
+// asks a worker.
 static unsigned int address_to ui_apps_picture_decode(bipolar handle, int address_to side_out)
 {
-        p8 address_to file = (p8 address_to)memory_checked(UI_PNG_FILE_MOST);
-        bipolar got = file ? system_read_retry((positive)handle, file, UI_PNG_FILE_MOST) : -1;
+        p8 address_to file = (p8 address_to)memory_checked(UI_IMAGE_FILE_MOST);
+        bipolar got = file ? system_read_retry((positive)handle, file, UI_IMAGE_FILE_MOST) : -1;
         unsigned int address_to decoded = null, address_to square = null, address_to picture = null;
         int width = 0, height = 0;
         if (got > 0)
-                decoded = ui_png_decode(file, (positive)got, &width, &height);
+                decoded = ui_image_decode(file, (positive)got, &width, &height);
         if (file)
-                memory_free(file, UI_PNG_FILE_MOST);
+                memory_free(file, UI_IMAGE_FILE_MOST);
         if (!decoded)
                 return null;
         int side = width > height ? width : height, kept = side > UI_APP_PICTURE ? UI_APP_PICTURE : side;

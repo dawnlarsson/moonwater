@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language ur
 @name اردو
 @translated machine
@@ -132,7 +133,7 @@ files_not_folder	2663	یہ فولڈر نہیں ہے
 files_nothing_to_paste	c9d4	کلپ بورڈ میں کوئی فائل نہیں
 files_nothing_to_redo	b2a4	دوبارہ کرنے کو کچھ نہیں
 files_nothing_to_undo	1433	واپس لینے کو کچھ نہیں
-files_pick	8f59	اس منظر کا وال پیپر بنانے کے لیے ایک PNG تصویر کھولیں
+files_pick	5ed6	اس منظر کا وال پیپر بنانے کے لیے ایک PNG یا JPEG تصویر کھولیں
 files_pick_cancel	ca3b	منسوخ کریں
 files_pick_folder	1108	یہ فولڈر منتخب کریں
 files_pick_replace	a2d7	اس نام کی فائل پہلے سے موجود ہے: اسے بدلنے کے لیے دوبارہ محفوظ کریں

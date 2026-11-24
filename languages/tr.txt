@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language tr
 @name Türkçe
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	Bu bir klasör değil
 files_nothing_to_paste	c9d4	Panoda dosya yok
 files_nothing_to_redo	b2a4	Yinelenecek bir şey yok
 files_nothing_to_undo	1433	Geri alınacak bir şey yok
-files_pick	8f59	Bu sahnenin duvar kâğıdı olması için bir PNG resmi açın
+files_pick	5ed6	Bu sahnenin duvar kâğıdı olması için bir PNG veya JPEG resmi açın
 files_pick_cancel	ca3b	İptal
 files_pick_folder	1108	Bu klasörü seç
 files_pick_replace	a2d7	Bu adda bir dosya zaten var: değiştirmek için yeniden kaydedin

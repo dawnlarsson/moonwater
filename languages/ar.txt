@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language ar
 @name العربية
 @translated machine
@@ -132,7 +133,7 @@ files_not_folder	2663	هذا ليس مجلدا
 files_nothing_to_paste	c9d4	لا تحوي الحافظة ملفات
 files_nothing_to_redo	b2a4	لا شيء لإعادته
 files_nothing_to_undo	1433	لا شيء للتراجع عنه
-files_pick	8f59	افتح صورة PNG لتصبح خلفية هذا المشهد
+files_pick	5ed6	افتح صورة PNG أو JPEG لتصبح خلفية هذا المشهد
 files_pick_cancel	ca3b	إلغاء
 files_pick_folder	1108	اختر هذا المجلد
 files_pick_replace	a2d7	يوجد ملف بهذا الاسم: احفظ مرة أخرى لاستبداله

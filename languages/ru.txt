@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language ru
 @name Русский
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	Это не папка
 files_nothing_to_paste	c9d4	В буфере обмена нет файлов
 files_nothing_to_redo	b2a4	Нечего повторять
 files_nothing_to_undo	1433	Нечего отменять
-files_pick	8f59	Откройте изображение PNG, чтобы сделать его обоями этой сцены
+files_pick	5ed6	Откройте изображение PNG или JPEG, чтобы сделать его обоями этой сцены
 files_pick_cancel	ca3b	Отмена
 files_pick_folder	1108	Выбрать эту папку
 files_pick_replace	a2d7	Файл с таким именем уже есть: сохраните ещё раз, чтобы заменить его

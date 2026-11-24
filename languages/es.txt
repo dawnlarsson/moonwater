@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language es
 @name Español
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	Esto no es una carpeta
 files_nothing_to_paste	c9d4	El portapapeles no tiene archivos
 files_nothing_to_redo	b2a4	Nada que rehacer
 files_nothing_to_undo	1433	Nada que deshacer
-files_pick	8f59	Abra una imagen PNG para que sea el fondo de esta escena
+files_pick	5ed6	Abra una imagen PNG o JPEG para que sea el fondo de esta escena
 files_pick_cancel	ca3b	Cancelar
 files_pick_folder	1108	Elegir esta carpeta
 files_pick_replace	a2d7	Ya hay un archivo con este nombre: guarde de nuevo para reemplazarlo

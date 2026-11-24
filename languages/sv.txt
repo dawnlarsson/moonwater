@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language sv
 @name Svenska
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	Det här är ingen mapp
 files_nothing_to_paste	c9d4	Urklippet har inga filer
 files_nothing_to_redo	b2a4	Inget att göra om
 files_nothing_to_undo	1433	Inget att ångra
-files_pick	8f59	Öppna en PNG-bild för att göra den till den här scenens skrivbordsbild
+files_pick	5ed6	Öppna en PNG- eller JPEG-bild för att göra den till den här scenens skrivbordsbild
 files_pick_cancel	ca3b	Avbryt
 files_pick_folder	1108	Välj den här mappen
 files_pick_replace	a2d7	En fil med det här namnet finns redan: spara igen för att ersätta den

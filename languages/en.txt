@@ -93,7 +93,7 @@ files_not_folder	2663	This is not a folder
 files_nothing_to_paste	c9d4	The clipboard holds no files
 files_nothing_to_redo	b2a4	Nothing to do again
 files_nothing_to_undo	1433	Nothing to undo
-files_pick	8f59	Open a PNG picture to make it the wallpaper of this Scene
+files_pick	5ed6	Open a PNG or JPEG picture to make it the wallpaper of this Scene
 files_pick_cancel	ca3b	Cancel
 files_pick_folder	1108	Choose this folder
 files_pick_replace	a2d7	A file of this name is here: Save again to replace it

@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
+# machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language fr
 @name Français
 @translated machine
@@ -131,7 +132,7 @@ files_not_folder	2663	Ce n'est pas un dossier
 files_nothing_to_paste	c9d4	Le presse-papiers ne contient aucun fichier
 files_nothing_to_redo	b2a4	Rien à rétablir
 files_nothing_to_undo	1433	Rien à annuler
-files_pick	8f59	Ouvrez une image PNG pour en faire le fond d'écran de cette scène
+files_pick	5ed6	Ouvrez une image PNG ou JPEG pour en faire le fond d'écran de cette scène
 files_pick_cancel	ca3b	Annuler
 files_pick_folder	1108	Choisir ce dossier
 files_pick_replace	a2d7	Un fichier de ce nom existe déjà : enregistrez à nouveau pour le remplacer
