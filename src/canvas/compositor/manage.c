@@ -288,7 +288,7 @@ static int compositor_band_test(int x, int y, int reach_ok)
 
         for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
         {
-                int sx, sy, sw, sh, scale = compositor.scale, strip;
+                int sx, sy, sw, sh, scale = compositor_output_scale(compositor.band_at), strip;
 
                 compositor_output_rect(compositor.band_at, &sx, &sy, &sw, &sh);
                 if (x < sx || x >= sx + sw || y < sy || y >= sy + sh)
@@ -4466,6 +4466,7 @@ static void compositor_clip_cli(void)
         else
                 compositor_door_drain(compositor_clip.door);
         compositor_clip_cli_read();
+        compositor_cast_look(0); // the clipboard's door rings for the shares too
 }
 
 static int compositor_clip_start(void)
@@ -4714,5 +4715,5 @@ HOT static void compositor_doors_done(void)
                         compositor_door_gone(row);
         }
         if (rows_has(&drained, COMPOSITOR_DOOR_MISC))
-                compositor_clip_cli_read();
+                compositor_clip_cli_read(), compositor_cast_look(0);
 }
