@@ -410,9 +410,10 @@ static void gpu_ring_reset(void)
         gpu_ring.found = GPU_END_NONE;
 }
 #define GPU_LATE_NS 16000000ull      // a job not done this long after it was submitted is late: a tick (the heaviest whole-screen job measured, 8K, is 5.5 ms)
-#define GPU_HANG_NS 2000000000ull    // and one not done this long after is hung. The kernel's own timeout for a job is amdgpu.lockup_timeout, which at v6.12 is sixty
-                                     // seconds for the compute ring this uses: until it ends the job nothing here ends it, the buffer stays the job's (gpu_idle), and the
-                                     // processor draws
+#define GPU_HANG_NS 2000000000ull    // and one not done this long after is hung. The kernel's own timeout for a job is amdgpu.lockup_timeout, 2000 ms for every
+                                     // queue unless the kernel's command line says another (the image says none): the same two seconds, after which amdgpu resets the
+                                     // compute queue under the job, or the whole card where the queue's reset fails. Until the job ends nothing here ends it, the
+                                     // buffer stays the job's (gpu_idle), and the processor draws
 #define GPU_FAULT_FIRST 250000000ull // a pending job's first look at the kernel's log for a page fault is this long after it went late, and the next ones
 #define GPU_FAULT_EVERY 500000000ull // this far apart
 

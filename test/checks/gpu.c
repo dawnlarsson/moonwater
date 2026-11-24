@@ -3367,6 +3367,33 @@ static void gpu_fault_rows(void)
                       first == GPU_HANG_NS && again == GPU_RECOVER_NS && tick == GPU_LATE_NS && again < GPU_HANG_NS);
                 gpu_patient = saved_patient, gpu_recovered = saved_recovered;
         }
+        // 6c. A start whose self-test job the ring did not finish (GPU_REQ_RING, error 62) is a hang: the first is looked for again by the late look, the
+        // second within a minute gives the card up for the session; a start that failed at any other step, however often, is a card not there.
+        {
+                unsigned int saved_first = gpu_req.first, saved_error = gpu_req.error;
+                int saved_broken = gpu.broken;
+                positive saved_said = compositor_gpu_state.said;
+                b32 once, twice, other;
+
+                gpu.broken = 0, gpu_req.first = GPU_REQ_RING, gpu_req.error = 62;
+                compositor_gpu_failed();
+                once = compositor_gpu_state.dead && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD && !compositor_gpu_state.hung_off &&
+                       compositor_gpu_state.hung_at;
+                compositor_gpu_failed();
+                twice = compositor_gpu_state.dead && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_HANG && compositor_gpu_state.hung_off;
+                check("hang: a start whose self-test job did not finish is looked for again once, and a second within a minute gives the card up for the session",
+                      once && twice);
+                compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0;
+                gpu_req.first = GPU_REQ_RING, gpu_req.error = 22;
+                compositor_gpu_failed(), compositor_gpu_failed();
+                other = compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD && !compositor_gpu_state.hung_off && !compositor_gpu_state.hung_at;
+                gpu_req.first = GPU_REQ_NODE, gpu_req.error = 62;
+                compositor_gpu_failed(), compositor_gpu_failed();
+                check("hang: a start that failed twice at a refused job, or at another step, is a card not there and is looked for again",
+                      other && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD && !compositor_gpu_state.hung_off && !compositor_gpu_state.hung_at);
+                gpu_req.first = saved_first, gpu_req.error = saved_error, gpu.broken = saved_broken, compositor_gpu_state.said = saved_said;
+                compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0, compositor_gpu_state.settled = 0;
+        }
 #ifdef CONFIG_MOONWATER_WAYLAND
         // 7. Hangs whose fault is in a client's import (row 2's source, client slot 1): the client is barred from the card and the card is kept for the rest,
         // however many such hangs, below COMPOSITOR_GPU_BLAMED_MOST in a minute; a hang in nobody's buffer is the card's as before, and a new connection in

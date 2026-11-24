@@ -147,7 +147,9 @@ static b32 compositor_gpu_late_due(b64 now, b64 *first, b64 *next)
 
 // A start that failed: given up (no card, or untrusted), settled where the nodes say it can never start while they stay as they are, the board told, and the
 // outcome said in the log the first time it is this one: the step, its error, its fix and the machine's words for it. The outcome is a number (the step, its
-// error, the driver, the chip): the same outcome is the same number, never 0.
+// error, the driver, the chip): the same outcome is the same number, never 0. A start that failed because the self-test's job hung is a hang too
+// (compositor_gpu_start_hung): the second within a minute is the session's last.
+static void compositor_gpu_start_hung(void);
 static void compositor_gpu_failed(void)
 {
         char words[WINDOWS_ISSUE_DETAIL];
@@ -158,6 +160,7 @@ static void compositor_gpu_failed(void)
         compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
         compositor_gpu_state.dead_why = gpu.broken ? COMPOSITOR_GPU_WHY_UNTRUSTED : COMPOSITOR_GPU_WHY_NO_CARD;
         compositor_gpu_state.settled = gpu_req.settled ? gpu_req.nodes : 0;
+        compositor_gpu_start_hung();
         compositor_gpu_requirements();
         if (outcome == compositor_gpu_state.said)
                 return;
@@ -350,6 +353,29 @@ static void compositor_gpu_job_failed(void)
         compositor_gpu_state.cool_steps++;
         compositor_gpu_state.restart_due = 1; // started again when the cool-down is over, with no maps (gpu_recover)
         string_format(log, "compositor: the GPU hung (%s): the processor draws for two seconds, then the card starts again with no maps\n", gpu_fault);
+        log_flush();
+}
+
+// A start that failed at the ring with the self-test's job still running at its deadline (GPU_REQ_RING, error 62: the loop waited the hang's two seconds
+// for it, and the kernel's lockup timeout, 2000 ms in amdgpu unless amdgpu.lockup_timeout says another, resets the queue under it) is a hang as a scene's is,
+// and counts as one: the first leaves the card looked for again (the late look, five seconds on), a second within a minute gives the card up for the
+// session, where without the count a chip whose kernels never end was started, waited two seconds for and reset by every late look for as long as the
+// session ran.
+static void compositor_gpu_start_hung(void)
+{
+        b64 now;
+
+        if (gpu.broken || gpu_req.first != GPU_REQ_RING || gpu_req.error != 62)
+                return;
+        now = clock_monotonic_nanoseconds();
+        if (!compositor_gpu_state.hung_at || now - compositor_gpu_state.hung_at >= COMPOSITOR_GPU_HUNG_WINDOW)
+        {
+                compositor_gpu_state.hung_at = now;
+                return;
+        }
+        compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG, compositor_gpu_state.hung_off = 1;
+        compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 0;
+        string_format(log, "compositor: the GPU did not finish its self-test twice within a minute: the processor draws the desktop for the rest of the session\n");
         log_flush();
 }
 
