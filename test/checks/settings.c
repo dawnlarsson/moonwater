@@ -6397,7 +6397,8 @@ static b32 actions_copies(int row)
 
 static fn check_settings_actions(void)
 {
-        int discover = actions_first(SETTINGS_ACTION, false, false), clock = actions_first(SETTINGS_ACTION, true, false);
+        // Discover now by its label: the first action of the table that reads nothing is the Canvas page's Wallpaper (its editor) now.
+        int discover = settings_row_named("Discover now"), clock = actions_first(SETTINGS_ACTION, true, false);
         int info = actions_first(SETTINGS_INFO, true, false), server = actions_first(SETTINGS_SWITCH, true, true), name = SETTINGS_NAME_ROW;
         int x = 0, y = 0, actions = 0, buttons = 0;
         b32 drawn = false, pressed = false, once = false, busy = false, entered = false, tapped = false, stops = false, clocked = false;
@@ -6406,7 +6407,7 @@ static fn check_settings_actions(void)
         struct ui_row row;
         char line[256];
 
-        if (discover < 0 || clock < 0 || info < 0 || server < 0)
+        if (discover <= 0 || settings_rows[discover].kind != SETTINGS_ACTION || clock < 0 || info < 0 || server < 0)
         {
                 check("settings actions: the table has an action, a clock, an info row and a deliberate switch", false);
                 return;
