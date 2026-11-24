@@ -3943,6 +3943,12 @@ __asm__(
         the upper halves live pays a state transition on every instruction
         after it, which is a cost these would be handing to whoever called
         them.
+
+        The byte hunts' own AVX-512 bodies are no longer emitted from these:
+        each has its own, in zmm16 and up so that no way out needs a
+        vzeroupper, shaped by what the 9950X measured for it (see over
+        string_length, ZMM_FIRST_OF and the others). string_first_of_max is
+        the one still emitted at both widths.
 */
 #define AVX2_WIDTH "32"
 #define AVX2_BROADCAST "vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
@@ -3960,14 +3966,9 @@ __asm__(
 #define AVX512_WIDTH "64"
 #define AVX512_BROADCAST "vpbroadcastb %ecx, %zmm1\n"
 #define AVX512_ZEROED "vpxorq %zmm2, %zmm2, %zmm2\n"
-#define AVX512_ZEROS "vpcmpeqb (%rdi), %zmm2, %k0\n   kmovq %k0, %rax\n"
-#define AVX512_HUNT "vpcmpeqb (%rdi), %zmm1, %k0\n   kmovq %k0, %rax\n"
 #define AVX512_EITHER                                                  \
     "vmovdqu64 (%rdi), %zmm0\n   vpcmpeqb %zmm0, %zmm1, %k0\n   vpcmpeqb %zmm0, %zmm2, %k1\n" \
     "korq %k1, %k0, %k0\n   kmovq %k0, %rax\n"
-#define AVX512_BOTH                                                    \
-    "vmovdqu64 (%rdi), %zmm0\n   vpcmpeqb %zmm0, %zmm1, %k0\n   kmovq %k0, %rax\n" \
-    "vpcmpeqb %zmm0, %zmm2, %k1\n   kmovq %k1, %r9\n"
 #define AVX512_LEAVE "vzeroupper\n"
 
 /*
@@ -3981,9 +3982,11 @@ __asm__(
         Four vectors a turn after that. Both widths fold pairs with vpminub --
         a zero byte survives a minimum, so min(a,b) has a zero exactly where
         either of them did -- and ask one question of the fold instead of four
-        questions of the parts. AVX-512 leaves the two halves in mask
-        registers and folds them with kortestq; AVX2 has no mask registers, so
-        it takes the minimum of the two halves as well and pays one movemask.
+        questions of the parts. AVX2 has no mask registers, so it takes the
+        minimum of the two halves as well and pays one movemask. (string_length's
+        AVX-512 body folds all four the same way and asks the fold through a
+        kmov and a test: 2.24 cycles a block in L1 on a 9950X, the cost of the
+        four loads alone, against 2.58 for two vptestnmb and a kortestq.)
 
         The raw first vector of each pair stays live beside its fold, which is
         what lets QUAD_WHICH find the one that answered: the fold can only
@@ -4004,19 +4007,6 @@ __asm__(
     "vpcmpeqb %ymm5, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   test %eax, %eax\n   jnz 22f\n" \
     "vpcmpeqb %ymm6, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   jmp 23f\n"
 
-#define AVX512_ZEROS_AT(D)                                             \
-    "vpcmpeqb " D "(%rdi), %zmm2, %k0\n   kmovq %k0, %rax\n"
-#define AVX512_QUAD                                                    \
-    "vmovdqa64 (4*" AVX512_WIDTH ")(%rdi), %zmm1\n"                    \
-    "vpminub (5*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm3\n"               \
-    "vmovdqa64 (6*" AVX512_WIDTH ")(%rdi), %zmm4\n"                    \
-    "vpminub (7*" AVX512_WIDTH ")(%rdi), %zmm4, %zmm5\n"               \
-    "vptestnmb %zmm3, %zmm3, %k0\n   vptestnmb %zmm5, %zmm5, %k2\n"            \
-    "add $(4*" AVX512_WIDTH "), %rdi\n   kortestq %k0, %k2\n"
-#define AVX512_QUAD_WHICH                                              \
-    "vptestnmb %zmm1, %zmm1, %k1\n   kmovq %k1, %rax\n   test %rax, %rax\n   jnz 2f\n   kmovq %k0, %rax\n   test %rax, %rax\n   jnz 21f\n" \
-    "vptestnmb %zmm4, %zmm4, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jnz 22f\n" \
-    "kmovq %k2, %rax\n   jmp 23f\n"
 
 /*
         Two streams against each other, for string_compare. One vector of
@@ -4098,12 +4088,12 @@ __asm__(
 
         The vector is read twice, once into each instruction, rather than
         loaded once and read from a register. That is eight loads a turn
-        where four would do, and it measured quicker -- 4.8 ticks a turn
-        against 5.8 -- because what bounds this loop is not the loads, it
-        is instructions: a vmovdqa64 is one more of them and the fold with
-        the load inside it is not. Against the floor's 2.1 the loop is
-        still twice as long, and that is the floor of this formulation:
-        three vector instructions a vector, where the floor is one load.
+        where four would do. For the zmm form of this loop it measured
+        quicker when it was first written -- 4.8 ticks a turn against 5.8 --
+        and on a 9950X measured again in cycles it is the slower one: eight
+        zmm loads a block took 4.30 cycles, which is what two loads a cycle
+        allows, and four loads with the exclusive-ors and minima from
+        registers 3.78, so ZMM_FIRST_OF loads each vector once.
 
         Each vector's fold stays live so QUAD_WHICH can ask which one
         answered without reading anything again.
@@ -4150,25 +4140,6 @@ __asm__(
     "vpcmpeqb %ymm8, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   test %eax, %eax\n   jnz 22f\n" \
     "vpcmpeqb %ymm10, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   jmp 23f\n"
 
-#define AVX512_EITHER_AT(D)                                            \
-    "vpxorq " D "(%rdi), %zmm1, %zmm0\n"                               \
-    "vpminub " D "(%rdi), %zmm0, %zmm0\n"                              \
-    "vptestnmb %zmm0, %zmm0, %k0\n   kmovq %k0, %rax\n"
-#define AVX512_EITHER_QUAD                                             \
-    "vpxorq (4*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm4\n"                \
-    "vpminub (4*" AVX512_WIDTH ")(%rdi), %zmm4, %zmm4\n"               \
-    "vpxorq (5*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm6\n"                \
-    "vpminub (5*" AVX512_WIDTH ")(%rdi), %zmm6, %zmm6\n"               \
-    "vpxorq (6*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm8\n"                \
-    "vpminub (6*" AVX512_WIDTH ")(%rdi), %zmm8, %zmm8\n"               \
-    "vpxorq (7*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm10\n"               \
-    "vpminub (7*" AVX512_WIDTH ")(%rdi), %zmm10, %zmm10\n"             \
-    "vpminub %zmm4, %zmm6, %zmm11\n   vpminub %zmm8, %zmm10, %zmm12\n   vpminub %zmm11, %zmm12, %zmm11\n   vptestnmb %zmm11, %zmm11, %k0\n" \
-    "add $(4*" AVX512_WIDTH "), %rdi\n   kortestq %k0, %k0\n"
-#define AVX512_EITHER_QUAD_WHICH                                       \
-    "vptestnmb %zmm4, %zmm4, %k1\n   kmovq %k1, %rax\n   test %rax, %rax\n   jnz 2f\n   vptestnmb %zmm6, %zmm6, %k1\n   kmovq %k1, %rax\n   test %rax, %rax\n   jnz 21f\n" \
-    "vptestnmb %zmm8, %zmm8, %k1\n   kmovq %k1, %rax\n   test %rax, %rax\n   jnz 22f\n" \
-    "vptestnmb %zmm10, %zmm10, %k1\n   kmovq %k1, %rax\n   jmp 23f\n"
 
 /*
         The bounded hunt's turn: the same exclusive-or with the load
@@ -4182,7 +4153,10 @@ __asm__(
         bytes was 100 percent over the floor with that loop.
 
         The four exclusive-ors stay live so QUAD_WHICH can ask which one
-        holds the zero.
+        holds the zero. The AVX-512 bodies use the same turn, aligned: their
+        loop read unaligned, and a sixty four byte load that straddles two
+        lines costs two, which held memory_first_of at 0.6 to 0.7 of glibc
+        2.44 from 2 to 32 KiB.
 */
 #define AVX2_HUNT_QUAD                                                 \
     "vpxor (0*" AVX2_WIDTH ")(%rdi), %ymm1, %ymm3\n"                   \
@@ -4196,17 +4170,6 @@ __asm__(
     "vpcmpeqb %ymm5, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   test %eax, %eax\n   jnz 22f\n" \
     "vpcmpeqb %ymm6, %ymm2, %ymm0\n   vpmovmskb %ymm0, %eax\n   jmp 23f\n"
 
-#define AVX512_HUNT_QUAD                                               \
-    "vpxorq (0*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm3\n"                \
-    "vpxorq (1*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm4\n"                \
-    "vpxorq (2*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm5\n"                \
-    "vpxorq (3*" AVX512_WIDTH ")(%rdi), %zmm1, %zmm6\n"                \
-    "vpminub %zmm4, %zmm3, %zmm7\n   vpminub %zmm6, %zmm5, %zmm8\n   vpminub %zmm7, %zmm8, %zmm7\n   vptestnmb %zmm7, %zmm7, %k0\n" \
-    "kortestq %k0, %k0\n"
-#define AVX512_HUNT_QUAD_WHICH                                         \
-    "vptestnmb %zmm3, %zmm3, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jnz 2f\n   vptestnmb %zmm4, %zmm4, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jnz 21f\n" \
-    "vptestnmb %zmm5, %zmm5, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jnz 22f\n" \
-    "vptestnmb %zmm6, %zmm6, %k0\n   kmovq %k0, %rax\n   jmp 23f\n"
 
 // A general routine in the kernel never owns the vector register file: its
 // callers hold no bracket and may hand it device memory. Its implementations
@@ -5366,9 +5329,9 @@ __asm__(
 //      A block on the way back, four compares straight off memory. The
 //      vector that answered is walked down from the top, which is where the
 //      last match is likeliest, and its address goes in %r8 so the one bsr
-//      at 25 serves every rung. AVX-512 keeps the four masks in %k1 to %k4
-//      and moves one into a general register only once it knows the block
-//      has a match; AVX2 has no mask registers and ors the four compares.
+//      at 25 serves every rung. AVX2 has no mask registers and ors the four
+//      compares. (string_last_of_or_end's AVX-512 body hands its way back to
+//      memory_last_of's.)
 //
 #define AVX2_LAST_BACK                                                        \
     "sub $(4*" AVX2_WIDTH "), %rdi\n"                                         \
@@ -5381,15 +5344,6 @@ __asm__(
     "sub $" AVX2_WIDTH ", %r8\n   vpmovmskb %ymm4, %eax\n   test %eax, %eax\n   jnz 25b\n" \
     "sub $" AVX2_WIDTH ", %r8\n   vpmovmskb %ymm3, %eax\n   jmp 25b\n"
 
-#define AVX512_LAST_BACK                                                      \
-    "sub $(4*" AVX512_WIDTH "), %rdi\n"                                       \
-    "vpcmpeqb (3*" AVX512_WIDTH ")(%rdi), %zmm1, %k4\n   vpcmpeqb (2*" AVX512_WIDTH ")(%rdi), %zmm1, %k3\n" \
-    "vpcmpeqb (1*" AVX512_WIDTH ")(%rdi), %zmm1, %k2\n   vpcmpeqb (%rdi), %zmm1, %k1\n" \
-    "korq %k4, %k3, %k5\n   korq %k2, %k1, %k6\n   kortestq %k5, %k6\n   jnz 28f\n   cmp %r10, %rdi\n   ja 27b\n   jmp 26b\n" \
-    "28: lea (3*" AVX512_WIDTH ")(%rdi), %r8\n   kmovq %k4, %rax\n   test %rax, %rax\n   jnz 25b\n" \
-    "sub $" AVX512_WIDTH ", %r8\n   kmovq %k3, %rax\n   test %rax, %rax\n   jnz 25b\n" \
-    "sub $" AVX512_WIDTH ", %r8\n   kmovq %k2, %rax\n   test %rax, %rax\n   jnz 25b\n" \
-    "sub $" AVX512_WIDTH ", %r8\n   kmovq %k1, %rax\n   jmp 25b\n"
 
 //
 //      One word of memory_count's word at a time body: the matches in the
