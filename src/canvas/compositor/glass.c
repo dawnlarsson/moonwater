@@ -804,7 +804,7 @@ static int compositor_glass_compose(int row, const int *c)
                 if (!ground)
                         return 0;
                 for (int y = y0; y < y1; y++)
-                        memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor.w[row] + (unsigned long)(c[0] - compositor.x[row]),
+                        memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor_glass_pitch(row) + (unsigned long)(c[0] - compositor.x[row]),
                                               picture + (unsigned long)(y - compositor.y[row]) * picture_pitch + (unsigned long)(c[0] - compositor.x[row]),
                                               ground + (unsigned long)(y - y0) * pitch, (positive)width,
                                               compositor_grain_row(compositor.glass_side[row], c[0], y));
@@ -860,7 +860,7 @@ static int compositor_glass_room(int row)
         int shift = COMPOSITOR_GLASS_LEVELS, margin = COMPOSITOR_GLASS_MARGIN;
         int x = compositor.x[row], y = compositor.y[row], w = (int)compositor.w[row], h = (int)compositor.h[row];
         int *blocks = compositor.glass_blocks[row];
-        unsigned long pixels = (unsigned long)w * (unsigned long)h, cells, need, most;
+        unsigned long pixels = compositor_glass_pitch(row) * (unsigned long)h, cells, need, most;
 
         blocks[0] = compositor_floor_shift(x, shift) - margin, blocks[1] = compositor_floor_shift(y, shift) - margin;
         blocks[2] = compositor_ceil_shift(x + w, shift) + margin - blocks[0];
@@ -868,7 +868,7 @@ static int compositor_glass_room(int row)
         cells = (unsigned long)blocks[2] * (unsigned long)blocks[3];
         need = ((cells * 3 + pixels) * 4 + 4095) & ~4095ul;
         most = (((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 3 +
-                 (unsigned long)compositor.width * (unsigned long)compositor.height) * 4 + 4095) & ~4095ul;
+                 (((unsigned long)compositor.width + 15) & ~15ul) * (unsigned long)compositor.height) * 4 + 4095) & ~4095ul;
         need = need > most ? need : most;
         if (need > compositor.glass_cut[row])
         {
@@ -987,7 +987,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                 if (!deferred)
                         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
                 memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
-                frames[at].pixels = compositor.composed[row], frames[at].pitch = (unsigned long)place[2];
+                frames[at].pixels = compositor.composed[row], frames[at].pitch = compositor_glass_pitch(row);
         }
 }
 

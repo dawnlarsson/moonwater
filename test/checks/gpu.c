@@ -872,9 +872,20 @@ static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int
                 q[5] = gs_random(), q[6] = q[7] = 0;
                 if (kind > 1)
                 {
-                        positive va = GPU_VA + gs_src_at + 4ull * ((positive)(gs_random() % (GS_ROWS - rh)) * GS_PITCH + gs_random() % (GS_PITCH - rw));
+                        // The picture's pitch: the atlas's, or (a third of them) another that holds the record: any on a set that reads a picture
+                        // by its bytes, whole 64-byte lines on one that makes its own command words (i915 finds a row only on a line).
+                        unsigned int pitch = GS_PITCH, rows;
+                        positive va;
 
-                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = GS_PITCH, pictures++;
+                        if (gs_random() % 3 == 0)
+                        {
+                                pitch = rw + gs_random() % (GS_PITCH - rw);
+                                if (gpu_set->batch)
+                                        pitch = (pitch + 15) & ~15u;
+                        }
+                        rows = (unsigned int)((positive)GS_PITCH * GS_ROWS / pitch);
+                        va = GPU_VA + gs_src_at + 4ull * ((positive)(gs_random() % (rows - rh)) * pitch + gs_random() % (pitch - rw + 1));
+                        q[5] = (unsigned int)va, q[6] = (unsigned int)(va >> 32), q[7] = pitch, pictures++;
                 }
         }
 }
@@ -1095,6 +1106,43 @@ b32 main(void)
                                 dst[i] = gs_want[i] = 0xff405060u;
                         gs_time_row(said[kind], W, H, 1, one);
                 }
+        }
+        // 5. Pictures of every pitch: a copy and a picture laid over, each from a picture of the pitch, 900 by 600 at 37,11 of a 1000 by 701 scene
+        // over a fill. A set that reads a picture by its bytes draws every one. i915 finds a surface's row only where it begins on a 64-byte line (a
+        // row elsewhere in a line comes back in pieces from up to 15 pixels off: a window composed at its own width drew as a sawtooth), so there a
+        // pitch of whole lines is drawn and any other must be refused, the processor's to draw: nothing of the picture may change.
+        {
+                static const unsigned int pitches[] = {2048, 1324, 1203, 901, 2044, 2040, 2046, 2047, 1337, 1025, 912, 1680, 1936};
+                unsigned int whole[4] = {0, 0, 1000, 701};
+                unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + gs_dst_at);
+
+                for (unsigned int i = 0; i < sizeof pitches / sizeof pitches[0]; i++)
+                        for (unsigned int kind = 4; kind <= 11; kind += 7)
+                        {
+                                positive va = GPU_VA + gs_src_at + 4ull * (3 * pitches[i] + 5), bad = 0;
+                                char label[40] = "pitch ";
+                                unsigned int at = 6, n = pitches[i], digits[5], count = 0;
+
+                                while (n)
+                                        digits[count++] = n % 10, n /= 10;
+                                while (count)
+                                        label[at++] = (char)('0' + digits[--count]);
+                                label[at++] = kind == 4 ? 'c' : 'o', label[at] = 0;
+                                ops[0] = 0, ops[1] = ops[2] = 0, ops[3] = 1000, ops[4] = 701, ops[5] = 0xff203040u, ops[6] = ops[7] = 0;
+                                ops[8] = kind, ops[9] = 37, ops[10] = 11, ops[11] = 937, ops[12] = 611, ops[13] = (unsigned int)va, ops[14] = (unsigned int)(va >> 32), ops[15] = pitches[i];
+                                if (!gpu_set->batch || !(pitches[i] & 15))
+                                {
+                                        gs_scene_row((string_address)label, 1000, 701, 2, whole);
+                                        continue;
+                                }
+                                for (positive k = 0; k < (positive)GS_PITCH * 701; k++)
+                                        dst[k] = gs_want[k] = gs_random();
+                                check("gpu scene: a picture whose rows do not begin on 64-byte lines is refused by a set that finds a row only on a line",
+                                      !gpu_scene(gs_ops_at, 2, gs_bins_at, gs_dst_at, GS_PITCH, 1000, 701, 0, 0, 1000, 701) && gpu_idle());
+                                for (positive k = 0; k < (positive)GS_PITCH * 701; k++)
+                                        bad += dst[k] != gs_want[k];
+                                check("gpu scene: and nothing of the picture was drawn", !bad);
+                        }
         }
         // 4. The four operations (copy, fill, tone over, glass over) on whole 64-byte rows at a 32-byte base, the place every set takes: the rows
         // around them compared too.

@@ -1597,6 +1597,14 @@ static int compositor_controls_near(unsigned int a, unsigned int b)
                db <= COMPOSITOR_CONTROLS_NEAR && db >= -COMPOSITOR_CONTROLS_NEAR;
 }
 
+// The pitch of a glass window's composed picture, in pixels: its width in whole 64-byte lines. The card finds a picture's row only where the row
+// begins on a line (i915's block reads: a row elsewhere in a line comes back in pieces from up to 15 pixels off, and a glass window composed at its
+// own width drew as a sawtooth on a Haswell), so the picture the scene reads is made with its rows on lines, whatever the window's width.
+static inline unsigned long compositor_glass_pitch(int row)
+{
+        return ((unsigned long)compositor.w[row] + 15) & ~15ul;
+}
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line = compositor_frame_line(row), scale = compositor_row_scale(row);
@@ -1681,7 +1689,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
             compositor.glass_made[row][3] == (int)compositor.h[row])
         {
                 frame->pixels = compositor.composed[row];
-                frame->pitch = compositor.w[row];
+                frame->pitch = compositor_glass_pitch(row);
         }
 }
 
