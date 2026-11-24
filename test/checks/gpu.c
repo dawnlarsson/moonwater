@@ -842,13 +842,24 @@ static const unsigned int *gs_grain(int x, int y)
         return gs_grains[y & 3] + (x & 15);
 }
 
-// One record applied to the model's picture inside the damage, as the kernels draw it.
+// One record applied to the model's picture inside the damage, as the kernels draw it. A cover (0x20, 0x21: a set with its own command words
+// has them) is kept, and the image over after it is laid through it: each channel times the cover's alpha there by the processor's rounding
+// (c * a + 128, plus its high byte, the high byte of that), the image's alpha first 255 for 0x21.
+static const unsigned int address_to gs_cover;
 static void gs_apply(unsigned int address_to want, const unsigned int q[8], const unsigned int damage[4])
 {
         unsigned int kind = q[0] & ~0x80u;
         long long x0 = (int)q[1], y0 = (int)q[2], x1 = (int)q[3], y1 = (int)q[4];
         const unsigned int address_to from = kind == 4 || kind == 11 ? (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)q[5] | (positive)q[6] << 32) - GPU_VA)) : 0;
+        const unsigned int address_to cover = gs_cover;
+        const unsigned int address_to through = cover ? (const unsigned int address_to)((p8 address_to)gpu.at + (((positive)cover[5] | (positive)cover[6] << 32) - GPU_VA)) : 0;
 
+        gs_cover = 0;
+        if ((q[0] & ~1u) == 0x20u)
+        {
+                gs_cover = q;
+                return;
+        }
         if (kind == 1 && !(q[5] >> 24))
                 return;
         for (long long y = y0 > (long long)damage[1] ? y0 : (long long)damage[1]; y < y1 && y < (long long)damage[3]; y++)
@@ -861,6 +872,19 @@ static void gs_apply(unsigned int address_to want, const unsigned int q[8], cons
                                 v = from[(y - y0) * q[7] + (x - x0)];
                                 if (q[0] & 0x80u)
                                         v = (v & 0xff00ff00u) | (v >> 16 & 255u) | (v & 255u) << 16;
+                        }
+                        if (through && from)
+                        {
+                                unsigned int alpha = through[(y - (int)cover[2]) * cover[7] + (x - (int)cover[1])] >> 24, made = 0;
+
+                                v |= cover[0] & 1u ? 0xff000000u : 0u;
+                                for (int shift = 0; shift < 32; shift += 8)
+                                {
+                                        unsigned int t = (v >> shift & 255u) * alpha + 128u;
+
+                                        made |= ((t + (t >> 8)) >> 8) << shift;
+                                }
+                                v = made;
                         }
                         *p = kind == 0 || kind == 4 ? v : gpu_test_overv(*p, v);
                 }
@@ -882,6 +906,15 @@ static void gs_records(unsigned int address_to ops, unsigned int n, unsigned int
 
                 if (k % 13 == 5)
                         rw = 0;
+                // A set with its own command words (i915) has covers: every eleventh record a cover (its picture any of the atlas, the alpha of
+                // each pixel the cover there), the record after it the image over it is for, on the same rectangle.
+                if (gpu_set->batch && k % 11 == 7 && k + 1 < n)
+                        kind = 0x20u | (gs_random() & 1u);
+                else if (gpu_set->batch && k && (q[-8] & ~1u) == 0x20u)
+                {
+                        kind = 11u | (gs_random() & 0x80u);
+                        x0 = (int)q[-7], y0 = (int)q[-6], rw = q[-5] - q[-7], rh = q[-4] - q[-6];
+                }
                 q[0] = kind, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)(x0 + (int)rw), q[4] = (unsigned int)(y0 + (int)rh);
                 q[5] = gs_random(), q[6] = q[7] = 0;
                 if (kind > 1)
@@ -929,6 +962,7 @@ static positive gs_scene_row(string_address label, unsigned int w, unsigned int 
                         src[i] ^= turn;
         }
         gs_binned(d, w, h, binned);
+        gs_cover = 0;
         for (unsigned int k = 0; k < n; k++)
                 gs_apply(gs_want, ops + 8 * k, binned);
         began = clock_monotonic_nanoseconds();

@@ -1539,6 +1539,7 @@ static unsigned int compositor_gpu_desc(const unsigned int desc[8])
 // scenes have wanted: one that found no room for a tile is the processor's, and the pool is made larger before the next (compositor_gpu_frames).
 #define COMPOSITOR_I915_STATIC_BYTES (1ul << 20)
 #define COMPOSITOR_I915_STATIC_SLOTS 256
+#define COMPOSITOR_I915_COVER 0x01000000u // a kept tile's "colour" when it is a cover alone (its alpha the cover's bytes), not a colour through one
 static struct
 {
         unsigned int *pixels;
@@ -1729,75 +1730,75 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                         g->count++;
                         return;
                 }
-                if (r > 0 && (!frame || (!frame->tiled_kind && frame->pixels)))
+                // A colour through a cover is a tile of that colour made once and kept (the cover's bytes its alpha): laid over.
+                if (r > 0 && !frame)
                 {
                         int w = cx1 - cx0, h = cy1 - cy0, hit = 0;
                         unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), tp = compositor_gpu_i915_tile_pitch(w);
                         positive tile_va = 0;
-                        unsigned int *tile = !frame ? compositor_gpu_i915_solid_tile(slice_off, colour, w, h, r, &tile_va, &hit)
-                                                    : compositor_gpu_i915_tile_alloc(tp, (unsigned long)h, &tile_va);
+                        unsigned int *tile = compositor_gpu_i915_solid_tile(slice_off, colour, w, h, r, &tile_va, &hit);
 
                         if (tile)
                         {
                                 const unsigned char *cov = g->tables + slice_off;
+                                unsigned int cr = (colour >> 16) & 255u, cg = (colour >> 8) & 255u, cb = colour & 255u;
+                                unsigned int opaque = 0xff000000u | (cr << 16) | (cg << 8) | cb;
 
-                                if (!frame && !hit)
+                                for (int row = 0; row < h && !hit; row++)
                                 {
-                                        unsigned int cr = (colour >> 16) & 255u, cg = (colour >> 8) & 255u, cb = colour & 255u;
-                                        unsigned int opaque = 0xff000000u | (cr << 16) | (cg << 8) | cb;
+                                        const unsigned char *crow = cov + row * r;
+                                        unsigned int *drow = tile + (unsigned long)row * tp;
 
-                                        for (int row = 0; row < h; row++)
+                                        for (int col = 0; col < w; col++)
                                         {
-                                                const unsigned char *crow = cov + row * r;
-                                                unsigned int *drow = tile + (unsigned long)row * tp;
-
-                                                for (int col = 0; col < w; col++)
-                                                {
-                                                        unsigned int a = crow[col];
-                                                        drow[col] = a == 255u ? opaque
-                                                                              : a ? ((a << 24) | (compositor_gpu_mul255(cr, a) << 16) |
-                                                                                     (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a))
-                                                                                  : 0u;
-                                                }
-                                        }
-                                }
-                                else if (frame)
-                                {
-                                        const unsigned int *src = frame->pixels + (unsigned long)(cy0 - frame->y) * frame->pitch + (unsigned long)(cx0 - frame->x);
-                                        unsigned long sp = frame->pitch;
-                                        int premul = kind == 12, sw = frame->swap;
-
-                                        for (int row = 0; row < h; row++)
-                                        {
-                                                const unsigned char *crow = cov + row * r;
-                                                const unsigned int *srow = src + (unsigned long)row * sp;
-                                                unsigned int *drow = tile + (unsigned long)row * tp;
-
-                                                for (int col = 0; col < w; col++)
-                                                {
-                                                        unsigned int a = crow[col];
-
-                                                        if (!a)
-                                                                drow[col] = 0u;
-                                                        else if (a == 255u && !sw)
-                                                                drow[col] = premul ? srow[col] : (0xff000000u | (srow[col] & 0x00ffffffu));
-                                                        else
-                                                        {
-                                                                unsigned int px = srow[col];
-                                                                unsigned int cr = sw ? (px & 255u) : ((px >> 16) & 255u);
-                                                                unsigned int cg = (px >> 8) & 255u;
-                                                                unsigned int cb = sw ? ((px >> 16) & 255u) : (px & 255u);
-                                                                unsigned int pa = premul ? compositor_gpu_mul255(px >> 24, a) : a;
-
-                                                                drow[col] = (pa << 24) | (compositor_gpu_mul255(cr, a) << 16) |
-                                                                            (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a);
-                                                        }
-                                                }
+                                                unsigned int a = crow[col];
+                                                drow[col] = a == 255u ? opaque
+                                                                      : a ? ((a << 24) | (compositor_gpu_mul255(cr, a) << 16) |
+                                                                             (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a))
+                                                                          : 0u;
                                         }
                                 }
                                 op[0] = 11u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
                                 op[5] = (unsigned int)tile_va, op[6] = (unsigned int)(tile_va >> 32), op[7] = tp;
                                 g->count++;
+                                return;
+                        }
+                }
+                // A picture through a cover is the card's to make: a cover record (the cover's bytes the alpha of a tile made once and kept), then
+                // the picture laid over, which the scene's kernel multiplies by the cover first (gpu_i915_scene.iga's cover; 0x21 for a picture
+                // with no alpha of its own, whose alpha is then the cover). No pixel of the picture is read by the processor, so one it has no
+                // pixels of (a client's own buffer on the card) has its round corners too. A picture on a pitch the card does not read has its
+                // piece copied to a tile first (compositor_gpu_copied).
+                if (r > 0 && frame && !frame->tiled_kind && (frame->pixels || frame->gpu_base))
+                {
+                        int w = cx1 - cx0, h = cy1 - cy0, hit = 0;
+                        unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), tp = compositor_gpu_i915_tile_pitch(w);
+                        unsigned int pitch = (unsigned int)frame->pitch;
+                        positive cover_va = 0, at = 0;
+                        unsigned int *tile = compositor_gpu_i915_solid_tile(slice_off, COMPOSITOR_I915_COVER, w, h, r, &cover_va, &hit);
+
+                        for (int row = 0; tile && row < h && !hit; row++)
+                                for (int col = 0; col < w; col++)
+                                        tile[(unsigned long)row * tp + col] = (unsigned int)g->tables[slice_off + (unsigned int)(row * r + col)] * 0x01010101u;
+                        if (tile && compositor_gpu_copied(frame))
+                        {
+                                unsigned int *piece = compositor_gpu_i915_tile_alloc(tp, (unsigned long)h, &at);
+
+                                if (piece)
+                                        memory_copy_rect_u32(piece, (positive)tp, frame->pixels + (unsigned long)(cy0 - frame->y) * frame->pitch + (unsigned long)(cx0 - frame->x),
+                                                             (positive)frame->pitch, (positive)w, (positive)h), pitch = tp;
+                                else
+                                        at = 0;
+                        }
+                        else if (tile && compositor_gpu_va(frame))
+                                at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
+                        if (tile && at)
+                        {
+                                op[0] = kind == 12 ? 0x20u : 0x21u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
+                                op[5] = (unsigned int)cover_va, op[6] = (unsigned int)(cover_va >> 32), op[7] = tp;
+                                op[8] = frame->swap ? 0x8bu : 11u, op[9] = (unsigned int)cx0, op[10] = (unsigned int)cy0, op[11] = (unsigned int)cx1, op[12] = (unsigned int)cy1;
+                                op[13] = (unsigned int)at, op[14] = (unsigned int)(at >> 32), op[15] = pitch;
+                                g->count += 2;
                                 return;
                         }
                 }

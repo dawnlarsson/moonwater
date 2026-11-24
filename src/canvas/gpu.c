@@ -3454,9 +3454,12 @@ static unsigned int gpu_scene_not(unsigned int why, unsigned int kind, unsigned 
         return 0;
 }
 
+#define GPU_SCENE_COVER(kind) (((kind) & ~1u) == 0x20u) // a cover for the image record after it (0x21: that image is opaque, its alpha the cover)
 /*
         The Intel scene (op 6, the kernel gpu_i915_scene: fill 0, tone over 1, image copy 4 and premultiplied image over 11, the images with an
-        optional 0x80 R/B swap, drawn in order over the damage, a thread a strip of eight 8 by 8 tiles). The damage is the patch the arguments name
+        optional 0x80 R/B swap, drawn in order over the damage, a thread a strip of eight 8 by 8 tiles). A cover (0x20, or 0x21 for an opaque
+        picture: GPU_SCENE_COVER) is a record that names a picture as an image's does, whose alpha the image over (11) right after it, on the same
+        rectangle, is multiplied by before it is laid over: a picture through a round corner's cover, made by the card. The damage is the patch the arguments name
         (a->x0 patches of 64 pixels, a->y0 of 4 rows, a->w by a->rows as gpu_scene_build sets them) clipped to the picture (a->sp by a->gp); the
         records are a->count of 8 words at a->ops (64-byte aligned, inside the buffer). The batch clips each record to the damage and bins it into
         the damage's cells of 64 by 64 pixels (from the damage's first pixel), a cell's list in the order of the records and started at the last
@@ -3495,7 +3498,8 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         struct { positive base; unsigned int pitch, width, rows; b32 floats; } entry[GPU_I915_SCENE_IMAGES]; // the images' surfaces, made after the lists
         p8 address_to state, address_to pack;
         const unsigned int address_to rec;
-        b32 any = false;
+        unsigned int cover[4];
+        b32 any = false, covered = false;
 
         if (!a || !a->count || a->ops < GPU_VA || (a->ops & 63) || !a->sp || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA ||
@@ -3534,6 +3538,14 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
         }
         rec = (const unsigned int address_to)((p8 address_to)job->state_at + ((long)a->ops - (long)job->state));
         pack = (p8 address_to)job->state_at + ((long)pack_va - (long)job->state);
+        {
+                unsigned int last[8];
+
+                // (a cover with no record after it covers nothing: not a scene the kernel draws)
+                memory_copy(last, rec + 8 * (a->count - 1), 32);
+                if (GPU_SCENE_COVER(last[0]))
+                        return gpu_scene_not(GPU_SCENE_NOT_KIND, last[0], 0);
+        }
         for (unsigned int i = 0; i < a->count; i++)
         {
                 unsigned int r[8], k;
@@ -3541,8 +3553,14 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
 
                 memory_copy(r, rec + 8 * i, 32);
                 k = r[0] & ~0x80u;
-                if (r[0] > 1u && k != 4u && k != 11u)
+                if (r[0] > 1u && k != 4u && k != 11u && !GPU_SCENE_COVER(r[0]))
                         return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0);
+                // A cover is the next record's, an image over on its rectangle (so the two are in the same cells' lists, side by side).
+                if (covered && (k != 11u || memory_compare(r + 1, cover, sizeof cover)))
+                        return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0);
+                covered = GPU_SCENE_COVER(r[0]);
+                if (covered)
+                        memory_copy(cover, r + 1, sizeof cover);
                 if (!gpu_i915_scene_clip(r, damage, c))
                         continue;
                 for (unsigned int ty = (unsigned int)(c[1] - damage[1]) >> 6, ty1 = (unsigned int)(c[3] - 1 - damage[1]) >> 6; ty <= ty1; ty++)
@@ -3598,7 +3616,7 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                                 if (!made)
                                 {
                                         made = true;
-                                        if (k == 4u || k == 11u)
+                                        if (k == 4u || k == 11u || GPU_SCENE_COVER(r[0]))
                                         {
                                                 // The image's first pixel in the damage, the 64-byte line it is on, and the surface from there: as wide as the
                                                 // record's part of the damage, its rows, at the picture's own pitch (r[7] pixels).
@@ -3720,9 +3738,9 @@ static b32 gpu_scene_takes(const unsigned int address_to ops, unsigned int n)
 
                 memory_copy(r, ops + 8 * i, 32);
                 k = r[0] & ~0x80u;
-                if (r[0] > 1u && k != 4u && k != 11u)
+                if (r[0] > 1u && k != 4u && k != 11u && !GPU_SCENE_COVER(r[0]))
                         return gpu_scene_not(GPU_SCENE_NOT_KIND, r[0], 0) != 0;
-                if ((k == 4u || k == 11u) && (!r[7] || r[7] > 65535u || (r[7] & 15u)))
+                if ((k == 4u || k == 11u || GPU_SCENE_COVER(r[0])) && (!r[7] || r[7] > 65535u || (r[7] & 15u)))
                         return gpu_scene_not(GPU_SCENE_NOT_PITCH, r[0], r[7]) != 0;
         }
         return true;
@@ -5021,6 +5039,17 @@ static struct
         positive took;
 } gpu_clocks_state;
 
+// A hold let go of with no card to ask it of (the card it was taken on stopped, or started again): a context's level went with its descriptor,
+// but i915's is the machine's, the least clock in a sysfs file, which outlives the card. It was left raised: a card turned off or given up while
+// it composed kept the GPU at its highest clock until the next start of one (seen on an Ivy Bridge, a Coffee Lake and an Alder Lake after canvas
+// gpu was put back from on: 1100, 1100 and 1300 MHz where the least was 350, 350 and 300). It is put back as it was found.
+static void gpu_clocks_let_go(void)
+{
+        if (gpu_i915_min_kept)
+                gpu_i915_clocks(-1, 0, null);
+        gpu_clocks_state.level = 0;
+}
+
 static unsigned int gpu_clocks(int fd, unsigned int epoch, unsigned int level)
 {
         positive began = clock_monotonic_nanoseconds();
@@ -5029,7 +5058,7 @@ static unsigned int gpu_clocks(int fd, unsigned int epoch, unsigned int level)
         if (fd < 0 || !gpu_backend->clocks)
                 return 38;
         if (gpu_clocks_state.epoch != epoch)
-                gpu_clocks_state.ctx = 0, gpu_clocks_state.level = 0, gpu_clocks_state.epoch = epoch;
+                gpu_clocks_let_go(), gpu_clocks_state.ctx = 0, gpu_clocks_state.epoch = epoch;
         if (gpu_clocks_state.level == level)
                 return 0;
         e = gpu_backend->clocks(fd, level, &gpu_clocks_state.ctx);

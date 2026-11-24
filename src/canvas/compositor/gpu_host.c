@@ -1887,11 +1887,15 @@ static void compositor_gpu_clocks_answer(void)
         level = compositor_gpu_clocks.want, epoch = compositor_gpu_clocks.want_epoch, fd = compositor_gpu_clocks.want_fd;
         compositor_gpu_clocks.want_fd = -1;
         compositor_gpu_clocks_unlock();
+        // (asked to let go with the card it was held on gone: a hold that is the machine's, i915's least clock, is let go of all the same)
+        if (fd >= 0 && epoch == __atomic_load_n(&gpu_epoch, __ATOMIC_ACQUIRE))
+                e = gpu_clocks(fd, epoch, level);
+        else if (!level)
+                gpu_clocks_let_go(), e = 0;
+        else
+                e = 0;
         if (fd >= 0)
-        {
-                e = epoch == __atomic_load_n(&gpu_epoch, __ATOMIC_ACQUIRE) ? gpu_clocks(fd, epoch, level) : 0;
                 GPU_UNDUP(fd);
-        }
         __atomic_store_n(&compositor_gpu_clocks.error, e, __ATOMIC_RELAXED);
         __atomic_store_n(&compositor_gpu_clocks.answered, asked, __ATOMIC_RELEASE);
 }
@@ -1986,14 +1990,14 @@ static positive compositor_gpu_clocks_at(void)
 }
 
 // The hold let go of at its end, or as soon as the card does not compose (canvas gpu off, a card dead). A card started again since the hold has a
-// new descriptor: the old context went with the old one, and its level with it, so nothing is asked.
+// new descriptor, and one stopped has none: the old context went with the old one and its level with it, but a hold that is the machine's
+// (i915's least clock) did not, so the ask is made whatever became of the card (compositor_gpu_clocks_answer, gpu_clocks_let_go).
 static void compositor_gpu_clocks_tick(positive now)
 {
         if (!compositor_gpu_clocks.held || ((compositor_gpu_clocks.game || now < compositor_gpu_clocks.until) && compositor_gpu_awake_wanted()))
                 return;
         compositor_gpu_clocks.held = 0, compositor_gpu_clocks.game = 0;
-        if (compositor_gpu_clocks.epoch == gpu_epoch)
-                compositor_gpu_clocks_ask(0);
+        compositor_gpu_clocks_ask(0);
 }
 
 // Hold AMDGPU_CTX_STABLE_PSTATE_PEAK (4) while a fullscreen game is active on AC power (0 W extra at the desktop; cuts GPU

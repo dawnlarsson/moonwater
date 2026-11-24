@@ -1,5 +1,5 @@
 // Gen9 scene (op 6): fill (0), tone over (1), image copy (4) and premultiplied image over (11), the images with an optional R/B
-// swap (0x80), drawn in order over the damage. A thread is a strip of eight 8 by 8 pixel tiles, 64 pixels by 8 rows: walker group X
+// swap (0x80), and a cover for the image record after it (0x20, or 0x21 for an opaque image), drawn in order over the damage. A thread is a strip of eight 8 by 8 pixel tiles, 64 pixels by 8 rows: walker group X
 // (r0.1) is the strip's column of 64 pixels and Y (r0.6) its row of tiles, its first pixel at x = px0 + 64 X, y = py0 + 8 Y. Every
 // ALU instruction is SIMD8 (a register, one row of a tile), so the Gen7 and Gen7.5 patch of these words (gpu.c's gpu_start) has
 // no compressed instruction to change.
@@ -12,7 +12,11 @@
 // a list of more than eight (the row is then no record: its word 1 is the list's first row in entry 2, whose rows are records)
 // and 0x200 when the first record covers every tile of the cell whole and opaque (no tile is read, none looks for its cover);
 // entries 3 and up are the records' images, a surface each (its own base and pitch), read a tile at a time at byte
-// x = word 5 + 4 x and row = word 6 + y. The records are clipped to the damage, and a cell's list starts at the last record that
+// x = word 5 + 4 x and row = word 6 + y. A cover record (0x20, 0x21) names an image as an image's record does, read the same way
+// and kept (r48-r55): the next image record's pixels are each multiplied by the cover's alpha at their place (c * a + 128, plus its
+// own high byte, the high byte of that: the processor's rounding), every channel, the image's alpha first made 255 for 0x21 (an
+// opaque picture: its alpha is the cover), and laid over; a window's round corner is its picture through the corner's cover, with
+// no pixel of it made by the processor. The records are clipped to the damage, and a cell's list starts at the last record that
 // covers all of the cell's damage, by the encoder (gpu_i915_scene_batch). A strip reads its cell's list once.
 //
 // A tile: the last record that covers it whole and opaque is found (a fill, or a copy: what was under it cannot show), and the
@@ -21,7 +25,7 @@
 //
 // Registers: r2 scalars (.0 bx .1 by .2 bx + 8 .3 the tile's bottom .4 the record .5 the first drawn .6 the batch of eight
 // records held in r40-r47 .7 4 bx), r4 (.0 the strip's end .1 the list's first row in entry 2 .2 the list's length .3 its flags
-// .4 the tile is in r14-r21), r3 the lanes' x, r7 the lane numbers 0 to 7, r8 scratch, r9 the x mask, r10 the rows' y masks
+// .4 the tile is in r14-r21 .5 a cover is held in r48-r55 .6 what is or'ed into the image under it), r3 the lanes' x, r7 the lane numbers 0 to 7, r8 scratch, r9 the x mask, r10 the rows' y masks
 // (lane r: row r), r11 r12 r13 the headers of the lists', the image's and the tile's block messages, r14-r21 the tile, r22-r29
 // the image's tile, r30-r38 scratch, r39 the record drawn (moved from the batch by its number: r[a0.0]), r40-r47 the batch.
 mov (1|M0)               r7.0<1>:ud    0:ud
@@ -73,6 +77,7 @@ add (8|M0)               r3.0<1>:ud    r7.0<8;8,1>:ud    r2.0<0;1,0>:ud
 mov (1|M0)               r2.4<1>:ud    0:ud
 mov (1|M0)               r2.5<1>:ud    0:ud
 mov (1|M0)               r4.4<1>:ud    1:ud
+mov (1|M0)               r4.5<1>:ud    0:ud
 // the first record holds the cell: every tile is drawn from it, none read
 and (1|M0)               r8.0<1>:ud    r4.3<0;1,0>:ud    0x200:ud
 cmp (16|M0)  (ne)f0.1    null:ud       r8.0<0;1,0>:ud    0:ud
@@ -179,6 +184,9 @@ cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    0:ud
 (W&f0.1) jmpi kind_fill
 cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    1:ud
 (W&f0.1) jmpi kind_tone
+and (1|M0)               r8.3<1>:ud    r8.2<0;1,0>:ud    0x7e:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r8.3<0;1,0>:ud    0x20:ud
+(W&f0.1) jmpi kind_cover
 // an image (4, 11): its tile read through its own entry (word 7), the descriptor made in a0.0
 add (1|M0)               r12.0<1>:ud   r39.5<0;1,0>:ud   r2.7<0;1,0>:ud
 add (1|M0)               r12.1<1>:ud   r39.6<0;1,0>:ud   r2.1<0;1,0>:ud
@@ -244,9 +252,178 @@ shl (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   16:ud
 or (8|M0)                r29.0<1>:ud   r30.0<8;8,1>:ud   r31.0<8;8,1>:ud
 or (8|M0)                r29.0<1>:ud   r29.0<8;8,1>:ud   r32.0<8;8,1>:ud
 kind_ordered:
+cmp (16|M0)  (eq)f0.1    null:ud       r4.5<0;1,0>:ud    0:ud
+(W&f0.1) jmpi kind_plain
+// the image under the cover held: each row's pixels times the cover's alpha there, every channel, and laid over
+shr (8|M0)               r30.0<1>:ud   r48.0<8;8,1>:ud   24:ud
+or (8|M0)                r22.0<1>:ud   r22.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r22.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r22.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r22.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r49.0<8;8,1>:ud   24:ud
+or (8|M0)                r23.0<1>:ud   r23.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r23.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r23.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r23.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r50.0<8;8,1>:ud   24:ud
+or (8|M0)                r24.0<1>:ud   r24.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r24.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r24.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r24.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r51.0<8;8,1>:ud   24:ud
+or (8|M0)                r25.0<1>:ud   r25.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r25.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r25.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r25.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r52.0<8;8,1>:ud   24:ud
+or (8|M0)                r26.0<1>:ud   r26.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r26.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r26.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r26.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r53.0<8;8,1>:ud   24:ud
+or (8|M0)                r27.0<1>:ud   r27.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r27.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r27.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r27.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r54.0<8;8,1>:ud   24:ud
+or (8|M0)                r28.0<1>:ud   r28.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r28.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r28.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r28.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+shr (8|M0)               r30.0<1>:ud   r55.0<8;8,1>:ud   24:ud
+or (8|M0)                r29.0<1>:ud   r29.0<8;8,1>:ud   r4.6<0;1,0>:ud
+and (8|M0)               r31.0<1>:ud   r29.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r32.0<1>:ud   r29.0<8;8,1>:ud   8:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00ff00ff:ud
+mul (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00800080:ud
+mul (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r30.0<2;1,0>:uw
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0x00800080:ud
+shr (8|M0)               r33.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   r33.0<8;8,1>:ud
+shr (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   8:ud
+and (8|M0)               r31.0<1>:ud   r31.0<8;8,1>:ud   0x00ff00ff:ud
+shr (8|M0)               r33.0<1>:ud   r32.0<8;8,1>:ud   8:ud
+and (8|M0)               r33.0<1>:ud   r33.0<8;8,1>:ud   0x00ff00ff:ud
+add (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   r33.0<8;8,1>:ud
+and (8|M0)               r32.0<1>:ud   r32.0<8;8,1>:ud   0xff00ff00:ud
+or (8|M0)                r29.0<1>:ud   r31.0<8;8,1>:ud   r32.0<8;8,1>:ud
+mov (1|M0)               r4.5<1>:ud    0:ud
+(W) jmpi kind_over
+kind_plain:
 cmp (16|M0)  (eq)f0.1    null:ud       r8.2<0;1,0>:ud    4:ud
 (W&f0.1) jmpi kind_copy
 (W) jmpi kind_over
+kind_cover:
+// a cover (0x20, 0x21): its tile read as an image's is and kept for the image record after it
+add (1|M0)               r12.0<1>:ud   r39.5<0;1,0>:ud   r2.7<0;1,0>:ud
+add (1|M0)               r12.1<1>:ud   r39.6<0;1,0>:ud   r2.1<0;1,0>:ud
+or (1|M0)                a0.0<1>:ud    r39.7<0;1,0>:ud   0x02890000:ud
+send (16|M0)             r48:ud        r12:ud    0xC  a0.0
+and (1|M0)               r8.3<1>:ud    r39.0<0;1,0>:ud   1:ud
+add (1|M0)               r8.3<1>:ud    -r8.3<0;1,0>:ud   0:ud
+and (1|M0)               r4.6<1>:ud    r8.3<0;1,0>:ud    0xff000000:ud
+mov (1|M0)               r4.5<1>:ud    1:ud
+(W) jmpi draw_next
 kind_fill:
 mov (8|M0)               r22.0<1>:ud   r39.5<0;1,0>:ud
 mov (8|M0)               r23.0<1>:ud   r39.5<0;1,0>:ud
