@@ -15824,6 +15824,19 @@ static fn cast_channels(void)
         link_cast_session_turn(s, link_now());
         check("a session two listeners keep has its cast state and says what it grants: nothing",
               s->cast && s->cast->grants_said == 0 && s->link->posted >= 1);
+        {
+                p64 now = link_now();
+
+                //      The listener's wait is the earliest due of every session: a cast state with no stream asks none (its
+                //      clock was never asked, and 0 + a second is long past: the listener spun), and a live one asks no
+                //      time before now.
+                check("a session's channels with no stream ask for no wake", link_cast_due(s, now + 1000000) == now + 1000000);
+                s->cast->give[LINK_CAST_SOUND].state = LINK_CAST_LIVE;
+                s->cast->pinged = now;
+                check("with a stream, the clock's next ask a second on", link_cast_due(s, now + 5000000) == now + LINK_CAST_PING);
+                s->cast->give[LINK_CAST_SOUND].state = LINK_CAST_IDLE;
+                s->cast->pinged = 0;
+        }
         //      A fuzz of the cast keys: nothing breaks, and nothing is believed that should not be.
         {
                 p64 seed = 0x9e3779b97f4a7c15ull;

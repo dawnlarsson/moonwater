@@ -944,11 +944,19 @@ static fn link_cast_session_watch(struct link_session address_to s, system_poll_
         }
 }
 
+/*      When the session's channels next want a turn: the clock's next ask, while a stream is asked or given (the turn only
+        asks then). A session with cast state and no stream wants none: its pinged is 0, and a due of 0 + a second was a time
+        long past, so the listener's wait was zero and it spun a core (cloudless-lamp, 2026-11-25). */
 static p64 link_cast_due(struct link_session address_to s, p64 due)
 {
+        p8 live = false;
         p64 next;
 
         if (!s->cast)
+                return due;
+        for (positive kind = 1; kind < LINK_CAST_KINDS; kind++)
+                live |= s->cast->ask[kind].state != LINK_CAST_IDLE || s->cast->give[kind].state != LINK_CAST_IDLE;
+        if (!live)
                 return due;
         next = s->cast->pinged + LINK_CAST_PING;
         return next < due ? next : due;
