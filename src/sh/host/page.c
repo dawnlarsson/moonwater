@@ -1500,7 +1500,8 @@ static string_address host_wipe_keep[96 + SETTINGS_ROWS + array_count(discovery_
     HOST_WIPE_KEEP(SETTING_TASKBAR_PINNED_PATH),
     //  The sound card and the microphone, whose rows are special ones (locale_audio_pick); the rest of the Sound rows are plain.
     HOST_WIPE_KEEP(SETTING_AUDIO_DEVICE_PATH),
-    HOST_WIPE_KEEP(SETTING_AUDIO_MIRROR_PATH),
+    HOST_WIPE_KEEP(SETTING_AUDIO_MIRROR_PATH), // the old list of mirrors, which the sound server takes into the graph once
+    HOST_WIPE_KEEP("/root/audio.graph"),       // the sound graph's wiring (src/audio/graph.c's AUDIO_GRAPH_PATH, after this in the shell)
     HOST_WIPE_KEEP(SETTING_AUDIO_SOURCE_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     //  The programs the desktop starts with it (desktop_startup), and the list it began with (desktop_autostart): no row of the table keeps either.
