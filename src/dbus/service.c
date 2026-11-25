@@ -956,10 +956,19 @@ static b32 sessionbus_main()
         dbus_interface_claim("org.freedesktop.portal.OpenURI", 4);
         sessionbus_watch();
         sessionbus_settings();
+#ifdef STANDARD_MODERN_C_NET_CUPS_SHIM
+        bipolar cups_listen = -1;
+        cups_shim_state cups_state;
+        if (string_equals((string_address)sessionbus.path, (string_address)"/run/moonwater/bus"))
+        {
+                cups_shim_init(address_of cups_state, (string_address)CUPS_PRINTERS_PATH, (string_address)CUPS_DEFAULT_PATH);
+                cups_listen = cups_shim_listen((string_address)CUPS_SHIM_SOCKET);
+        }
+#endif
         for (;;)
         {
-                struct sessionbus_poll watch[3 + 2 * DBUS_CLIENTS + CASTBUS_POLLS];
-                long owner[3 + 2 * DBUS_CLIENTS + CASTBUS_POLLS], count = 0;
+                struct sessionbus_poll watch[4 + 2 * DBUS_CLIENTS + CASTBUS_POLLS];
+                long owner[4 + 2 * DBUS_CLIENTS + CASTBUS_POLLS], count = 0;
                 long wait = castbus_wait(dbus_wait(1000)); // a second, or less when the bus has a deadline sooner (a portal Response it holds)
                 positive timeout[2] = {(positive)(wait / 1000), (positive)(wait % 1000) * 1000000};
                 long now;
@@ -976,6 +985,13 @@ static b32 sessionbus_main()
                         watch[count] = (struct sessionbus_poll){sessionbus.inotify, SESSIONBUS_POLLIN, 0};
                         owner[count++] = -3;
                 }
+#ifdef STANDARD_MODERN_C_NET_CUPS_SHIM
+                if (cups_listen >= 0)
+                {
+                        watch[count] = (struct sessionbus_poll){(int)cups_listen, SESSIONBUS_POLLIN, 0};
+                        owner[count++] = -999;
+                }
+#endif
                 for (long slot = 0; slot < DBUS_CLIENTS; slot++)
                         if (sessionbus.fd[slot] >= 0)
                         {
@@ -1003,6 +1019,18 @@ static b32 sessionbus_main()
                                 goto stop;
                         else if (owner[at] == -3)
                                 sessionbus_drain_watch();
+#ifdef STANDARD_MODERN_C_NET_CUPS_SHIM
+                        else if (owner[at] == -999)
+                        {
+                                bipolar cfd = socket_accept((b32)cups_listen, null, null, SOCK_CLOEXEC);
+
+                                if (cfd >= 0)
+                                {
+                                        cups_shim_serve_client(address_of cups_state, (b32)cfd);
+                                        socket_close((b32)cfd);
+                                }
+                        }
+#endif
                         else if (owner[at] <= CASTBUS_OWNER)
                                 castbus_event(CASTBUS_OWNER, owner[at], watch[at].returned);
                         else if (owner[at] <= -4)
@@ -1031,6 +1059,13 @@ static b32 sessionbus_main()
                         sessionbus_flush(slot);
         }
 stop:
+#ifdef STANDARD_MODERN_C_NET_CUPS_SHIM
+        if (cups_listen >= 0)
+        {
+                socket_close((b32)cups_listen);
+                sessionbus_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)CUPS_SHIM_SOCKET, 0, 0, 0, 0);
+        }
+#endif
         for (long slot = 0; slot < DBUS_CLIENTS; slot++)
                 sessionbus_drop(slot);
         if (sessionbus.signals >= 0)
