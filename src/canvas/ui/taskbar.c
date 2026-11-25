@@ -62,6 +62,7 @@ static void compositor_meet(int *into, const int *other);
 static void compositor_union(int *into, const int *other);
 static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
 static unsigned int compositor_vivid(unsigned int pixel);
+static unsigned int compositor_band_tint(void);
 static inline b32 language_rtl(void);
 static inline INLINE CONST int taskbar_inset(int scale);
 static unsigned int taskbar_accent(void);
@@ -866,7 +867,7 @@ static const struct ui_node address_to taskbar_ui(struct ui *ui, const struct ta
 
 static unsigned int taskbar_glass_tab_clamped(const struct taskbar_view *view, int gx, int gy, int gw, int gh, int bx, int by, int bw, int x, int y, int width, int height)
 {
-        unsigned int amount = 179, target = compositor_tab_target(0);
+        unsigned int amount = compositor_band_tint(), target = compositor_tab_target(0); // 179 at the standard glass opacity (glass.c)
         int mx, my, c0, c1;
 
         if (view->scene)

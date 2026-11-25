@@ -6232,6 +6232,40 @@ static void wallpaper_bench(string_address into)
 
 static int settings_row_named(const char address_to label);
 
+// How many grounds' tab, the band tinted by amount toward either theme's surface, has a title whose ink (worked from that one pixel, as a
+// tab's is) stands under UI_READABLE from the brightest or the dimmest pixel any ground's tab can be (steps of 15 in each channel).
+static unsigned int glass_band_short(unsigned int amount)
+{
+    static const struct ui_theme *const themes[2] = {&ui_theme_dawning, &ui_theme_night};
+    unsigned int short_of = 0;
+
+    for (unsigned int theme = 0; theme < 2; theme++)
+    {
+        unsigned int surface = themes[theme]->role[UI_SURFACE] & 0xffffffu, bright = 0, dim = 0, most = 0, least = ~0u;
+
+        for (unsigned int r = 0; r < 256; r += 15)
+            for (unsigned int g = 0; g < 256; g += 15)
+                for (unsigned int b = 0; b < 256; b += 15)
+                {
+                    unsigned int tab = window_mix(compositor_vivid(r << 16 | g << 8 | b), surface, amount), light = ui_luminance(tab);
+
+                    if (light >= most)
+                        most = light, bright = tab;
+                    if (light <= least)
+                        least = light, dim = tab;
+                }
+        for (unsigned int r = 0; r < 256; r += 15)
+            for (unsigned int g = 0; g < 256; g += 15)
+                for (unsigned int b = 0; b < 256; b += 15)
+                {
+                    unsigned int ink = window_contrast(window_mix(compositor_vivid(r << 16 | g << 8 | b), surface, amount));
+
+                    short_of += ui_contrast(ink, bright) < UI_READABLE || ui_contrast(ink, dim) < UI_READABLE;
+                }
+    }
+    return short_of;
+}
+
 static void check_compositor_look(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE], glass[64 * 32], band[64 * 32];
@@ -6340,6 +6374,133 @@ static void check_compositor_look(void)
                     }
         check("look: on glass the ink, the quiet ink and the ink on each well stand out UI_READABLE from the ground at every tint",
               tried > 0 && short_ink == 0 && short_quiet == 0 && short_well == 0);
+    }
+
+    /*
+        The glass's opacity (canvas glass opacity). Its standard, 50, is the designed tints byte for byte: the lift 96 and the band's
+        179, and every pixel the processor's span and the C tone make the same as the tint with the lift written 96. 0 and 100 are the
+        weakest readable tints (the lift 17, the band's 175) and solid (256, the pivot itself), a level past either end is that end, and
+        no tint falls as the level rises. At every level the ink, the quiet ink and the ink on each well stand UI_READABLE from the
+        ground told, the ink of every ground a dark glass is told stands UI_READABLE from the brightest pixel its cap lets it hold
+        (5c5c5c) and a light glass's from its dimmest (e0e0e0), a tab's title, its ink from one pixel of the tab, stands UI_READABLE from
+        every pixel a tab can hold on either theme, and is legible over each desktop; one weaker than the weakest (the lift 16, the
+        band's 174), a dark ground's ink falls under it. The card raises compositor.tinted, which the span makes, so its glass is this.
+    */
+    {
+        static const unsigned int levels[] = {0, 10, 25, 50, 75, 100}, percents[] = {16, 24, 36, 40};
+        static unsigned int from[4096], made[4096];
+        unsigned int was = compositor_glass_opacity, short_told = 0, short_pixel = 0, short_band = 0, thin_level = 0, mismatched = 0, falls = 0, before = 0;
+        b32 standard, ends, clamped, weaker = false;
+        p64 state = 0x9e3779b97f4a7c15ull;
+        struct ui probe;
+
+        memory_zero(&probe, sizeof(probe));
+        probe.glass = true;
+        compositor_glass_opacity = COMPOSITOR_GLASS_OPACITY_STANDARD, compositor_glass_lift = compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST);
+        standard = compositor_glass_lift == 96 && compositor_band_tint() == 179;
+        for (unsigned int at = 0; at < 4096; at++)
+        {
+            XORSHIFT64(state);
+            from[at] = (unsigned int)(state >> 13) & 0xffffffu;
+        }
+        for (unsigned int side = 0; side < 2; side++)
+        {
+            compositor_glass_tone_span(made, from, 4096, side);
+            for (unsigned int at = 0; at < 4096; at++)
+            {
+                unsigned int pixel = window_mix(from[at], side ? 0xf0f0f0u : 0x808080u, 96), r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
+                unsigned int most = r > g ? (r > b ? r : b) : (g > b ? g : b), least = r < g ? (r < b ? r : b) : (g < b ? g : b);
+
+                if (!side && most > 0x5c)
+                    r = r * 0x5c / most, g = g * 0x5c / most, b = b * 0x5c / most;
+                else if (side && least < 0xe0)
+                    r = 255 - (255 - r) * 31 / (255 - least), g = 255 - (255 - g) * 31 / (255 - least), b = 255 - (255 - b) * 31 / (255 - least);
+                mismatched += (made[at] & 0xffffffu) != (r << 16 | g << 8 | b) || compositor_glass_tone(from[at], side) != (r << 16 | g << 8 | b);
+            }
+        }
+        compositor_glass_opacity = 0;
+        ends = compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST) == 17 && compositor_band_tint() == 175;
+        compositor_glass_opacity = 100;
+        ends = ends && compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST) == 256 && compositor_band_tint() == 256;
+        for (unsigned int level = 0; level <= 100; level++)
+        {
+            unsigned int now;
+
+            compositor_glass_opacity = level, now = compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST) | compositor_band_tint() << 16;
+            falls += level && ((now & 0xffff) < (before & 0xffff) || now >> 16 < before >> 16);
+            before = now;
+        }
+        compositor_glass_opacity = was;
+        compositor_glass_opacity_set(-5);
+        clamped = compositor_glass_opacity == 0 && compositor_glass_lift == COMPOSITOR_GLASS_LIFT_LEAST;
+        compositor_glass_opacity_set(500);
+        clamped = clamped && compositor_glass_opacity == 100 && compositor_glass_lift == 256;
+        compositor_glass_opacity_set(COMPOSITOR_GLASS_OPACITY_STANDARD);
+        clamped = clamped && compositor_glass_lift == COMPOSITOR_GLASS_LIFT;
+        // At 100 the span, the asm's amount at 256, is the pivot capped: solid.
+        compositor_glass_opacity = 100, compositor_glass_lift = 256;
+        compositor_glass_tone_span(made, from, 4096, 0);
+        for (unsigned int at = 0; at < 4096; at++)
+            mismatched += (made[at] & 0xffffffu) != 0x5c5c5cu || compositor_glass_tone(from[at], 0) != 0x5c5c5cu;
+        for (unsigned int level = 0; level < sizeof(levels) / sizeof(levels[0]); level++)
+        {
+            compositor_glass_opacity = levels[level], compositor_glass_lift = compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST);
+            short_band += glass_band_short(compositor_band_tint());
+            for (unsigned int side = 0; side < 2; side++)
+                for (unsigned int r = 0; r < 256; r += 15)
+                    for (unsigned int g = 0; g < 256; g += 15)
+                        for (unsigned int b = 0; b < 256; b += 15)
+                        {
+                            unsigned int ground = compositor_glass_tint(r << 16 | g << 8 | b, side);
+
+                            ui_inks(&probe, ground);
+                            short_told += ui_contrast(probe.ink, ground) < UI_READABLE || ui_contrast(probe.quiet, ground) < UI_READABLE;
+                            short_pixel += ui_contrast(probe.ink, side ? 0xe0e0e0u : 0x5c5c5cu) < UI_READABLE;
+                            for (unsigned int k = 0; k < sizeof(percents) / sizeof(percents[0]); k++)
+                            {
+                                unsigned int well = ui_well(&probe, UI_SECONDARY_CONTAINER, percents[k]);
+                                unsigned int alpha = (well >> 24) + ((well >> 24) >> 7);
+
+                                short_told += ui_contrast(probe.ink, window_mix(ground, probe.ink, alpha)) < UI_READABLE;
+                            }
+                        }
+            compositor.glass = glass;
+            compositor.band = band;
+            for (unsigned int at = 0; at < sizeof(grounds) / sizeof(grounds[0]); at++)
+            {
+                unsigned int tab, ink;
+                struct taskbar_view tv;
+
+                for (unsigned int pixel = 0; pixel < 64 * 32; pixel++)
+                    glass[pixel] = grounds[at];
+                memory_zero(&tv, sizeof(tv));
+                tv.pixels = band;
+                tv.glass = glass;
+                tab = taskbar_glass_tab(&tv, 0, 0, 64, 0, 0, 64, 4, 4, 40, 20);
+                ink = window_contrast(tab);
+                thin_level += look_luma(ink) - look_luma(tab) < 100 && look_luma(tab) - look_luma(ink) < 100;
+            }
+            compositor.glass = compositor.band = 0;
+        }
+        compositor_glass_lift = COMPOSITOR_GLASS_LIFT_LEAST - 1;
+        for (unsigned int r = 0; r < 256 && !weaker; r += 15)
+            for (unsigned int g = 0; g < 256 && !weaker; g += 15)
+                for (unsigned int b = 0; b < 256 && !weaker; b += 15)
+                {
+                    ui_inks(&probe, compositor_glass_tint(r << 16 | g << 8 | b, 0));
+                    weaker = ui_contrast(probe.ink, 0x5c5c5cu) < UI_READABLE;
+                }
+        weaker = weaker && glass_band_short(COMPOSITOR_BAND_TINT_LEAST - 1) && !glass_band_short(COMPOSITOR_BAND_TINT_LEAST);
+        compositor_glass_opacity = was, compositor_glass_lift = compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST);
+        string_format(log, "  glass opacity: standard %p, ends %p, clamped %p, falls %p, tints not as designed %p, short of the ground %p, of a pixel %p, of a tab %p, thin tabs %p, one weaker falls short %p\n",
+                      (positive)standard, (positive)ends, (positive)clamped, (positive)falls, (positive)mismatched, (positive)short_told, (positive)short_pixel,
+                      (positive)short_band, (positive)thin_level, (positive)weaker);
+        check("look: the glass opacity's standard is the designed tint byte for byte (the lift 96, the band's 179, every pixel of the span and the tone)",
+              standard && mismatched == 0);
+        check("look: the glass opacity's ends are the weakest readable tints (the lift 17, the band's 175) and solid (256), past them it clamps, and no tint falls as it rises",
+              ends && clamped && falls == 0);
+        check("look: at every glass opacity the inks read UI_READABLE over the ground told and over any pixel the glass holds, and a tab's title is legible; one lift weaker they would not",
+              short_told == 0 && short_pixel == 0 && short_band == 0 && thin_level == 0 && weaker);
     }
 
     // The pointer: white inside black by default and light, the other way dark; one size for each setting.

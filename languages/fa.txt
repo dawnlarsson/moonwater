@@ -39,6 +39,7 @@
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
+# machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 @language fa
 @name فارسی
 @translated machine
@@ -717,6 +718,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =GPU samples tiled client buffers	783a	GPU بافرهای کاشی‌شده‌ی برنامه را می‌خواند
 =Gallery	4cdd	گالری
 =Game frame cadence	fb65	آهنگ فریم بازی
+=Glass opacity (percent, or default)	0aba	کدری شیشه (درصد یا default)
 =Graphics	9fa8	گرافیک
 =Hold the pointer still to click	e349	برای کلیک، نشانگر را ثابت نگه دارید
 =Host key fingerprint	2398	اثر انگشت کلید میزبان

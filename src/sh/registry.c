@@ -234,6 +234,7 @@
 #define SETTING_THEME_DAY_FROM 7
 #define SETTING_THEME_DAY_UNTIL 19
 #define SETTING_ACCENT_PATH "/root/canvas.theme.accent"
+#define SETTING_GLASS_OPACITY_PATH "/root/canvas.glass.opacity"
 #define SETTING_MOTION_PATH "/root/canvas.motion"
 #define SETTING_MOTION_SPEED_PATH "/root/canvas.motion.speed"
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
@@ -384,6 +385,14 @@ static const struct settings_row settings_rows[] = {
                       .help = "what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]"),
     {null, "Accent colour (rrggbb or reset)", SETTINGS_FIELD, 0, 0, {"canvas", "theme", "accent"}, "accent ", null,
      {"canvas", "theme", "accent"}, null, 0, .how = SETTING_ALIAS},
+    //  How solid every glass is (the compositor's glass.c, compositor_glass_amount): the glass windows, menus and side panes, and the
+    //  band's tabs. 50 is the tint as designed, 100 the glass's own colour with nothing of what is under it, and 0 the clearest at
+    //  which the text on it still stands 4.7 to 1 from any pixel of it.
+    SETTING_PLAIN_ROW(null, "Glass opacity (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "glass", "opacity"), "opacity ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_GLASS_OPACITY_PATH, .standard = "50",
+                      .unit = "percent", .low = 0, .high = 100,
+                      .usage = "canvas glass opacity [PERCENT|default]",
+                      .help = "how solid the glass of menus, side panes and the taskbar is, 0 to 100: 0 shows the most of the blur under it that text on it still reads over, 100 is solid [50]"),
     SETTING_PLAIN_ROW(null, "Motion", SETTINGS_CHOICE, 0, ("canvas", "motion"), "motion ", "full reduced",
                       .path = SETTING_MOTION_PATH, .standard = "full", .reset = "full",
                       .refusal = "motion is full or reduced, not %s\n",

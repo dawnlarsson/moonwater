@@ -676,6 +676,7 @@ ui_field_full	fe02	that is as much as it holds
 =GPU samples tiled client buffers	783a	GPU samples tiled client buffers
 =Gallery	4cdd	Gallery
 =Game frame cadence	fb65	Game frame cadence
+=Glass opacity (percent, or default)	0aba	Glass opacity (percent, or default)
 =Graphics	9fa8	Graphics
 =Hold the pointer still to click	e349	Hold the pointer still to click
 =Host key fingerprint	2398	Host key fingerprint

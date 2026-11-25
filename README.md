@@ -50,6 +50,7 @@ moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or of
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
 moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
 moonwater canvas clipboard history [N|default]  copies the compositor keeps in memory, never on a disk, 0 to 32 [0]
+moonwater canvas glass opacity [PERCENT|default]  how solid the glass of menus, side panes and the taskbar is, 0 to 100: 0 shows the most of the blur under it that text on it still reads over, 100 is solid [50]
 moonwater canvas gpu [on|off]          draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [on]
 moonwater canvas gpu tiled [on|off]    sample tiled and compressed client pictures in place on the GPU, an experimental speed-up [off]
 moonwater canvas identify              show the number of each screen for three seconds

@@ -38,6 +38,7 @@
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
+# machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 @language de
 @name Deutsch
 @translated machine
@@ -716,6 +717,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =GPU samples tiled client buffers	783a	GPU nimmt gekachelte Client-Puffer direkt
 =Gallery	4cdd	Galerie
 =Game frame cadence	fb65	Bildtakt für Spiele
+=Glass opacity (percent, or default)	0aba	Deckkraft des Glases (Prozent oder default)
 =Graphics	9fa8	Grafik
 =Hold the pointer still to click	e349	Den Zeiger stillhalten, um zu klicken
 =Host key fingerprint	2398	Fingerabdruck des Host-Schlüssels

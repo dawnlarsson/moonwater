@@ -7550,7 +7550,7 @@ static fn check_settings_groups(void)
                 const char address_to words[3];
                 const char address_to group;
         } families[] = {
-            {{"name"}, "System"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
+            {{"name"}, "System"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"}, {{"canvas", "glass"}, "Canvas"},
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"}, {{"canvas", "border"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Display"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"}, {{"canvas", "vrr"}, "Display"}, {{"canvas", "cadence"}, "Display"}, {{"canvas", "tearing"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
@@ -7578,7 +7578,7 @@ static fn check_settings_groups(void)
             {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
             {"Allow recording", "Sound"}, {"Input device (name, or default)", "Sound"}, {"Input volume (percent, or default)", "Sound"}, {"Input mute", "Sound"},
             {"Wallpaper", "Canvas"}, {"Theme", "Canvas"},
-            {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
+            {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Glass opacity (percent, or default)", "Canvas"}, {"Motion", "Canvas"},
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
             {"Resize border width (pixels, or default)", "Canvas"},
             {"Open windows where they were last put", "Canvas"},

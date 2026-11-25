@@ -842,18 +842,52 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 #define COMPOSITOR_GLASS_UNSIDED 2u
 #define COMPOSITOR_GLASS_MARGIN 3 // the blocks kept round a window: what the rise reads past its edge
 
+/*
+        The glass's opacity (`moonwater canvas glass opacity`, 0 to 100): how far each tint of glass goes toward its target, the windows'
+        lift and the band's tint alike. 50 is each tint as designed, 100 the target itself (solid), and 0 the weakest tint at which text
+        on the glass still stands UI_READABLE from any pixel of it. Between, each half is a line, so the standard is the designed tint
+        exactly, byte for byte. The windows' weakest is the lift 17: their cap keeps every pixel of a dark glass at or under 5c5c5c, and
+        the ink of the darkest ground the lift 17 tells (090909) is d9d9d9, 4.73 to 1 from it, where 16's (080808, ink d8d8d8) is 4.69;
+        a light glass's floor keeps its ink over 11 to 1 at any lift. The band has no cap, and a tab's title takes its ink from one pixel
+        of the tab: the weakest at which that ink stands UI_READABLE from every other pixel the tab can hold is 175 on the dark theme
+        (4.72 to 1, and 174 is 4.65), the light theme's holding from 148, so the band's lower half is narrow and its upper half the same.
+*/
+#define COMPOSITOR_GLASS_LIFT_LEAST 17
+#define COMPOSITOR_BAND_TINT 179
+#define COMPOSITOR_BAND_TINT_LEAST 175
+#define COMPOSITOR_GLASS_OPACITY_STANDARD 50u
+#define COMPOSITOR_GLASS_OPACITY_MOST 100u
+static unsigned int compositor_glass_opacity = COMPOSITOR_GLASS_OPACITY_STANDARD, compositor_glass_lift = COMPOSITOR_GLASS_LIFT;
+
+// A tint designed at standard 256ths whose weakest readable is least, at the glass's opacity.
+static unsigned int compositor_glass_amount(unsigned int standard, unsigned int least)
+{
+        unsigned int level = compositor_glass_opacity > COMPOSITOR_GLASS_OPACITY_MOST ? COMPOSITOR_GLASS_OPACITY_MOST : compositor_glass_opacity;
+        unsigned int half = COMPOSITOR_GLASS_OPACITY_STANDARD;
+
+        if (level >= half)
+                return standard + ((256 - standard) * (level - half) + half / 2) / half;
+        return least + ((standard - least) * level + half / 2) / half;
+}
+
+// The band's tint toward the theme's surface (taskbar.c's tabs), at the glass's opacity.
+static unsigned int compositor_band_tint(void)
+{
+        return compositor_glass_amount(COMPOSITOR_BAND_TINT, COMPOSITOR_BAND_TINT_LEAST);
+}
+
 // The tint of a pixel already made more vivid (compositor_vivid), so a caller holding that value does not boost it again.
 // The tint of count boosted pixels into into, for a window of the side given: memory_tint_u32 with the glass's lift
 // toward mid grey, and the brightest capped (dark glass) or the dimmest raised (light glass).
 static void compositor_glass_tone_span(unsigned int *into, const unsigned int *from, positive count, unsigned int side)
 {
-        memory_tint_u32(into, from, count, side ? COMPOSITOR_GLASS_PIVOT_LIGHT : COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT, side ? 255 : COMPOSITOR_GLASS_DARKEST,
+        memory_tint_u32(into, from, count, side ? COMPOSITOR_GLASS_PIVOT_LIGHT : COMPOSITOR_GLASS_PIVOT, compositor_glass_lift, side ? 255 : COMPOSITOR_GLASS_DARKEST,
                         side ? COMPOSITOR_GLASS_LIGHTEST : 0);
 }
 
 static unsigned int compositor_glass_tone(unsigned int boosted, unsigned int side)
 {
-        unsigned int pixel = window_mix(boosted, side ? COMPOSITOR_GLASS_PIVOT_LIGHT : COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT);
+        unsigned int pixel = window_mix(boosted, side ? COMPOSITOR_GLASS_PIVOT_LIGHT : COMPOSITOR_GLASS_PIVOT, compositor_glass_lift);
         unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
         unsigned int most = r > g ? (r > b ? r : b) : (g > b ? g : b);
         unsigned int least = r < g ? (r < b ? r : b) : (g < b ? g : b);
@@ -872,6 +906,22 @@ static unsigned int compositor_glass_tone(unsigned int boosted, unsigned int sid
 static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int side)
 {
         return compositor_glass_tone(compositor_vivid(blurred), side);
+}
+
+// The opacity taken (out of range is the nearest end): every glass window's tint and told ground made again, as a turn of the
+// theme's side makes them (compositor_glass_side), and the band's glass drawn again.
+static void compositor_glass_opacity_set(long level)
+{
+        unsigned int now = level < 0 ? 0u : level > (long)COMPOSITOR_GLASS_OPACITY_MOST ? COMPOSITOR_GLASS_OPACITY_MOST : (unsigned int)level;
+
+        if (now == compositor_glass_opacity)
+                return;
+        compositor_glass_opacity = now, compositor_glass_lift = compositor_glass_amount(COMPOSITOR_GLASS_LIFT, COMPOSITOR_GLASS_LIFT_LEAST);
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (compositor.glassy[row])
+                        compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
+        compositor_damage(0, 0, compositor.width, compositor.height);
+        compositor_tabs_changed();
 }
 
 #ifdef MOONWATER_GPU_C

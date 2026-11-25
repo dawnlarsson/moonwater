@@ -321,7 +321,7 @@ static void compositor_wall_read(void)
 static void compositor_cursor_look_read(void)
 {
         char word[16];
-        long colour, sized = 0, percent = 25;
+        long colour, sized = 0, percent = 25, opacity = COMPOSITOR_GLASS_OPACITY_STANDARD;
         int size, look = 0, style, squeeze;
 
         compositor_word(SETTING_BACKGROUND_PATH, word, sizeof(word));
@@ -340,6 +340,8 @@ static void compositor_cursor_look_read(void)
         style = string_compare((string_address)word, (string_address) "classic") ? 1 : 0;
         compositor_setting_num(SETTING_SQUEEZE_PATH, &percent);
         squeeze = percent < 0 ? 0 : percent > 50 ? 50 : (int)percent;
+        compositor_setting_num(SETTING_GLASS_OPACITY_PATH, &opacity);
+        compositor_glass_opacity_set(opacity);
         if (size != compositor.cursor.size || look != compositor.cursor.look || style != compositor.cursor.style ||
             squeeze != compositor.cursor.squeeze)
         {
@@ -1247,7 +1249,7 @@ static const struct compositor_setting_spec compositor_setting_specs[] = {
         CS_G(SETTING_WALLPAPER_CURATED_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_SHARPEN_PATH, COMPOSITOR_SET_WALL),
         CS_G(SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK),
         CS_G(SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK),
-        CS_G(SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK),
+        CS_G(SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_GLASS_OPACITY_PATH, COMPOSITOR_SET_LOOK),
         CS_G(SETTING_THEME_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_ACCENT_PATH, COMPOSITOR_SET_THEME),
         CS_G(SETTING_MOTION_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_MOTION_SPEED_PATH, COMPOSITOR_SET_THEME),
         CS_G(SETTING_WHEEL_SMOOTH_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_CARET_BLINK_PATH, COMPOSITOR_SET_THEME),
