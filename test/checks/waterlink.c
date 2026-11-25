@@ -7638,11 +7638,12 @@ static fn request_answers(void)
               wls_answer(s, got) == 5 && got[0] == 'O' &&
                       memory_load_unaligned(p32, got + 1) == mode && mode);
         link_session_close(s);
-        check("a pull of a file that is not there is taken up as it always "
-              "was",
-              wls_file_asked(s, LINK_ASK_PULL, "/root/no-such-file"));
-        check("and its yes carries no mode: there is none",
-              wls_answer(s, got) == 1 && got[0] == 'O');
+        //      Opened before it is answered since 30a4c7eae (the pull's TOCTOU): a file that is not there is refused at once, with
+        //      why, where a command once started and said so on its error stream.
+        check("a pull of a file that is not there is refused",
+              !wls_file_asked(s, LINK_ASK_PULL, "/root/no-such-file"));
+        check("and its no says why",
+              wls_answer(s, got) > 1 && got[0] == 'N');
         link_session_close(s);
 
         //      The client's side of the yes.
@@ -7895,6 +7896,10 @@ static fn responder(bipolar listener, p16 port)
         link_self.me = wls_server;
         wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
         memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        //      The replay stamps too: an earlier row's handshake of the same client keeps a newer stamp than these rows' (they
+        //      begin at 999 s), and every initiation below was refused as a replay of it.
+        memory_zero(link_self.stamp, sizeof link_self.stamp);
+        link_self.stamps = 0;
         wls_drain(listener);
 
         {
@@ -9161,8 +9166,9 @@ static fn idle_grant_refresh(void)
                         wls_peers_with(s->peer, WATERLINK_MAY_RUN);
                         wls_open_calls = 0;
                         link_sessions_granted(now + 2);
+                        //      Two files: the peers and the machine's own switch of each grant (the policy), each once a look.
                         check("first active session refreshes grants without an idle delay",
-                              wls_open_calls == 1 && !s->finished &&
+                              wls_open_calls == 2 && !s->finished &&
                                   link_self.granted == now + 2);
                         wls_peers_with(s->peer, 0);
                         wls_open_calls = 0;
@@ -9171,7 +9177,7 @@ static fn idle_grant_refresh(void)
                               !wls_open_calls && !s->finished);
                         link_sessions_granted(now + 1000002);
                         check("revoked active grants still end their session on time",
-                              wls_open_calls == 1 && s->finished);
+                              wls_open_calls == 2 && s->finished);
                         link_session_close(s);
                 }
                 wls_open_capture = false;
@@ -9324,6 +9330,15 @@ static fn quiet_streams(void)
 */
 static struct waterlink_group_keys wls_office;
 
+/*      The nearby state as a listener starts it: nothing but the discovery switches, which are on
+        unless the person turned them off (6c0c54035 gated the LAN socket, the answers and the
+        greetings on them; a state zeroed whole had them off, and every row of the LAN failed). */
+static fn wls_nearby_fresh(void)
+{
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        link_nearby.lan.ask = DISCOVERY_ASK_ANNOUNCE | DISCOVERY_ASK_LISTEN;
+}
+
 static fn wls_group(void)
 {
         p8 derived[32];
@@ -9331,7 +9346,7 @@ static fn wls_group(void)
         waterlink_group_derive("office", (p8 address_to) "sesame", 6, 1000,
                                derived);
         waterlink_group_keys_from(address_of wls_office, derived, "office");
-        memory_zero(address_of link_nearby, sizeof link_nearby);
+        wls_nearby_fresh();
         link_nearby.lan.socket = -1;
         link_nearby.groups.count = 1;
         string_copy(link_nearby.groups.record[0].namespace, "office");
@@ -10268,7 +10283,7 @@ static fn renamed_sessions(void)
         string_copy((string_address)s->name, "intel2");
 
         //      Said: this machine's name, once for each time it changed.
-        memory_zero(address_of link_nearby, sizeof link_nearby);
+        wls_nearby_fresh();
         string_copy((string_address)link_nearby.name, "wls-a");
         link_nearby.name_gen = 3;
         link_name_post(s);
@@ -10391,7 +10406,7 @@ static fn renamed_looks(void)
 
         if (system_call_2(syscall(sethostname), (positive) "wls-one", 7) < 0)
                 return;
-        memory_zero(address_of link_nearby, sizeof link_nearby);
+        wls_nearby_fresh();
         link_name_look(1000000);
         check("the first look learns the name, and has said nothing under "
               "another",
@@ -10867,7 +10882,7 @@ static fn nearby_reload(void)
         record.may = WATERLINK_MAY_RUN;
         waterlink_group_keys_from(address_of keys, record.key, "office");
 
-        memory_zero(address_of link_nearby, sizeof link_nearby);
+        wls_nearby_fresh();
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
         link_nearby.lan.socket = wls_quiet_socket();
         link_nearby_reload(10000000);
@@ -11053,7 +11068,7 @@ static fn nearby_tick(void)
         string_copy(record.namespace, "office");
         memory_fill(record.key, 0x5a, sizeof record.key);
 
-        memory_zero(address_of link_nearby, sizeof link_nearby);
+        wls_nearby_fresh();
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
         link_nearby.lan.socket = wls_quiet_socket();
         wake = link_nearby_tick(20000000);
@@ -11462,7 +11477,7 @@ static fn nearby_reload_failures(void)
         memory_fill(record.key, 0x5a, sizeof record.key);
         record.may = WATERLINK_MAY_RUN;
 
-        memory_zero(address_of link_nearby, sizeof link_nearby);
+        wls_nearby_fresh();
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
         (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
         link_nearby.lan.socket = wls_quiet_socket();
@@ -14059,7 +14074,10 @@ static fn group_carried(void)
                 (void)link_group_store("lab", key, LINK_GROUP_MAY, address_of word[0]);
                 link_group_carry("lab", key, LINK_GROUP_MAY);
         }
-        words[0] = "not-a-key";
+        //      A word of the line, as argv is: writable, since a key text taken from the line is wiped where it was given.
+        memory_zero(typed, sizeof typed);
+        string_copy((string_address)typed, "not-a-key");
+        words[0] = (string_address)typed;
         check("sec: a word that is no key text is refused and joins nothing",
               link_group_add(words, 1) != 0 && wls_group_record("lab", address_of again) &&
                   !memory_compare(again.key, record.key, 32));
@@ -15318,10 +15336,21 @@ static fn tcp_connections(void)
         {
                 p8 frame[20] = {0, 18};
 
+                //      Since 30a4c7eae a frame counts when the link takes it as a peer's datagram, and a connection nobody here
+                //      dialled whose first frame is not one is ended at once (a stranger's stream holds nothing).
                 c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, false, now);
                 (void)system_write_all((positive)ends[1], frame, sizeof frame);
                 wls_tcp_service(now + 1000);
-                check("tcp: a frame read is a frame carried", c->frames == 1 && !c->held);
+                check("tcp: sec: a first frame that is no peer's datagram, on a connection nobody here dialled, ends it",
+                      c->frames == 0 && c->state == LINK_TCP_FREE);
+                socket_close((b32)ends[1]);
+        }
+        if (wls_pair(ends))
+        {
+                //      One that carried a peer's datagram, as link_tcp_heard counts it.
+                c = link_tcp_adopt(ends[0], wls_tcp_place_a, 1, false, now);
+                c->frames = 1, c->heard = now + 1000;
+                wls_tcp_service(now + 1000);
                 wls_tcp_service(now + 1000 + LINK_TCP_IDLE);
                 check("tcp: a connection that carried one stays to LINK_TCP_IDLE of silence",
                       c->state == LINK_TCP_OPEN);
@@ -15382,8 +15411,10 @@ static fn tcp_connections(void)
                 (void)system_write_all((positive)ends[1], after, sizeof after);
                 wls_tcp_service(now + 10);
                 got = socket_receive((b32)ends[1], heard, sizeof heard, MSG_DONTWAIT, null, null);
+                //      The frame read after the 200 is handed to the link (which takes no datagram of nobody's: it is not counted),
+                //      and a connection this side dialled is not ended for it.
                 check("tcp: after the 200 the stream is the link's, both ways",
-                      c->state == LINK_TCP_OPEN && c->frames == 1 && got == 20);
+                      c->state == LINK_TCP_OPEN && !c->broken && got == 20);
                 link_tcp_close(c);
                 socket_close((b32)ends[1]);
         }

@@ -417,7 +417,7 @@ static p8 link_key_parse(string_address text, p8 address_to key)
 static const string_address link_words[] = {
     "on",   "off",   "key",   "serve", "port", "pair", "add",  "remove",
     "purge", "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
-    "run",  "help",  "transport", "modem", "cancel", "doctor", "paths",
+    "run",  "help",  "transport", "modem", "cancel", "doctor", "paths", "pad", "allow-all", "deny-all",
     //  The network's, which were the link's once: `link discovery` is
     //  `network discovery` now, and neither word is a machine's to take.
     "discovery", "network",
@@ -5447,6 +5447,7 @@ static fn link_sessions_granted(p64 now)
 {
         link_peers peers;
         positive first = 0;
+        p32 policy;
 
         if (link_age(now, link_self.granted) < 1000000)
                 return;
@@ -5460,6 +5461,7 @@ static fn link_sessions_granted(p64 now)
                 return;
         link_self.granted = now;
         link_peers_load(address_of peers);
+        policy = link_policy_load(); // once a look, as the peers file is: it was read again for every session
         for (positive at = first; at < LINK_SESSIONS; at++)
         {
                 struct link_session address_to s = link_self.session + at;
@@ -5471,7 +5473,7 @@ static fn link_sessions_granted(p64 now)
 
                 if (!peer || (peer->flags & WATERLINK_PEER_SHUT) ||
                     (need < array_count(link_grants) &&
-                     !((peer->may & link_policy_load()) & link_grants[need].bit)))
+                     !((peer->may & policy) & link_grants[need].bit)))
                         link_session_end(s, true);
         }
 }
