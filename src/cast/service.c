@@ -245,9 +245,15 @@ static int castbus_pick(void *context, const struct dbus_cast_ask *ask)
         (void)context;
         if (!table)
                 return -1;
+        // Taken by a compare-and-swap from FREE (window.c): the Waterlink listener takes rows of the table too.
         for (unsigned int k = 0; k < WINDOWS_CASTS && !s; k++)
-                if (!castbus.share[k].ticket && !table->casts[k].state)
+        {
+                unsigned int free = WINDOWS_CAST_FREE;
+
+                if (!castbus.share[k].ticket &&
+                    __atomic_compare_exchange_n(&table->casts[k].state, &free, WINDOWS_CAST_STOPPED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
                         s = &castbus.share[k], s->row = (int)k;
+        }
         if (!s)
                 return -1;
         {
@@ -258,7 +264,7 @@ static int castbus_pick(void *context, const struct dbus_cast_ask *ask)
                 s->row = row_at, s->ring = -1, s->ticket = ask->ticket;
                 for (int k = 0; k < CASTBUS_PER; k++)
                         s->link[k].pw = -1, s->link[k].fd = -1;
-                memory_zero(row, sizeof(*row));
+                memory_zero((char *)row + sizeof(row->state), sizeof(*row) - sizeof(row->state)); // its state is the claim, kept
                 // the uid as the sound server knows it (a bowl's program, uid 0 here, by its user namespace): what a share's sound is for
                 row->ticket = (unsigned int)ask->ticket, row->pid = (unsigned int)ask->pid;
                 row->uid = windows_peer_uid((unsigned int)ask->pid, (unsigned int)ask->uid);

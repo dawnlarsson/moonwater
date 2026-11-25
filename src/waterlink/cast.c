@@ -114,6 +114,8 @@ typedef struct
         p32 base;
         p8 based;
         p64 frames, late, jumps, sent, skipped;
+        // A give: its row of the table's casts (window.c), place + 1 (0: none), and the row's ticket.
+        p32 share, share_ticket;
 } link_cast_stream;
 
 struct link_cast
@@ -129,6 +131,7 @@ struct link_cast
         p64 offset_rtt, offset_at;
         link_cast_stream ask[LINK_CAST_KINDS];   // streams this side asked of the far one
         link_cast_stream give[LINK_CAST_KINDS];  // streams the far side asked of this one
+        p8 stopped; // kinds the person stopped (the share app's Stop): the far side's asks of them refused while this session lasts
 };
 
 #if !defined(MACOS)
@@ -245,8 +248,11 @@ static fn link_cast_unmap(const address_any ring)
                 (void)system_call_2(syscall(munmap), (positive)ring, CAST_SOUND_RING_BYTES);
 }
 
+static fn link_cast_share_close(link_cast_stream address_to st);
+
 static fn link_cast_stream_stop(link_cast_stream address_to st)
 {
+        link_cast_share_close(st);
         link_cast_unmap(st->out);
         link_cast_unmap(st->in);
         if (st->wake >= 0)
@@ -279,6 +285,96 @@ static p8 link_cast_take_out(link_cast_stream address_to st, bipolar ring_fd, bi
         st->out = (const struct cast_sound_ring address_to)mapped;
         st->wake = wake_fd, st->wake_quiet = false, st->primed = false, st->previous_held = false;
         return true;
+}
+
+/* ---- the share rows ---- */
+
+/*
+        What the person is shown: a row of the table's casts (window.c) for each stream a machine takes of this one or plays into
+        it, kind WINDOWS_CAST_LINK, LIVE while it runs, so the tray's share cell is there and the share app lists it with its Stop.
+        A row is taken from FREE by a compare-and-swap (the session bus takes rows too), filled, and made LIVE; it is made FREE
+        when the stream ends. A row the share app made STOPPED is the person's Stop: the stream ends, and the far machine's asks
+        of that kind are refused while the session lasts. With no desktop (no table) there is no row, and nothing is refused for it.
+*/
+static p32 link_cast_tickets;
+
+static fn link_cast_board_ring(struct windows address_to table)
+{
+        bipolar door;
+
+        __atomic_add_fetch(&table->cast_serial, 1u, __ATOMIC_ACQ_REL);
+        door = system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        if (door >= 0)
+                system_write_once((positive)door, "s", 1), system_close((positive)door);
+}
+
+static fn link_cast_share_open(link_cast_stream address_to st, p8 kind, string_address machine)
+{
+        struct windows address_to table = windows_board_trusted();
+
+        if (!table || st->share)
+                return;
+        for (p32 at = 0; at < WINDOWS_CASTS; at++)
+        {
+                struct windows_cast address_to row = table->casts + at;
+                p32 free = WINDOWS_CAST_FREE;
+
+                if (!__atomic_compare_exchange_n(&row->state, &free, WINDOWS_CAST_STOPPED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                        continue;
+                memory_zero((p8 address_to)row + sizeof row->state, sizeof(address_to row) - sizeof row->state);
+                row->ticket = 0x80000000u | ++link_cast_tickets; // the bus's tickets are its asks' own, from 1: never this high
+                row->pid = (p32)system_call_1(syscall(getpid), 0);
+                row->uid = ~0u; // no program here: what a share's sound lets a program record (the sound server's) is nobody's
+                row->kind = WINDOWS_CAST_LINK, row->target = kind, row->ring_fd = -1, row->latest = ~0u;
+                string_copy_bounded((string_address)row->app, machine, sizeof row->app);
+                __atomic_store_n(&row->state, WINDOWS_CAST_LIVE, __ATOMIC_RELEASE);
+                st->share = at + 1, st->share_ticket = row->ticket;
+                link_cast_board_ring(table);
+                return;
+        }
+}
+
+static fn link_cast_share_close(link_cast_stream address_to st)
+{
+        struct windows address_to table = st->share ? windows_board_trusted() : null;
+
+        if (table && st->share <= WINDOWS_CASTS)
+        {
+                struct windows_cast address_to row = table->casts + (st->share - 1);
+
+                if (row->ticket == st->share_ticket && row->kind == WINDOWS_CAST_LINK)
+                {
+                        __atomic_store_n(&row->state, WINDOWS_CAST_FREE, __ATOMIC_RELEASE);
+                        link_cast_board_ring(table);
+                }
+        }
+        st->share = 0;
+}
+
+// Whether the person stopped the stream's row (it is no longer LIVE under its ticket).
+static p8 link_cast_share_stopped(link_cast_stream address_to st)
+{
+        struct windows address_to table = st->share ? windows_board_trusted() : null;
+        struct windows_cast address_to row;
+
+        if (!table || st->share > WINDOWS_CASTS)
+                return false;
+        row = table->casts + (st->share - 1);
+        return row->ticket != st->share_ticket || __atomic_load_n(&row->state, __ATOMIC_ACQUIRE) != WINDOWS_CAST_LIVE;
+}
+
+// A listener's first look: the rows a listener before it left (it died with its streams) are let go.
+static fn link_cast_shares_clean(void)
+{
+        struct windows address_to table = windows_board_trusted();
+        p8 rang = false;
+
+        for (p32 at = 0; table && at < WINDOWS_CASTS; at++)
+                if (table->casts[at].kind == WINDOWS_CAST_LINK && __atomic_load_n(&table->casts[at].state, __ATOMIC_ACQUIRE) != WINDOWS_CAST_FREE &&
+                    (table->casts[at].ticket & 0x80000000u))
+                        __atomic_store_n(&table->casts[at].state, WINDOWS_CAST_FREE, __ATOMIC_RELEASE), rang = true;
+        if (rang)
+                link_cast_board_ring(table);
 }
 
 /* ---- the sessions ---- */
@@ -414,6 +510,14 @@ static fn link_cast_opened(struct link_session address_to s, p8 kind, string_add
         link_cast_stream address_to st = s->cast->give + kind;
         p8 line[96];
 
+        if (s->cast->stopped & (1u << kind))
+        {
+                // The person's Stop holds for this session: the line says so, and no grant changes for it.
+                string_copy_bounded((string_address)line + 1, "stopped there by its person, until the link comes up again", sizeof line - 1);
+                line[0] = kind;
+                link_cast_post(s, 'N', line, 1 + string_length((string_address)line + 1));
+                return;
+        }
         if (!(link_cast_grants_now(peer) & link_cast_bits[kind]))
         {
                 // The line the asker shows: run here, with the name this machine has the asker under.
@@ -447,6 +551,7 @@ static fn link_cast_opened(struct link_session address_to s, p8 kind, string_add
         else
                 link_cast_say('H', kind, 1, machine, 0, null, -1);
         st->state = LINK_CAST_LIVE;
+        link_cast_share_open(st, kind, machine);
         link_cast_post_kind(s, 'A', kind);
         link_cast_priority();
         string_format(log, host_label "%s %s this machine's %s\n", machine,
@@ -836,6 +941,10 @@ static fn link_cast_rows(void)
 // The listener's turn: the server's socket connected (or tried again), what it said read, and the rows looked at.
 static fn link_cast_turn(p64 now)
 {
+        static p8 cleaned;
+
+        if (!cleaned)
+                link_cast_shares_clean(), cleaned = true;
         if (link_cast_server.fd < 0 && link_age(now, link_cast_server.tried) >= LINK_CAST_RETRY)
         {
                 struct { p16 family; p8 path[108]; } where;
@@ -902,6 +1011,15 @@ static fn link_cast_session_turn(struct link_session address_to s, p64 now)
                                 link_cast_end(s, true, kind, peer ? (string_address)peer->name : (string_address)s->name);
                         }
         }
+        for (p8 kind = LINK_CAST_SPEAKERS; kind <= LINK_CAST_SOUND; kind++)
+                if (c->give[kind].state == LINK_CAST_LIVE && link_cast_share_stopped(c->give + kind))
+                {
+                        //      The share app's Stop: the far side is told, and asks of it are refused while this session lasts.
+                        peer = link_cast_peer(address_of peers, s->peer);
+                        c->stopped |= (p8)(1u << kind);
+                        link_cast_post_kind(s, 'E', kind);
+                        link_cast_end(s, true, kind, peer ? (string_address)peer->name : (string_address)s->name);
+                }
         for (p8 kind = LINK_CAST_SPEAKERS; kind <= LINK_CAST_SOUND; kind++)
         {
                 link_cast_stream address_to ask = c->ask + kind, address_to give = c->give + kind;

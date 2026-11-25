@@ -335,7 +335,10 @@ enum
         with the program that asks and what it may be shown), answered by the person in the share app (PICKED with what to share,
         or REFUSED), made by the compositor (LIVE: a ring of `slots` frames in a sealed memfd of its own, ring_fd in ring_pid,
         each slot_bytes, the frames composed at its presents), and ended by any of them (STOPPED: the person pressed Stop, the
-        window went; FREE: the sink let it go). The slots are written by the compositor alone and read by the sinks: a slot
+        window went; FREE: the sink let it go). A row is taken from FREE by a compare-and-swap to STOPPED, filled, then made
+        ASKED (or LIVE), so two writers never take one row. A machine over Waterlink that hears this one or plays into it is a row
+        too (WINDOWS_CAST_LINK, the listener's, src/waterlink/cast.c): LIVE while the stream runs, `target` what it takes (1 the
+        speakers, 2 the microphone, 3 what plays), `app` the machine's name, no ring; Stop ends it. The slots are written by the compositor alone and read by the sinks: a slot
         written is seq odd, then even and the newest (latest); a sink holds a slot (held) while its consumer may read it, and the
         compositor never writes a held one or the newest. Root's, as the table is: a bowl's program reaches it through a sink.
 */
@@ -346,7 +349,8 @@ enum
 enum
 {
         WINDOWS_CAST_FREE = 0u, WINDOWS_CAST_ASKED, WINDOWS_CAST_PICKED, WINDOWS_CAST_LIVE, WINDOWS_CAST_REFUSED, WINDOWS_CAST_STOPPED,
-        WINDOWS_CAST_SCREEN = 1u, WINDOWS_CAST_WINDOW = 2u, WINDOWS_CAST_SCENE = 3u,
+        WINDOWS_CAST_SCREEN = 1u, WINDOWS_CAST_WINDOW = 2u, WINDOWS_CAST_SCENE = 3u, WINDOWS_CAST_LINK = 4u,
+        WINDOWS_CAST_LINK_SPEAKERS = 1u, WINDOWS_CAST_LINK_MIC = 2u, WINDOWS_CAST_LINK_SOUND = 3u, // a LINK row's target
         WINDOWS_CAST_MONITOR = 1u, WINDOWS_CAST_TOPLEVEL = 2u, WINDOWS_CAST_VIRTUAL = 4u, // the portal's source types, asked
         WINDOWS_CAST_CURSOR_HIDDEN = 1u, WINDOWS_CAST_CURSOR_EMBEDDED = 2u
 };

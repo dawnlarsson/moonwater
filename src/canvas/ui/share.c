@@ -175,6 +175,10 @@ static void share_build(void)
                         continue;
                 if (row->kind == WINDOWS_CAST_WINDOW && row->target < windows_rows(table))
                         string_copy_bounded((p8 *)what, (string_address)table->title[row->target], sizeof what);
+                else if (row->kind == WINDOWS_CAST_LINK) // a machine over Waterlink: what it hears of this one, or its sound played here
+                        language_format(what, sizeof what, language_text(row->target == WINDOWS_CAST_LINK_MIC        ? LANGUAGE_share_your_microphone
+                                                                         : row->target == WINDOWS_CAST_LINK_SPEAKERS ? LANGUAGE_share_your_speakers
+                                                                                                                     : LANGUAGE_share_what_plays));
                 else if (row->kind == WINDOWS_CAST_SCENE)
                 {
                         unsigned int place = 0;
