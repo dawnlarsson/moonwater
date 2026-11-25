@@ -667,7 +667,8 @@ static void audio_remote_pass(unsigned long long now)
                 struct audio_remote_row *row = audio_remote.rows + i;
                 unsigned long long last = st->pulled_at > st->pushed_at ? st->pulled_at : st->pushed_at;
                 // AWAY is wanted all the same: the link dials the machine for it. DENIED is not: only that machine can change it.
-                int wanted = last && now - last < AUDIO_REMOTE_IDLE_NS && !(row->flags & AUDIO_NODE_DENIED);
+                // (A pull or push of this pass came after the loop read its clock: that is now, not 2^64 ns ago.)
+                int wanted = last && (last >= now || now - last < AUDIO_REMOTE_IDLE_NS) && !(row->flags & AUDIO_NODE_DENIED);
                 unsigned long long written = st->in ? __atomic_load_n(&st->in->written, __ATOMIC_ACQUIRE) : 0;
 
                 if (st->dead)
@@ -957,8 +958,9 @@ static long remote_pull(long dev, float *left, float *right, long frames, long r
         st->rs.have += need;
         made = audio_rs_run(&st->rs, left, right, frames);
         (void)made; // need was what frames outputs take: made is frames
-        // How old what is mixed now is: from its stamp (the far machine's mix, on this clock) to this pull.
-        if (st->cur.stamp && now > st->cur.stamp)
+        // How old what is mixed now is: from its stamp (the far machine's mix, on this clock) to this pull; a block made up, or
+        // one kept from before a pause, says nothing of it.
+        if (!st->fades && st->cur.stamp && now > st->cur.stamp && now - st->cur.stamp < 1000000000ull)
                 audio_remote.rows[dev - 1].latency_us = (unsigned int)((now - st->cur.stamp) / 1000);
         return frames;
 }

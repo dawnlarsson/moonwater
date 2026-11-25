@@ -309,13 +309,29 @@ static p8 link_cast_session_ok(struct link_session address_to s)
         return link_self.server && s->used && s->now.live && s->kind == LINK_KIND_NONE && !s->exit_sent;
 }
 
+/*      The session the channels with a peer ride: for a stream the far side asked of this one, the session it asked on (two
+        listeners that dialled each other at once keep two sessions, and each side may have asked on either); else the first. */
+static struct link_session address_to link_cast_session_for(p8 address_to key, p8 give, p8 kind)
+{
+        struct link_session address_to first = null;
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session address_to s = link_self.session + at;
+
+                if (!link_cast_session_ok(s) || !s->cast || !crypto_same(s->peer, key, 32))
+                        continue;
+                if (give && kind && s->cast->give[kind].state != LINK_CAST_IDLE)
+                        return s;
+                if (!first)
+                        first = s;
+        }
+        return first;
+}
+
 static struct link_session address_to link_cast_session_of(p8 address_to key)
 {
-        for (positive at = 0; at < LINK_SESSIONS; at++)
-                if (link_cast_session_ok(link_self.session + at) && link_self.session[at].cast &&
-                    crypto_same(link_self.session[at].peer, key, 32))
-                        return link_self.session + at;
-        return null;
+        return link_cast_session_for(key, false, 0);
 }
 
 // The peer's record now, and its name: null when it is gone or switched off.
@@ -662,7 +678,7 @@ static fn link_cast_wanted(link_cast_message address_to m, bipolar ring_fd, bipo
 
         link_peers_load(address_of peers);
         peer = link_peer_named(address_of peers, (string_address)m->machine);
-        s = peer && !(peer->flags & WATERLINK_PEER_SHUT) ? link_cast_session_of(peer->key) : null;
+        s = peer && !(peer->flags & WATERLINK_PEER_SHUT) ? link_cast_session_for(peer->key, m->heard, m->kind) : null;
         if (!s)
         {
                 if (ring_fd >= 0)
