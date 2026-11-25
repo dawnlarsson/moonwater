@@ -24658,4 +24658,523 @@ int main(void)
 }
 #endif /* CHECK_feed */
 
+#ifdef CHECK_ipp
+#include "../../src/lib.util.c"
+#include "../../src/net/net.c"
+#include "../../src/net/ipp.c"
+
+#define SHARED_counted
+#include "../checks.c"
+#undef SHARED_counted
+
+static positive check_ipp_build_mdns_response(p8 address_to pkt, bool tls)
+{
+        // Build a valid mDNS response with PTR, SRV, TXT, and A records.
+        p8 address_to p = pkt;
+        const p8 address_to svc = tls ? ipp_mdns_type_ipps : ipp_mdns_type_ipp;
+        positive svc_len = tls ? sizeof(ipp_mdns_type_ipps)
+                               : sizeof(ipp_mdns_type_ipp);
+        static const p8 inst[] = "\x0c" "DeskJet 3700";
+        static const p8 host[] = "\x07printer\x05local";
+        static const p8 txt[] =
+            "\x0c" "rp=ipp/print"
+            "\x12" "ty=HP DeskJet 3700"
+            "\x2f" "pdl=application/pdf,image/pwg-raster,image/jpeg"
+            "\x07" "Color=T"
+            "\x08" "Duplex=T"
+            "\x0a" "note=Study"
+            "\x0e" "UUID=1234-abcd";
+
+        memory_zero(p, 12);
+        network_store_16(p + 2, 0x8400); // response, authoritative
+        network_store_16(p + 6, 4);      // 4 answer records
+        p += 12;
+
+        // 1. PTR: _ipp(s)._tcp.local -> "DeskJet 3700"._ipp(s)._tcp.local
+        p8 address_to svc_off = p;
+        memory_copy(p, svc, svc_len);
+        p += svc_len;
+        network_store_16(p, 12); // PTR
+        network_store_16(p + 2, 1);
+        network_store_32(p + 4, 120);
+        network_store_16(p + 8, (p16)(sizeof(inst) - 1 + 2));
+        p += 10;
+        p8 address_to inst_off = p;
+        memory_copy(p, inst, sizeof(inst) - 1);
+        p += sizeof(inst) - 1;
+        network_store_16(p, (p16)(0xc000 | (positive)(svc_off - pkt)));
+        p += 2;
+
+        // 2. SRV: instance -> printer.local:631
+        network_store_16(p, (p16)(0xc000 | (positive)(inst_off - pkt)));
+        p += 2;
+        network_store_16(p, 33); // SRV
+        network_store_16(p + 2, 0x8001);
+        network_store_32(p + 4, 120);
+        network_store_16(p + 8, (p16)(6 + sizeof(host)));
+        p += 10;
+        network_store_32(p, 0); // priority + weight
+        network_store_16(p + 4, tls ? 443 : 631);
+        p += 6;
+        p8 address_to host_off = p;
+        memory_copy(p, host, sizeof(host));
+        p += sizeof(host);
+
+        // 3. TXT: instance -> key=val strings
+        network_store_16(p, (p16)(0xc000 | (positive)(inst_off - pkt)));
+        p += 2;
+        network_store_16(p, 16); // TXT
+        network_store_16(p + 2, 0x8001);
+        network_store_32(p + 4, 120);
+        network_store_16(p + 8, (p16)(sizeof(txt) - 1));
+        p += 10;
+        memory_copy(p, txt, sizeof(txt) - 1);
+        p += sizeof(txt) - 1;
+
+        // 4. A: printer.local -> 192.168.1.50
+        network_store_16(p, (p16)(0xc000 | (positive)(host_off - pkt)));
+        p += 2;
+        network_store_16(p, 1); // A
+        network_store_16(p + 2, 0x8001);
+        network_store_32(p + 4, 120);
+        network_store_16(p + 8, 4);
+        p += 10;
+        network_store_32(p, 0xc0a80132u);
+        p += 4;
+
+        return (positive)(p - pkt);
+}
+
+b32 main(void)
+{
+        // 1. IPP encoder + decoder round-trip with 1setOf and payload
+        {
+                p8 buf[512];
+                ipp_writer w;
+                ipp_reader r;
+                ipp_attr a;
+                positive n;
+                positive fmt_count = 0;
+                b32 state = 0;
+                bool color = false;
+
+                ipp_write_begin(address_of w, buf, sizeof(buf),
+                                IPP_VERSION_2_0_MAJOR, IPP_VERSION_2_0_MINOR,
+                                IPP_STATUS_OK, 77);
+                ipp_write_group(address_of w, IPP_TAG_OPERATION);
+                ipp_write_cstr(address_of w, IPP_TAG_CHARSET,
+                               (string_address)"attributes-charset",
+                               (string_address)"utf-8");
+                ipp_write_group(address_of w, IPP_TAG_PRINTER);
+                ipp_write_cstr(address_of w, IPP_TAG_NAME,
+                               (string_address)"printer-name",
+                               (string_address)"Studio");
+                ipp_write_int(address_of w, IPP_TAG_ENUM,
+                              (string_address)"printer-state",
+                              IPP_PRINTER_IDLE);
+                ipp_write_bool(address_of w, (string_address)"color-supported",
+                               true);
+                ipp_write_cstr(address_of w, IPP_TAG_MIMETYPE,
+                               (string_address)"document-format-supported",
+                               (string_address)"application/pdf");
+                ipp_write_cstr(address_of w, IPP_TAG_MIMETYPE, null,
+                               (string_address)"image/png");
+                ipp_write_range(address_of w, (string_address)"copies-supported",
+                                1, 99);
+                ipp_write_resolution(address_of w,
+                                     (string_address)"printer-resolution-default",
+                                     600, 600, IPP_RES_DPI);
+                n = ipp_write_end(address_of w);
+                check("ipp encode succeeded", n > 0 && !w.failed);
+
+                // Append a simulated document payload right after IPP_TAG_END
+                memory_copy(buf + n, "%PDF-1.7", 8);
+
+                check("ipp decode opens header",
+                      ipp_read_open(address_of r, buf, n + 8) &&
+                          r.ver_major == 2 && r.ver_minor == 0 &&
+                          r.op_or_status == IPP_STATUS_OK &&
+                          r.request_id == 77);
+                while (ipp_read_next(address_of r, address_of a))
+                {
+                        if (ipp_attr_is(address_of a, (string_address)"printer-state"))
+                                (void)ipp_attr_i32(address_of a, address_of state);
+                        else if (ipp_attr_is(address_of a, (string_address)"color-supported"))
+                                (void)ipp_attr_bool(address_of a, address_of color);
+                        else if (ipp_attr_is(address_of a, (string_address)"document-format-supported"))
+                                fmt_count++;
+                }
+                check("ipp decode clean end and payload offset",
+                      !r.failed && r.ended && r.payload_offset == n &&
+                          !memory_compare(buf + r.payload_offset, "%PDF-1.7", 8));
+                check("ipp decode extracted enum, bool, and 1setOf",
+                      state == IPP_PRINTER_IDLE && color && fmt_count == 2);
+        }
+
+        // 2. Hardened IPP decoder rejects malformed inputs
+        {
+                ipp_reader r;
+                ipp_attr a;
+
+                // Truncated header
+                p8 short_msg[8] = {2, 0, 0, 0, 0, 0, 0, 1};
+                check("reject truncated 8-byte message",
+                      !ipp_read_open(address_of r, short_msg, sizeof(short_msg)));
+
+                // Unsupported version 3.0
+                p8 bad_ver[9] = {3, 0, 0, 0, 0, 0, 0, 1, IPP_TAG_END};
+                check("reject unsupported IPP version 3.0",
+                      !ipp_read_open(address_of r, bad_ver, sizeof(bad_ver)));
+
+                // Missing IPP_TAG_END
+                p8 no_end[9] = {2, 0, 0, 0, 0, 0, 0, 1, IPP_TAG_OPERATION};
+                check("missing IPP_TAG_END fails",
+                      ipp_read_open(address_of r, no_end, sizeof(no_end)) &&
+                          !ipp_read_next(address_of r, address_of a) &&
+                          r.failed && !r.ended);
+
+                // Attribute before any group delimiter
+                p8 no_group[14] = {2, 0, 0, 0, 0, 0, 0, 1,
+                                   IPP_TAG_INTEGER, 0, 1, 'x', 0, 4};
+                check("attribute before group fails",
+                      ipp_read_open(address_of r, no_group, sizeof(no_group)) &&
+                          !ipp_read_next(address_of r, address_of a) && r.failed);
+
+                // Orphan additional value (name_len == 0 with no prior attr)
+                p8 orphan[15] = {2, 0, 0, 0, 0, 0, 0, 1, IPP_TAG_OPERATION,
+                                 IPP_TAG_KEYWORD, 0, 0, 0, 1, 'a'};
+                check("orphan name_len==0 fails",
+                      ipp_read_open(address_of r, orphan, sizeof(orphan)) &&
+                          !ipp_read_next(address_of r, address_of a) && r.failed);
+
+                // Bad BOOLEAN value (2)
+                p8 bad_bool[16] = {2, 0, 0, 0, 0, 0, 0, 1, IPP_TAG_PRINTER,
+                                   IPP_TAG_BOOLEAN, 0, 1, 'b', 0, 1, 2};
+                check("invalid boolean value 2 fails",
+                      ipp_read_open(address_of r, bad_bool, sizeof(bad_bool)) &&
+                          !ipp_read_next(address_of r, address_of a) && r.failed);
+
+                // Bad INTEGER length (2 instead of 4)
+                p8 bad_int[17] = {2, 0, 0, 0, 0, 0, 0, 1, IPP_TAG_PRINTER,
+                                  IPP_TAG_INTEGER, 0, 1, 'i', 0, 2, 0, 1};
+                check("invalid integer length fails",
+                      ipp_read_open(address_of r, bad_int, sizeof(bad_int)) &&
+                          !ipp_read_next(address_of r, address_of a) && r.failed);
+        }
+
+        // 3. IPP URI parser & formatter
+        {
+                ipp_uri u;
+                p8 formatted[256];
+
+                check("parse ipp:// default port and path",
+                      ipp_parse_uri((string_address)"ipp://192.168.1.50",
+                                    address_of u) &&
+                          !u.tls && u.port == 631 &&
+                          string_equals(u.host, (string_address)"192.168.1.50") &&
+                          string_equals(u.path, (string_address)"/ipp/print"));
+                check("parse ipps:// custom port and path",
+                      ipp_parse_uri((string_address)"ipps://printer.local:8631/printers/hp",
+                                    address_of u) &&
+                          u.tls && u.port == 8631 &&
+                          string_equals(u.host, (string_address)"printer.local") &&
+                          string_equals(u.path, (string_address)"/printers/hp"));
+                check("format uri round-trips",
+                      ipp_format_uri(address_of u, formatted, sizeof(formatted)) > 0 &&
+                          string_equals(formatted,
+                                        (string_address)"ipps://printer.local:8631/printers/hp"));
+                check("parse bare IP defaults to ipp:631/ipp/print",
+                      ipp_parse_uri((string_address)"10.0.0.5", address_of u) &&
+                          !u.tls && u.port == 631 &&
+                          string_equals(u.path, (string_address)"/ipp/print"));
+                check("reject CRLF injection in path",
+                      !ipp_parse_uri((string_address)"ipp://10.0.0.5/ipp\r\nX-Bad: 1",
+                                     address_of u));
+                check("reject port 0",
+                      !ipp_parse_uri((string_address)"ipp://10.0.0.5:0/ipp",
+                                     address_of u));
+                check("reject unknown scheme",
+                      !ipp_parse_uri((string_address)"ftp://10.0.0.5/ipp",
+                                     address_of u));
+        }
+
+        // 4. MIME detection
+        {
+                static const p8 pdf_hdr[] = "%PDF-1.7\n";
+                static const p8 png_hdr[] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a};
+                static const p8 jpg_hdr[] = {0xff, 0xd8, 0xff, 0xe0};
+
+                check("detect PDF magic",
+                      string_equals(ipp_detect_mime(pdf_hdr, sizeof(pdf_hdr), null),
+                                    (string_address)"application/pdf"));
+                check("detect PNG magic",
+                      string_equals(ipp_detect_mime(png_hdr, sizeof(png_hdr), null),
+                                    (string_address)"image/png"));
+                check("detect JPEG magic",
+                      string_equals(ipp_detect_mime(jpg_hdr, sizeof(jpg_hdr), null),
+                                    (string_address)"image/jpeg"));
+                check("detect .txt by filename",
+                      string_equals(ipp_detect_mime((const p8 address_to)"hello", 5,
+                                                    (string_address)"notes.txt"),
+                                    (string_address)"text/plain"));
+        }
+
+        // 5. mDNS _ipp._tcp and _ipps._tcp discovery
+        {
+                p8 qpkt[64];
+                p8 rpkt[512];
+                ipp_printer found[4];
+                positive rlen, n;
+
+                check("mdns _ipp query builds",
+                      ipp_mdns_query(false, qpkt, sizeof(qpkt)) == 33);
+                check("mdns _ipps query builds",
+                      ipp_mdns_query(true, qpkt, sizeof(qpkt)) == 34);
+
+                rlen = check_ipp_build_mdns_response(rpkt, false);
+                n = ipp_mdns_read(rpkt, rlen, 0xc0a80101u, found, 4);
+                check("mdns _ipp response parsed 1 printer", n == 1);
+                check("mdns printer name, make, location, ip, port, uri",
+                      n == 1 &&
+                          string_equals(found[0].name, (string_address)"DeskJet 3700") &&
+                          string_equals(found[0].make_model, (string_address)"HP DeskJet 3700") &&
+                          string_equals(found[0].location, (string_address)"Study") &&
+                          string_equals(found[0].uuid, (string_address)"1234-abcd") &&
+                          found[0].ip == 0xc0a80132u && found[0].port == 631 &&
+                          !found[0].tls &&
+                          string_equals(found[0].uri,
+                                        (string_address)"ipp://192.168.1.50:631/ipp/print"));
+                check("mdns printer capabilities parsed from TXT",
+                      n == 1 &&
+                          (found[0].caps & IPP_CAP_PDF) &&
+                          (found[0].caps & IPP_CAP_PWG_RASTER) &&
+                          (found[0].caps & IPP_CAP_JPEG) &&
+                          (found[0].caps & IPP_CAP_COLOR) &&
+                          (found[0].caps & IPP_CAP_DUPLEX));
+
+                rlen = check_ipp_build_mdns_response(rpkt, true);
+                n = ipp_mdns_read(rpkt, rlen, 0xc0a80101u, found, 4);
+                check("mdns _ipps response parsed with tls=true and port 443",
+                      n == 1 && found[0].tls && found[0].port == 443 &&
+                          string_equals(found[0].uri,
+                                        (string_address)"ipps://192.168.1.50:443/ipp/print"));
+
+                // Truncated packet refused
+                check("mdns truncated packet refused",
+                      ipp_mdns_read(rpkt, rlen - 5, 0xc0a80101u, found, 4) == 0);
+        }
+
+        // 6. Live IPP-over-HTTP round-trip via socketpair (Get-Printer-Attributes + Print-Job)
+        {
+                b32 sv[2];
+                bipolar sp = system_call_4(syscall(socketpair), AF_UNIX,
+                                           SOCK_STREAM | SOCK_CLOEXEC, 0,
+                                           (positive)sv);
+                check("socketpair created", sp == 0);
+                if (sp == 0)
+                {
+                        bipolar pid = system_call_2(syscall(clone), SIGCHLD, 0);
+                        if (pid == 0)
+                        {
+                                // Mock IPP printer: read HTTP POST, reply with chunked IPP response
+                                p8 req_buf[2048];
+                                positive got = 0;
+                                p8 ipp_resp[512];
+                                ipp_writer w;
+                                positive rlen;
+
+                                socket_close(sv[0]);
+                                while (got < sizeof(req_buf))
+                                {
+                                        bipolar r = system_read_once(sv[1], req_buf + got,
+                                                                     sizeof(req_buf) - got);
+                                        if (r <= 0)
+                                                break;
+                                        got += (positive)r;
+                                        if (got >= 8 && req_buf[got - 1] == IPP_TAG_END)
+                                                break;
+                                }
+
+                                ipp_write_begin(address_of w, ipp_resp, sizeof(ipp_resp),
+                                                IPP_VERSION_2_0_MAJOR, IPP_VERSION_2_0_MINOR,
+                                                IPP_STATUS_OK, 1);
+                                ipp_write_group(address_of w, IPP_TAG_OPERATION);
+                                ipp_write_cstr(address_of w, IPP_TAG_CHARSET,
+                                               (string_address)"attributes-charset",
+                                               (string_address)"utf-8");
+                                ipp_write_group(address_of w, IPP_TAG_PRINTER);
+                                ipp_write_cstr(address_of w, IPP_TAG_NAME,
+                                               (string_address)"printer-name",
+                                               (string_address)"Brother HL");
+                                ipp_write_cstr(address_of w, IPP_TAG_TEXT,
+                                               (string_address)"printer-make-and-model",
+                                               (string_address)"Brother HL-L2350DW");
+                                ipp_write_int(address_of w, IPP_TAG_ENUM,
+                                              (string_address)"printer-state",
+                                              IPP_PRINTER_IDLE);
+                                ipp_write_bool(address_of w,
+                                               (string_address)"printer-is-accepting-jobs",
+                                               true);
+                                ipp_write_cstr(address_of w, IPP_TAG_MIMETYPE,
+                                               (string_address)"document-format-supported",
+                                               (string_address)"application/pdf");
+                                rlen = ipp_write_end(address_of w);
+
+                                // Send HTTP/1.1 chunked response
+                                {
+                                        p8 hdr[256];
+                                        p8 hexlen[16];
+                                        positive hlen = positive_into_base(hexlen, rlen, 16, false);
+                                        static const string_address http_top =
+                                            "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nTransfer-Encoding: chunked\r\n\r\n";
+                                        positive p = 0;
+
+                                        memory_copy(hdr + p, http_top, string_length(http_top));
+                                        p += string_length(http_top);
+                                        memory_copy(hdr + p, hexlen, hlen);
+                                        p += hlen;
+                                        hdr[p++] = '\r';
+                                        hdr[p++] = '\n';
+                                        (void)network_stream_send_all_for(sv[1], hdr, p, 5, 0);
+                                        (void)network_stream_send_all_for(sv[1], ipp_resp, rlen, 5, 0);
+                                        (void)network_stream_send_all_for(sv[1], (p8 address_to)"\r\n0\r\n\r\n", 7, 5, 0);
+                                }
+                                socket_close(sv[1]);
+                                system_call_1(syscall(exit_group), 0);
+                        }
+                        else if (pid > 0)
+                        {
+                                http_link link = {.handle = sv[0], .tls = false};
+                                ipp_uri u;
+                                ipp_printer info;
+                                b32 st = 0;
+
+                                socket_close(sv[1]);
+                                memory_zero(address_of info, sizeof(info));
+                                (void)ipp_parse_uri((string_address)"ipp://127.0.0.1:631/ipp/print",
+                                                    address_of u);
+                                check("live Get-Printer-Attributes over chunked HTTP",
+                                      ipp_get_printer_attributes_link(address_of link,
+                                                                      address_of u,
+                                                                      address_of info) == IPP_OK);
+                                check("live printer attrs decoded",
+                                      string_equals(info.name, (string_address)"Brother HL") &&
+                                          string_equals(info.make_model,
+                                                        (string_address)"Brother HL-L2350DW") &&
+                                          info.state == IPP_PRINTER_IDLE &&
+                                          info.accepting &&
+                                          (info.caps & IPP_CAP_PDF));
+                                http_link_close(address_of link);
+                                (void)system_wait4_retry((b32)pid, address_of st, 0, null);
+                        }
+                }
+        }
+
+        // 7. Live Print-Job round-trip verifying PDF payload delivery
+        {
+                b32 sv[2];
+                bipolar sp = system_call_4(syscall(socketpair), AF_UNIX,
+                                           SOCK_STREAM | SOCK_CLOEXEC, 0,
+                                           (positive)sv);
+                if (sp == 0)
+                {
+                        bipolar pid = system_call_2(syscall(clone), SIGCHLD, 0);
+                        if (pid == 0)
+                        {
+                                p8 req_buf[2048];
+                                positive got = 0;
+                                bool pdf_ok = false;
+
+                                socket_close(sv[0]);
+                                while (got < sizeof(req_buf))
+                                {
+                                        bipolar r = system_read_once(sv[1], req_buf + got,
+                                                                     sizeof(req_buf) - got);
+                                        if (r <= 0)
+                                                break;
+                                        got += (positive)r;
+                                        if (got >= 8 &&
+                                            !memory_compare(req_buf + got - 5, "%%EOF", 5))
+                                                break;
+                                }
+                                // Verify IPP body + "%PDF-1.7\n%%EOF" payload
+                                for (positive i = 0; i + 14 <= got; i++)
+                                        if (!memory_compare(req_buf + i, "%PDF-1.7\n%%EOF", 14))
+                                                pdf_ok = true;
+
+                                {
+                                        p8 ipp_resp[256];
+                                        ipp_writer w;
+                                        positive rlen;
+                                        p8 hdr[160];
+                                        p8 lbuf[16];
+                                        positive llen;
+                                        static const string_address http_top =
+                                            "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: ";
+                                        positive p = 0;
+
+                                        ipp_write_begin(address_of w, ipp_resp, sizeof(ipp_resp),
+                                                        IPP_VERSION_2_0_MAJOR, IPP_VERSION_2_0_MINOR,
+                                                        pdf_ok ? IPP_STATUS_OK : IPP_STATUS_CLIENT_BAD_REQUEST,
+                                                        2);
+                                        ipp_write_group(address_of w, IPP_TAG_OPERATION);
+                                        ipp_write_cstr(address_of w, IPP_TAG_CHARSET,
+                                                       (string_address)"attributes-charset",
+                                                       (string_address)"utf-8");
+                                        ipp_write_group(address_of w, IPP_TAG_JOB);
+                                        ipp_write_int(address_of w, IPP_TAG_INTEGER,
+                                                      (string_address)"job-id", 42);
+                                        ipp_write_int(address_of w, IPP_TAG_ENUM,
+                                                      (string_address)"job-state",
+                                                      IPP_JOB_PROCESSING);
+                                        rlen = ipp_write_end(address_of w);
+
+                                        llen = positive_into(lbuf, rlen);
+                                        memory_copy(hdr + p, http_top, string_length(http_top));
+                                        p += string_length(http_top);
+                                        memory_copy(hdr + p, lbuf, llen);
+                                        p += llen;
+                                        memory_copy(hdr + p, "\r\n\r\n", 4);
+                                        p += 4;
+                                        (void)network_stream_send_all_for(sv[1], hdr, p, 5, 0);
+                                        (void)network_stream_send_all_for(sv[1], ipp_resp, rlen, 5, 0);
+                                }
+                                socket_close(sv[1]);
+                                system_call_1(syscall(exit_group), 0);
+                        }
+                        else if (pid > 0)
+                        {
+                                http_link link = {.handle = sv[0], .tls = false};
+                                ipp_uri u;
+                                ipp_job_request jr = {
+                                    .job_name = (string_address)"report.pdf",
+                                    .user_name = (string_address)"moonwater",
+                                    .mime_type = (string_address)"application/pdf",
+                                    .copies = 2,
+                                    .duplex = true,
+                                    .color = true,
+                                };
+                                ipp_job_result res;
+                                b32 st = 0;
+
+                                socket_close(sv[1]);
+                                (void)ipp_parse_uri((string_address)"ipp://127.0.0.1:631/ipp/print",
+                                                    address_of u);
+                                check("live Print-Job delivered PDF and got job-id=42",
+                                      ipp_print_job_link(address_of link, address_of u,
+                                                         address_of jr,
+                                                         (const p8 address_to)"%PDF-1.7\n%%EOF",
+                                                         14, -1, 0, address_of res) == IPP_OK &&
+                                          res.job_id == 42 &&
+                                          res.job_state == IPP_JOB_PROCESSING);
+                                http_link_close(address_of link);
+                                (void)system_wait4_retry((b32)pid, address_of st, 0, null);
+                        }
+                }
+        }
+
+        return test_report(null);
+}
+#endif /* CHECK_ipp */
+
 
