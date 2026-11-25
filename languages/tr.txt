@@ -39,6 +39,7 @@
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
+# machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
 @language tr
 @name Türkçe
 @translated machine
@@ -651,6 +652,7 @@ ui_colour_hex	1ae3	bir renk altı onaltılık basamaktır, rrggbb
 ui_confirm_again	b3ff	onaylamak için tekrar basın: 
 ui_field_digits	f52b	bir sayı rakamlardan oluşur
 ui_field_full	fe02	daha fazlası sığmaz
+wallpaper_change	ea8f	Duvar kâğıdını değiştir
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Dokunmatik ekranda her parmağın altında bir daire

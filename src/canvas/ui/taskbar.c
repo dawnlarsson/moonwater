@@ -2077,7 +2077,8 @@ static int taskbar_menu_begin(const struct taskbar_view *view, int slot, int row
         return 1;
 }
 
-static int taskbar_menu_build(const struct taskbar_view *view, const int rect[4], const struct ui_menu_spec *specs, int count)
+// The menu's items laid out in the view's face and scale, at most half its height: its width and height; 0 with nothing to show.
+static int taskbar_menu_size(const struct taskbar_view *view, const struct ui_menu_spec *specs, int count)
 {
         struct taskbar_theme_saved theme;
 
@@ -2088,7 +2089,12 @@ static int taskbar_menu_build(const struct taskbar_view *view, const int rect[4]
         ui_popmenu_size(&taskbar_menu.ui, &taskbar_menu.menu, view->height / 2);
         taskbar_theme_give(&theme);
         taskbar_menu.width = taskbar_menu.menu.width, taskbar_menu.height = taskbar_menu.menu.height;
-        if (taskbar_menu.width <= 0 || taskbar_menu.height <= 0)
+        return taskbar_menu.width > 0 && taskbar_menu.height > 0;
+}
+
+static int taskbar_menu_build(const struct taskbar_view *view, const int rect[4], const struct ui_menu_spec *specs, int count)
+{
+        if (!taskbar_menu_size(view, specs, count))
                 return 0;
         int gap = taskbar_scaled(view->scale) * 6 / 100;
         struct ui_anchor anchor = {.anchored = true, .button = {rect[0] - gap, rect[1] - gap, rect[2] + 2 * gap, rect[3] + 2 * gap},
@@ -2114,6 +2120,33 @@ static int taskbar_menu_open(const struct taskbar_view *view)
             {null, null, UI_MENU_SEPARATOR, 0, false},
             {taskbar.clock_12h ? WORDS(tray_clock_24h) : WORDS(tray_clock_12h), null, 0, TASKBAR_MENU_CLOCK, false}};
         return taskbar_menu_build(view, rect, specs, (int)(sizeof(specs) / sizeof(specs[0])));
+}
+
+/*
+        The desktop's menu, at the point x, y of a screen (its rectangle): its top left at the point, or reading from the right its top
+        right, and turned back over the point at an edge it would pass (above it at the foot, to its other side at the end), as a menu
+        opened under the hand is. Change wallpaper, then Settings. touch: opened by a finger's long press, its rows a finger's height.
+*/
+static int taskbar_desk_menu_open(const struct taskbar_view *view, int x, int y, const int screen[4], int touch)
+{
+        const struct ui_menu_spec specs[] = {{WORDS(wallpaper_change), null, UI_MENU_ICON, TASKBAR_MENU_WALLPAPER, false, UI_ICON_BRUSH},
+                                             {null, null, UI_MENU_SEPARATOR, 0, false},
+                                             {WORDS(tray_settings), null, 0, TASKBAR_MENU_SETTINGS, false}};
+        int left = screen[0], width = screen[2], at[4] = {x, y, 0, 0};
+
+        if (!view->engine || !view->face || width <= 0 || screen[3] <= 0)
+                return 0;
+        taskbar_menu.row = -1, taskbar_menu.pid = 0;
+        memory_zero(&taskbar_menu.menu, sizeof(taskbar_menu.menu));
+        taskbar_menu.menu.hot = -1, taskbar_menu.menu.touch = touch != 0;
+        if (!taskbar_menu_size(view, specs, (int)(sizeof(specs) / sizeof(specs[0]))))
+                return 0;
+        // Reading from the right the screen is placed in mirror, so the menu goes the other way from the point and turns back the same.
+        at[0] = ui_rtl() ? 2 * left + width - x : x;
+        ui_anchor_place(UI_BELOW, UI_FLIP_SIDE | UI_FLIP_CROSS, at, screen, taskbar_menu.width, taskbar_menu.height, &taskbar_menu.x, &taskbar_menu.y);
+        if (ui_rtl())
+                taskbar_menu.x = 2 * left + width - taskbar_menu.x - taskbar_menu.width;
+        return taskbar_menu.open = 1, taskbar_menu.dirty = 1, 1;
 }
 
 static fn taskbar_menu_draw(const struct taskbar_view *view, unsigned int address_to pixels, unsigned long pitch)

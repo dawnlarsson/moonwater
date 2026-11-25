@@ -1053,6 +1053,7 @@ static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixe
 static int taskbar_moon_glow_was(int band, int shown);
 static int taskbar_menu_open(const struct taskbar_view *view);
 static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab);
+static int taskbar_desk_menu_open(const struct taskbar_view *view, int x, int y, const int screen[4], int touch);
 static void taskbar_tab_chose(int id);
 static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int room, unsigned char *marks, unsigned char *lengths, unsigned int *rows);
 static void taskbar_pin_start(int tab, positive now);
@@ -1069,6 +1070,7 @@ static int taskbar_edit_drop(const struct taskbar_view *view, int which, int px,
 #define TASKBAR_MENU_PIN 6      // Pin to taskbar: the window's program kept on the taskbar
 #define TASKBAR_MENU_UNPIN 7    // Unpin from taskbar
 #define TASKBAR_MENU_UNINSTALL 8 // Uninstall: remove the app's profile or desktop shortcut
+#define TASKBAR_MENU_WALLPAPER 9 // the desktop's menu: Change wallpaper, the editor on the Scene of the screen it was opened on
 #define TASKBAR_GHOST 0xffffffffu // the row a view gives the task of a pinned program that has no window (taskbar_pins_tabs)
 #define TASKBAR_EDIT_ROWS 8     // the rows the arrangement keeps
 static int taskbar_menu_rect(int rect[4]);
@@ -7163,7 +7165,8 @@ LANGUAGE_ID(tray_settings, "Settings") \
 LANGUAGE_ID(ui_colour_hex, "a colour is six hex digits, rrggbb") \
 LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
 LANGUAGE_ID(ui_field_digits, "a number is digits") \
-LANGUAGE_ID(ui_field_full, "that is as much as it holds")
+LANGUAGE_ID(ui_field_full, "that is as much as it holds") \
+LANGUAGE_ID(wallpaper_change, "Change wallpaper")
 
 enum
 {
@@ -16458,6 +16461,7 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 #define UI_MENU_ERROR 128u  // a notice of an error: the taskbar's dot at the item's start, where a check would be, and its keys in the error's ink
 #define UI_MENU_WARNING 256u // a notice of a warning: the same in the warning's ink
 #define UI_MENU_LITERAL 512u // draw label literally (do not interpret '&' as a mnemonic prefix)
+#define UI_MENU_ICON 1024u   // the item's symbol (its icon, a UI_ICON_* of ui_icon) at its start, where a check would be
 #define UI_MENU_SEEN 300     // a notice's dot stands out 3 to 1 from its ground (WCAG's for a shape that is not text), its word UI_READABLE
 #define UI_MENU_ROW 28
 #define UI_MENU_TOUCH_ROW 44
@@ -16475,6 +16479,7 @@ struct ui_menu_item
         p32 flags;
         int id;
         int node;                    // its element in the menu's tree once the menu is sized; 0 before, which is no item's
+        int icon;                    // its symbol with UI_MENU_ICON
 };
 
 struct ui_popmenu
@@ -16509,6 +16514,7 @@ struct ui_menu_spec
         p32 flags;
         int id;
         b32 hide;
+        int icon; // the symbol drawn at its start with UI_MENU_ICON (UI_ICON_*)
 };
 
 static fn ui_popmenu_build(struct ui_popmenu address_to m, const struct ui_menu_spec address_to specs, int count)
@@ -16530,7 +16536,10 @@ static fn ui_popmenu_build(struct ui_popmenu address_to m, const struct ui_menu_
                         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
                         sep_pending = false;
                 }
+                int at = m->count;
                 ui_popmenu_add(m, s->label, s->keys, s->flags, s->id);
+                if (m->count > at)
+                        m->items[at].icon = s->icon;
         }
 }
 
@@ -16698,6 +16707,7 @@ static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b3
 }
 
 // The menu drawn: every item that shows, in its element as the tree placed it, and a row's marks (a check, a dot, a submenu's) in its pads.
+static fn ui_icon(struct ui address_to ui, int which, int left, int top, int size, int value, unsigned int argb); // the kit's symbols, below
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
 {
         ui_tree_ready(&m->tree);
@@ -16743,6 +16753,11 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                                 UI_KEEP(tick_x, n[1].y, tick, n[1].h);
                                 ui_kit_text(ui, tick_x, baseline, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
                         }
+                }
+                if (item->flags & UI_MENU_ICON)
+                {
+                        int side = ui_dev(ui, 16), cx = n->x + ui_dev(ui, UI_MENU_PAD + 15);
+                        ui_icon(ui, item->icon, ui_mirror(cx - side / 2, side, 0, m->width), n->y + (n->h - side) / 2, side, 0, (alpha << 24) | (ink & 0xffffffu));
                 }
                 // A notice's severity: the taskbar's dot in its colour where a check would be, and its keys (the severity's word) in its ink.
                 if (tone)
@@ -20341,6 +20356,7 @@ enum
         UI_ICON_GRIP,       // six dots, two by three: a handle to move a row by (an ordered row's, ui_row.order)
         UI_ICON_STOP,       // a square filled: stop what plays (a file browser's CD)
         UI_ICON_EJECT,      // a triangle over a bar: take a medium out (a file browser's stick or disc, ui_row.remove_icon)
+        UI_ICON_BRUSH,      // a paintbrush, its handle down to a round tuft and its point: change the wallpaper (the desktop's menu, a Scene's card)
         UI_ICON_COUNT
 };
 
@@ -20387,6 +20403,8 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_HOME] = {{UI_ICON_LINE, 6, 24, 24, 8, 0}, {UI_ICON_LINE, 24, 8, 42, 24, 0}, {UI_ICON_LINE, 12, 22, 12, 40, 0},
                           {UI_ICON_LINE, 36, 22, 36, 40, 0}, {UI_ICON_LINE, 12, 40, 36, 40, 0}, {UI_ICON_LINE, 21, 40, 21, 30, 0}, {UI_ICON_LINE, 27, 40, 27, 30, 0}},
         [UI_ICON_NEW_FOLDER] = {{UI_ICON_RING, 6, 12, 42, 38, 4}, {UI_ICON_LINE, 24, 20, 24, 30, 0}, {UI_ICON_LINE, 19, 25, 29, 25, 0}},
+        // The handle from the top right, the ferrule across its end, the tuft round below it and its point to the bottom left.
+        [UI_ICON_BRUSH] = {{UI_ICON_LINE, 41, 7, 26, 22, 0}, {UI_ICON_LINE, 22, 20, 28, 26, 0}, {UI_ICON_BOX, 12, 24, 24, 36, 6}, {UI_ICON_LINE, 15, 33, 8, 40, 0}},
 };
 
 // A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.

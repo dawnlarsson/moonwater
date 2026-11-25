@@ -1894,6 +1894,7 @@ static int taskbar_globe_held(void);
 static void compositor_globe_cancel(void);
 static void compositor_globe_move(void);
 static void compositor_globe_release(int x, int y);
+static int compositor_menu_key(unsigned int code, int value, unsigned int mods4);
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
@@ -1931,6 +1932,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         modifiers = compositor_modifiers();
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
         mods4 = chord | (modifiers & WINDOW_KEY_SUPER);
+        if (!bit && compositor_menu_key(code, (int)value, mods4))
+                return;
         if (!compositor_steam_passes(code, (int)value, modifiers, chord) &&
             compositor_input_overrides && compositor_input_override_key(compositor.focus, code, (int)value, modifiers))
         {
@@ -2148,6 +2151,27 @@ static void compositor_menu_open(int x, int y)
         compositor.band_at = 0;
 }
 
+// The screen the desktop's menu was opened on: Change wallpaper opens the editor on its Scene.
+static int compositor_desk_screen;
+
+// A right press on the bare desktop (a finger's long press, a pad's second button): the desktop's menu at the hand, on the screen under it.
+static void compositor_desk_menu_open(int x, int y)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int screen = compositor_screen_at(screens, count, x, y), rect[4];
+        struct taskbar_view view;
+
+        compositor_menu_close();
+        if (screen < 0)
+                return;
+        compositor.band_at = screen < compositor_bands() ? screen : 0, view = compositor_band_view();
+        compositor_menu.band = compositor.band_at, compositor_menu.drawn = 0, compositor_desk_screen = screen;
+        if (taskbar_desk_menu_open(&view, x, y, screens[screen], compositor.touching))
+                taskbar_menu_rect(rect), compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+        compositor.band_at = 0;
+}
+
 static void compositor_menu_chose(int id)
 {
         compositor_menu_close();
@@ -2157,8 +2181,44 @@ static void compositor_menu_chose(int id)
                 compositor_settings_open();
         else if (id == TASKBAR_MENU_CLOCK && compositor_row_write(SETTING_CLOCK_FORMAT_PATH, taskbar_clock_other()))
                 taskbar_clock_turn(), compositor_tabs_changed();
+        else if (id == TASKBAR_MENU_WALLPAPER)
+                compositor_wall_edit(compositor_desk_screen, 1);
         else if (id >= TASKBAR_MENU_EXIT)
                 taskbar_tab_chose(id);
+}
+
+/*
+        A key while a menu of the band's or the desktop's is up is the menu's (the kit's menu keys, ui_popmenu_event): the arrows, Home,
+        End and the pages move through it, Enter or Space chooses, Escape puts it away. Its release is the menu's too, so no window is
+        let go of a key it never had; a key with Ctrl, Alt or the logo, and any other key, goes on as it would.
+*/
+static unsigned char compositor_menu_keys[32];
+
+static int compositor_menu_key(unsigned int code, int value, unsigned int mods4)
+{
+        unsigned char mask = (unsigned char)(1u << (code & 7));
+        int rect[4], answer;
+
+        if (code >= 256)
+                return 0;
+        if (!value)
+        {
+                if (!(compositor_menu_keys[code >> 3] & mask))
+                        return 0;
+                compositor_menu_keys[code >> 3] &= (unsigned char)~mask;
+                return 1;
+        }
+        if ((mods4 & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) || !taskbar_menu_rect(rect) ||
+            !(code == CK_KEY_ESC || code == 28 || code == 96 || code == 57 || (code >= 102 && code <= 109))) // Escape, Enter, Space; Home to Page Down
+                return 0;
+        compositor_menu_keys[code >> 3] |= mask;
+        answer = taskbar_menu_hand(WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, (int)code, 0, 0, 0);
+        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+        if (answer < 0)
+                compositor_menu_close();
+        else if (answer > 0)
+                compositor_menu_chose(answer);
+        return 1;
 }
 
 static int compositor_edit_press(const struct taskbar_view *view, int band, int x, int y, int physical)
@@ -2853,7 +2913,11 @@ static void compositor_button(unsigned int code, int down)
         if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
             !compositor_in_row(compositor.focus, compositor.pointer_x, compositor.pointer_y))
                 compositor_close(compositor.focus);
-        if (compositor_button_band(tab, code, up) || under < 0 || compositor_button_window(under, code, alt))
+        if (compositor_button_band(tab, code, up))
+                return;
+        if (under < 0 && tab == TASKBAR_HIT_NONE && code == COMPOSITOR_BTN_RIGHT)
+                compositor_desk_menu_open(compositor.pointer_x, compositor.pointer_y);
+        if (under < 0 || compositor_button_window(under, code, alt))
                 return;
         if (compositor_in_row(under, compositor.pointer_x, compositor.pointer_y))
                 compositor_button_deliver(under, code, 1, 1);

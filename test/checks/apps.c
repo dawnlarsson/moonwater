@@ -11743,6 +11743,7 @@ b32 main()
         GROUP("check_moon_bench", check_moon_bench());
         GROUP("check_taskbar_edit", check_taskbar_edit());
         GROUP("check_taskbar_tab_menu", check_taskbar_tab_menu());
+        GROUP("check_desk_menu", check_desk_menu());
         GROUP("check_apps_registry", check_apps_registry());
         GROUP("check_taskbar_pins", check_taskbar_pins());
         GROUP("check_launcher_kept", check_launcher_kept());

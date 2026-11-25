@@ -2394,6 +2394,127 @@ static void check_taskbar_tab_menu(void)
 }
 
 /*
+        The desktop's menu (input.c's compositor_desk_menu_open, taskbar.c's taskbar_desk_menu_open), on two screens side by side: a right
+        press on the bare desktop opens it at the hand, Change wallpaper first with the kit's brush, then Settings; its top left at the hand,
+        turned back over the hand at a screen's foot and end, and reading from the right its top right at the hand (its top left past the
+        start). A press off it and Escape put it away; Down and Enter, or a press on the item, open the wallpaper's editor on the screen
+        under the hand; a finger's long press opens it with a finger's rows, and so does a pad's second button.
+*/
+static int desk_menu_rect(int rect[4])
+{
+    return taskbar_menu_rect(rect) && taskbar_menu.row == -1 && taskbar_menu.menu.count == 3;
+}
+
+static void desk_menu_right(int x, int y)
+{
+    compositor.pointer_x = x, compositor.pointer_y = y;
+    compositor_button(COMPOSITOR_BTN_RIGHT, 1), compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+}
+
+static void desk_menu_key(unsigned int code)
+{
+    compositor_key(0, code, 1, 0), compositor_key(0, code, 0, 0);
+}
+
+static void check_desk_menu(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    int rect[4], mouse_h = 0, row[4];
+    b32 opened, placed, turned, outside, escaped, keyed, pressed, mirrored, started, touched, padded;
+
+    compositor_zero();
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = 2 * GLASS_SIDE, compositor.height = GLASS_SIDE, compositor.scale = 100, compositor.card = -1;
+    compositor.scanout = screen, compositor.scanout_pitch = GLASS_SIDE * 4;
+    compositor.face = band_face, compositor.engine = &band_engine;
+    if (!glass_table_map())
+    {
+        check("desktop menu: the table is mapped", false);
+        return;
+    }
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = GLASS_SIDE, compositor.screen[0][3] = GLASS_SIDE;
+    compositor.screen[1][0] = GLASS_SIDE, compositor.screen[1][1] = 0, compositor.screen[1][2] = GLASS_SIDE, compositor.screen[1][3] = GLASS_SIDE;
+    compositor_spaces_ensure();
+    compositor_wall_starts = 0;
+    memory_zero(&ui_kit.shown, sizeof(ui_kit.shown)), memory_zero(&ui_kit.to, sizeof(ui_kit.to)), ui_kit.made = 0;
+
+    desk_menu_right(40, 40);
+    opened = desk_menu_rect(rect) && taskbar_menu.menu.items[0].id == TASKBAR_MENU_WALLPAPER && (taskbar_menu.menu.items[0].flags & UI_MENU_ICON) &&
+             taskbar_menu.menu.items[0].icon == UI_ICON_BRUSH && string_equals((string_address)taskbar_menu.menu.items[0].label, "Change wallpaper") &&
+             (taskbar_menu.menu.items[1].flags & UI_MENU_SEPARATOR) && taskbar_menu.menu.items[2].id == TASKBAR_MENU_SETTINGS && !taskbar_menu.menu.touch;
+    placed = opened && rect[0] == 40 && rect[1] == 40 && rect[2] < GLASS_SIDE - 40;
+    mouse_h = opened ? rect[3] : 0;
+    // A press off it puts it away and is no more than that.
+    compositor.pointer_x = 200, compositor.pointer_y = 200;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1), compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    outside = opened && !taskbar_menu.open;
+    // At the second screen's foot and end it is turned back over the hand: above it, and before it.
+    desk_menu_right(2 * GLASS_SIDE - 10, GLASS_SIDE - 10);
+    turned = desk_menu_rect(rect) && rect[0] + rect[2] == 2 * GLASS_SIDE - 10 && rect[1] + rect[3] == GLASS_SIDE - 10 && rect[0] >= GLASS_SIDE;
+    desk_menu_key(CK_KEY_ESC);
+    escaped = turned && !taskbar_menu.open;
+    // Down and Enter choose Change wallpaper: the editor on the screen the hand is on, and the keys are the menu's, not the editor's.
+    desk_menu_right(GLASS_SIDE + 30, 30);
+    desk_menu_key(CK_KEY_DOWN), desk_menu_key(28);
+    keyed = !taskbar_menu.open && compositor_wall_editing() && compositor_wall_editor.screen == 1;
+    compositor_wall_edit(-1, 0), compositor_wall_editor.shown = 0;
+    // A press on the item does the same, on the first screen.
+    desk_menu_right(50, 60);
+    pressed = 0;
+    if (desk_menu_rect(rect))
+    {
+        const struct ui_node *n = &taskbar_menu.menu.tree.node[taskbar_menu.menu.items[0].node];
+
+        row[0] = rect[0] + n->x, row[1] = rect[1] + n->y, row[2] = n->w, row[3] = n->h;
+        compositor.pointer_x = row[0] + row[2] / 2, compositor.pointer_y = row[1] + row[3] / 2;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1), compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        pressed = !taskbar_menu.open && compositor_wall_editing() && compositor_wall_editor.screen == 0;
+    }
+    compositor_wall_edit(-1, 0), compositor_wall_editor.shown = 0;
+    // Reading from the right: its top right at the hand, and past the screen's start its top left.
+    ui_kit.rtl = 1;
+    desk_menu_right(GLASS_SIDE + 240, 40);
+    mirrored = desk_menu_rect(rect) && rect[0] + rect[2] == GLASS_SIDE + 240 && rect[1] == 40;
+    string_format(log, "  desktop menu: reading from the right at %b,40 it is %b,%b %bx%b (open %b)\n", (bipolar)(GLASS_SIDE + 240), (bipolar)rect[0],
+                  (bipolar)rect[1], (bipolar)rect[2], (bipolar)rect[3], (bipolar)taskbar_menu.open);
+    compositor_menu_close();
+    desk_menu_right(GLASS_SIDE + 20, 40);
+    started = desk_menu_rect(rect) && rect[0] == GLASS_SIDE + 20;
+    compositor_menu_close();
+    ui_kit.rtl = 0;
+    // A finger's long press: the menu at the finger, its rows a finger's height.
+    compositor.pointer_x = compositor.real_x = 30, compositor.pointer_y = compositor.real_y = 70;
+    compositor_touch_right();
+    touched = desk_menu_rect(rect) && taskbar_menu.menu.touch && rect[0] == 30 && rect[1] == 70 && rect[3] > mouse_h;
+    string_format(log, "  desktop menu: a long press at 30,70 opened %b, touch %b, %b,%b %bx%b (rows %b by the mouse), the pointer %b,%b\n",
+                  (bipolar)taskbar_menu.open, (bipolar)taskbar_menu.menu.touch, (bipolar)rect[0], (bipolar)rect[1], (bipolar)rect[2], (bipolar)rect[3],
+                  (bipolar)mouse_h, (bipolar)compositor.pointer_x, (bipolar)compositor.pointer_y);
+    compositor_menu_close();
+    // A pad's second button (the access engine's): the same menu at the pointer.
+    compositor.pointer_x = 20, compositor.pointer_y = 90;
+    compositor_access_act(ACCESS_SECONDARY, 1, 0, 0), compositor_access_act(ACCESS_SECONDARY, 0, 0, 0);
+    padded = desk_menu_rect(rect) && rect[0] == 20 && rect[1] == 90;
+    string_format(log, "  desktop menu: the pad's second button at 20,90 opened %b, %b,%b, the pointer %b,%b\n", (bipolar)taskbar_menu.open,
+                  (bipolar)rect[0], (bipolar)rect[1], (bipolar)compositor.pointer_x, (bipolar)compositor.pointer_y);
+    compositor_menu_close();
+
+    compositor_wall_starts = 1;
+    compositor.outputs = 0;
+    check("desktop menu: a right press on the bare desktop opens it, Change wallpaper with the kit's brush, then Settings", opened);
+    check("desktop menu: its top left is at the hand", placed);
+    check("desktop menu: a press off it puts it away", outside);
+    check("desktop menu: at a screen's foot and end it is turned back over the hand, above it and before it", turned);
+    check("desktop menu: Escape puts it away", escaped);
+    check("desktop menu: Down and Enter choose Change wallpaper, the editor on the Scene of the screen under the hand", keyed);
+    check("desktop menu: a press on Change wallpaper opens the editor on the screen under the hand", pressed);
+    check("desktop menu: reading from the right its top right is at the hand, and turned back past the screen's start", mirrored && started);
+    check("desktop menu: a finger's long press opens it at the finger with a finger's rows", touched);
+    check("desktop menu: a pad's second button opens it at the pointer", padded);
+}
+
+/*
         The programs pinned to the taskbar. The line that keeps them: a word with blanks, a quote, a semicolon or nothing in it is written
         in quotes and read back as it was; a line with a fault (an app_id with a slash, an entry of fewer than three words, a first word
         that is not a path, an unclosed quote, a byte below a blank, a lone ; where an entry is not, more entries or bytes than the line
