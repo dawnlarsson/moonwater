@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language tr
 @name Türkçe
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Oyun kumandalarını burada, takılıymış gibi 
 settings_link_latency	5ef9	Gecikme
 settings_link_log	e57a	Çekirdek günlüğü
 settings_link_log_about	f0d9	Sistem günlüklerini canlı aktarma
+settings_link_mic	1969	Mikrofon
+settings_link_mic_about	f1e8	Bu makinenin mikrofonunu duymak
 settings_link_mismatch	5778	Anahtar uyuşmuyor
 settings_link_no_key	9963	henüz anahtar yok
 settings_link_offline	37c8	Çevrim dışı
 settings_link_online	88aa	Çevrim içi
 settings_link_run	9874	Komut çalıştırma
 settings_link_run_about	ba14	Tek tek uzak komutlar çalıştırma
+settings_link_screen	e7e3	Ekran ve ses
+settings_link_screen_about	7a65	Ekranı görmek ve burada çalanı duymak
 settings_link_self	bc70	bu makine
 settings_link_shell	0fbd	Etkileşimli kabuk
 settings_link_shell_about	5034	Uzak bir terminal oturumu açma
 settings_link_show	e2fc	Bir kod göster
+settings_link_speakers	b343	Hoparlörler
+settings_link_speakers_about	7f20	Sesini bu makinenin hoparlörlerinden çalmak
 settings_link_stop	0c69	Eşleştirmeyi durdur
 settings_link_type	978e	Başka bir makinenin kodunu yaz
 settings_link_up	5940	Giden
@@ -555,6 +562,9 @@ settings_unknown	9fb9	bilinmiyor
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
+share_what_plays	fcd8	çalan sesi
+share_your_microphone	53da	mikrofonunuzu
+share_your_speakers	9244	hoparlörlerinizi
 software_automatic	6784	Otomatik
 software_cannot_start	69cd	Komut başlatılamadı
 software_confirm_remove	be0f	%s kaldır

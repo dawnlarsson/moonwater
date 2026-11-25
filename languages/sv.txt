@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language sv
 @name Svenska
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Använd dess handkontroller här, som om de vore 
 settings_link_latency	5ef9	Latens
 settings_link_log	e57a	Kärnlogg
 settings_link_log_about	f0d9	Strömma systemloggar
+settings_link_mic	1969	Mikrofon
+settings_link_mic_about	f1e8	Höra den här datorns mikrofon
 settings_link_mismatch	5778	Nyckeln stämmer inte
 settings_link_no_key	9963	ingen nyckel än
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
 settings_link_run	9874	Köra kommandon
 settings_link_run_about	ba14	Köra enstaka fjärrkommandon
+settings_link_screen	e7e3	Skärm och ljud
+settings_link_screen_about	7a65	Se skärmen och höra det som spelas här
 settings_link_self	bc70	den här maskinen
 settings_link_shell	0fbd	Interaktivt skal
 settings_link_shell_about	5034	Öppna en terminalsession på distans
 settings_link_show	e2fc	Visa en kod
+settings_link_speakers	b343	Högtalare
+settings_link_speakers_about	7f20	Spela dess ljud i den här datorns högtalare
 settings_link_stop	0c69	Sluta para
 settings_link_type	978e	Skriv en annan maskins kod
 settings_link_up	5940	Skickat
@@ -555,6 +562,9 @@ settings_unknown	9fb9	okänt
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENT]
 settings_virtual_refused	4202	en virtuell enhet kan inte slå på detta: använd ett tangentbord eller en mus som är ansluten till datorn, eller moonwater ssh i en root-terminal
+share_what_plays	fcd8	det som spelas
+share_your_microphone	53da	din mikrofon
+share_your_speakers	9244	dina högtalare
 software_automatic	6784	Automatiskt
 software_cannot_start	69cd	Kommandot kunde inte starta
 software_confirm_remove	be0f	ta bort %s

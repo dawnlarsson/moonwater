@@ -38,6 +38,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language ar
 @name العربية
 @translated machine
@@ -423,16 +424,22 @@ settings_link_input_about	4f2f	استخدام وحدات التحكم الخاص
 settings_link_latency	5ef9	زمن الاستجابة
 settings_link_log	e57a	سجل النواة
 settings_link_log_about	f0d9	بث سجلات النظام
+settings_link_mic	1969	الميكروفون
+settings_link_mic_about	f1e8	سماع ميكروفون هذا الجهاز
 settings_link_mismatch	5778	المفتاح غير مطابق
 settings_link_no_key	9963	لا يوجد مفتاح بعد
 settings_link_offline	37c8	غير متصل
 settings_link_online	88aa	متصل
 settings_link_run	9874	تشغيل الأوامر
 settings_link_run_about	ba14	تنفيذ أوامر بعيدة فردية
+settings_link_screen	e7e3	الشاشة والصوت
+settings_link_screen_about	7a65	رؤية الشاشة وسماع ما يُشغَّل هنا
 settings_link_self	bc70	هذا الحاسوب
 settings_link_shell	0fbd	الصدفة التفاعلية
 settings_link_shell_about	5034	فتح جلسة طرفية عن بعد
 settings_link_show	e2fc	عرض رمز
+settings_link_speakers	b343	مكبرات الصوت
+settings_link_speakers_about	7f20	تشغيل صوته على مكبرات صوت هذا الجهاز
 settings_link_stop	0c69	إيقاف الاقتران
 settings_link_type	978e	اكتب رمز جهاز آخر
 settings_link_up	5940	المرسلة
@@ -556,6 +563,9 @@ settings_unknown	9fb9	غير معروف
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	الفعل [الوسائط]
 settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
+share_what_plays	fcd8	ما يُشغَّل
+share_your_microphone	53da	الميكروفون الخاص بك
+share_your_speakers	9244	مكبرات الصوت الخاصة بك
 software_automatic	6784	تلقائي
 software_cannot_start	69cd	تعذّر بدء الأمر
 software_confirm_remove	be0f	إزالة %s

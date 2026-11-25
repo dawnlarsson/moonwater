@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language fr
 @name Français
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Utiliser ses manettes ici, comme si elles étaien
 settings_link_latency	5ef9	Latence
 settings_link_log	e57a	Journal du noyau
 settings_link_log_about	f0d9	Diffuser les journaux système
+settings_link_mic	1969	Microphone
+settings_link_mic_about	f1e8	Entendre le microphone de cette machine
 settings_link_mismatch	5778	Clé non concordante
 settings_link_no_key	9963	pas encore de clé
 settings_link_offline	37c8	Hors ligne
 settings_link_online	88aa	En ligne
 settings_link_run	9874	Exécuter des commandes
 settings_link_run_about	ba14	Exécuter des commandes distantes isolées
+settings_link_screen	e7e3	Écran et son
+settings_link_screen_about	7a65	Voir l'écran et entendre ce qui est joué ici
 settings_link_self	bc70	cette machine
 settings_link_shell	0fbd	Shell interactif
 settings_link_shell_about	5034	Ouvrir une session de terminal distante
 settings_link_show	e2fc	Afficher un code
+settings_link_speakers	b343	Haut-parleurs
+settings_link_speakers_about	7f20	Jouer son son sur les haut-parleurs de cette machine
 settings_link_stop	0c69	Arrêter l'appairage
 settings_link_type	978e	Saisir le code d'une autre machine
 settings_link_up	5940	Envoyés
@@ -555,6 +562,9 @@ settings_unknown	9fb9	inconnu
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBE [ARGUMENTS]
 settings_virtual_refused	4202	un périphérique virtuel ne peut pas activer ceci : utilisez un clavier ou une souris branchés sur la machine, ou moonwater ssh dans un terminal root
+share_what_plays	fcd8	ce qui est joué
+share_your_microphone	53da	votre microphone
+share_your_speakers	9244	vos haut-parleurs
 software_automatic	6784	Automatique
 software_cannot_start	69cd	La commande n'a pas pu démarrer
 software_confirm_remove	be0f	supprimer %s

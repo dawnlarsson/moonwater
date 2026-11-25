@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language pl
 @name Polski
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Używaj tu jego kontrolerów, jakby były podłą
 settings_link_latency	5ef9	Opóźnienie
 settings_link_log	e57a	Dziennik jądra
 settings_link_log_about	f0d9	Strumieniowanie dzienników systemowych
+settings_link_mic	1969	Mikrofon
+settings_link_mic_about	f1e8	Słyszeć mikrofon tej maszyny
 settings_link_mismatch	5778	Klucz się nie zgadza
 settings_link_no_key	9963	jeszcze bez klucza
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
 settings_link_run	9874	Uruchamianie poleceń
 settings_link_run_about	ba14	Wykonywanie pojedynczych poleceń zdalnych
+settings_link_screen	e7e3	Ekran i dźwięk
+settings_link_screen_about	7a65	Widzieć ekran i słyszeć to, co tu gra
 settings_link_self	bc70	ta maszyna
 settings_link_shell	0fbd	Interaktywna powłoka
 settings_link_shell_about	5034	Otwieranie zdalnej sesji terminala
 settings_link_show	e2fc	Pokaż kod
+settings_link_speakers	b343	Głośniki
+settings_link_speakers_about	7f20	Odtwarzać jego dźwięk na głośnikach tej maszyny
 settings_link_stop	0c69	Zatrzymaj parowanie
 settings_link_type	978e	Wpisz kod innej maszyny
 settings_link_up	5940	Wysłane
@@ -555,6 +562,9 @@ settings_unknown	9fb9	nieznane
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	CZASOWNIK [ARGUMENTY]
 settings_virtual_refused	4202	urządzenie wirtualne nie może tego włączyć: użyj klawiatury lub myszy podłączonej do komputera albo moonwater ssh w terminalu roota
+share_what_plays	fcd8	to, co gra
+share_your_microphone	53da	twój mikrofon
+share_your_speakers	9244	twoje głośniki
 software_automatic	6784	Automatycznie
 software_cannot_start	69cd	Nie udało się uruchomić polecenia
 software_confirm_remove	be0f	usuń %s

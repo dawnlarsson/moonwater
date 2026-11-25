@@ -442,14 +442,20 @@ enum { SETTINGS_ABOUT_BRAND = 0, SETTINGS_ABOUT_DISCORD = 1, SETTINGS_ABOUT_GITH
 #define SETTINGS_GPU_SAMPLES 10
 #define SETTINGS_METRIC_NS 10000000000ll
 enum { SETTINGS_SUB_COPY = 0u, SETTINGS_SUB_DISMISS_ALL = 1u, SETTINGS_SUB_PARTITIONS = 2u, SETTINGS_SUB_PARTITION = 3u, SETTINGS_SUB_LINK_GRANT = 4u, SETTINGS_SUB_LINK_INFO = 5u };
-#define SETTINGS_LINK_GRANTS 5
+// The cast engine's three (src/waterlink/cast.c) come last: each is off for every machine until it is turned on here or with
+// `moonwater link allow NAME screen` (mic, speakers). The masks of them are a byte: eight grants at most.
+#define SETTINGS_LINK_GRANTS 8
 static const struct { const char address_to word; unsigned int label, note; } settings_link_grants[SETTINGS_LINK_GRANTS] = {
-    {"files", LANGUAGE_settings_link_files, LANGUAGE_settings_link_files_about},
-    {"run",   LANGUAGE_settings_link_run,   LANGUAGE_settings_link_run_about},
-    {"shell", LANGUAGE_settings_link_shell, LANGUAGE_settings_link_shell_about},
-    {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
-    {"input", LANGUAGE_settings_link_input, LANGUAGE_settings_link_input_about},
+    {"files",    LANGUAGE_settings_link_files,    LANGUAGE_settings_link_files_about},
+    {"run",      LANGUAGE_settings_link_run,      LANGUAGE_settings_link_run_about},
+    {"shell",    LANGUAGE_settings_link_shell,    LANGUAGE_settings_link_shell_about},
+    {"log",      LANGUAGE_settings_link_log,      LANGUAGE_settings_link_log_about},
+    {"input",    LANGUAGE_settings_link_input,    LANGUAGE_settings_link_input_about},
+    {"screen",   LANGUAGE_settings_link_screen,   LANGUAGE_settings_link_screen_about},
+    {"mic",      LANGUAGE_settings_link_mic,      LANGUAGE_settings_link_mic_about},
+    {"speakers", LANGUAGE_settings_link_speakers, LANGUAGE_settings_link_speakers_about},
 };
+_Static_assert(SETTINGS_LINK_GRANTS <= 8, "a machine's grants are the bits of a byte");
 // A machine linked is a row of columns: its name, its address, latency, the packets sent (Up) and received (Down) and its group, and from
 // SETTINGS_LINK_GRANT_COLUMN a check of each grant in the order above. No fold: all it says is in its row, and its state is its dot
 // (online) and its words (an offline one dim).

@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language el
 @name Ελληνικά
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Χρήση των χειριστηρίων του
 settings_link_latency	5ef9	Καθυστέρηση
 settings_link_log	e57a	Αρχείο καταγραφής πυρήνα
 settings_link_log_about	f0d9	Ροή αρχείων καταγραφής συστήματος
+settings_link_mic	1969	Μικρόφωνο
+settings_link_mic_about	f1e8	Ακρόαση του μικροφώνου αυτού του μηχανήματος
 settings_link_mismatch	5778	Το κλειδί δεν ταιριάζει
 settings_link_no_key	9963	δεν υπάρχει ακόμη κλειδί
 settings_link_offline	37c8	Εκτός σύνδεσης
 settings_link_online	88aa	Σε σύνδεση
 settings_link_run	9874	Εκτέλεση εντολών
 settings_link_run_about	ba14	Εκτέλεση μεμονωμένων απομακρυσμένων εντολών
+settings_link_screen	e7e3	Οθόνη και ήχος
+settings_link_screen_about	7a65	Προβολή της οθόνης και ακρόαση όσων παίζουν εδώ
 settings_link_self	bc70	αυτό το μηχάνημα
 settings_link_shell	0fbd	Διαδραστικό κέλυφος
 settings_link_shell_about	5034	Άνοιγμα απομακρυσμένης συνεδρίας τερματικού
 settings_link_show	e2fc	Εμφάνιση κωδικού
+settings_link_speakers	b343	Ηχεία
+settings_link_speakers_about	7f20	Αναπαραγωγή του ήχου του στα ηχεία αυτού του μηχανήματος
 settings_link_stop	0c69	Διακοπή σύζευξης
 settings_link_type	978e	Κωδικός άλλου μηχανήματος
 settings_link_up	5940	Απεσταλμένα
@@ -555,6 +562,9 @@ settings_unknown	9fb9	άγνωστο
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ΡΗΜΑ [ΟΡΙΣΜΑΤΑ]
 settings_virtual_refused	4202	εικονική συσκευή δεν μπορεί να το ανοίξει: πληκτρολόγιο ή ποντίκι του υπολογιστή, ή moonwater ssh σε τερματικό root
+share_what_plays	fcd8	ό,τι παίζει
+share_your_microphone	53da	το μικρόφωνό σας
+share_your_speakers	9244	τα ηχεία σας
 software_automatic	6784	Αυτόματα
 software_cannot_start	69cd	Η εντολή δεν μπόρεσε να ξεκινήσει
 software_confirm_remove	be0f	αφαίρεση %s

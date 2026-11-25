@@ -383,16 +383,22 @@ settings_link_input_about	4f2f	Play its game pads here, as if plugged in
 settings_link_latency	5ef9	Latency
 settings_link_log	e57a	Kernel log
 settings_link_log_about	f0d9	Stream system logs
+settings_link_mic	1969	Microphone
+settings_link_mic_about	f1e8	Hear this machine's microphone
 settings_link_mismatch	5778	Key mismatch
 settings_link_no_key	9963	no key yet
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
 settings_link_run	9874	Run commands
 settings_link_run_about	ba14	Execute single remote commands
+settings_link_screen	e7e3	Screen and sound
+settings_link_screen_about	7a65	See the screen and hear what plays here
 settings_link_self	bc70	this machine
 settings_link_shell	0fbd	Interactive shell
 settings_link_shell_about	5034	Open a remote terminal session
 settings_link_show	e2fc	Show a code
+settings_link_speakers	b343	Speakers
+settings_link_speakers_about	7f20	Play its sound on this machine's speakers
 settings_link_stop	0c69	Stop pairing
 settings_link_type	978e	Type another machine's code
 settings_link_up	5940	Up
@@ -516,6 +522,9 @@ settings_unknown	9fb9	unknown
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENTS]
 settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
+share_what_plays	fcd8	what plays
+share_your_microphone	53da	your microphone
+share_your_speakers	9244	your speakers
 software_automatic	6784	Automatic
 software_cannot_start	69cd	The command could not start
 software_confirm_remove	be0f	remove %s

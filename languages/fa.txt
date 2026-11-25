@@ -38,6 +38,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language fa
 @name فارسی
 @translated machine
@@ -423,16 +424,22 @@ settings_link_input_about	4f2f	استفاده از دسته‌های آن در �
 settings_link_latency	5ef9	تأخیر
 settings_link_log	e57a	گزارش هسته
 settings_link_log_about	f0d9	پخش زنده گزارش‌های سامانه
+settings_link_mic	1969	میکروفون
+settings_link_mic_about	f1e8	شنیدن میکروفون این دستگاه
 settings_link_mismatch	5778	کلید مطابقت ندارد
 settings_link_no_key	9963	هنوز کلیدی ندارد
 settings_link_offline	37c8	برون‌خط
 settings_link_online	88aa	برخط
 settings_link_run	9874	اجرای فرمان‌ها
 settings_link_run_about	ba14	اجرای فرمان‌های راه‌دور به‌صورت تکی
+settings_link_screen	e7e3	صفحه و صدا
+settings_link_screen_about	7a65	دیدن صفحه و شنیدن آنچه اینجا پخش می‌شود
 settings_link_self	bc70	این رایانه
 settings_link_shell	0fbd	پوسته تعاملی
 settings_link_shell_about	5034	باز کردن یک نشست پایانه از راه دور
 settings_link_show	e2fc	نمایش یک کد
+settings_link_speakers	b343	بلندگوها
+settings_link_speakers_about	7f20	پخش صدای آن روی بلندگوهای این دستگاه
 settings_link_stop	0c69	توقف جفت‌سازی
 settings_link_type	978e	نوشتن کد دستگاه دیگر
 settings_link_up	5940	ارسالی
@@ -556,6 +563,9 @@ settings_unknown	9fb9	نامشخص
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	فعل [آرگومان‌ها]
 settings_virtual_refused	4202	دستگاه مجازی نمی‌تواند این را روشن کند: صفحه‌کلید یا موشواره‌ی خود دستگاه، یا moonwater ssh در پایانه root
+share_what_plays	fcd8	آنچه پخش می‌شود
+share_your_microphone	53da	میکروفون شما
+share_your_speakers	9244	بلندگوهای شما
 software_automatic	6784	خودکار
 software_cannot_start	69cd	فرمان آغاز نشد
 software_confirm_remove	be0f	حذف %s

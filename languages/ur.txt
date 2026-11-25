@@ -38,6 +38,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language ur
 @name اردو
 @translated machine
@@ -423,16 +424,22 @@ settings_link_input_about	4f2f	اس کے کنٹرولرز یہاں ایسے اس
 settings_link_latency	5ef9	تاخیر
 settings_link_log	e57a	کرنل لاگ
 settings_link_log_about	f0d9	سسٹم لاگز اسٹریم کریں
+settings_link_mic	1969	مائیکروفون
+settings_link_mic_about	f1e8	اس مشین کا مائیکروفون سننا
 settings_link_mismatch	5778	کلید مطابقت نہیں رکھتی
 settings_link_no_key	9963	ابھی کوئی کلید نہیں
 settings_link_offline	37c8	آف لائن
 settings_link_online	88aa	آن لائن
 settings_link_run	9874	کمانڈز چلائیں
 settings_link_run_about	ba14	الگ الگ ریموٹ کمانڈز چلائیں
+settings_link_screen	e7e3	اسکرین اور آواز
+settings_link_screen_about	7a65	اسکرین دیکھنا اور یہاں جو چل رہا ہے وہ سننا
 settings_link_self	bc70	یہ کمپیوٹر
 settings_link_shell	0fbd	انٹرایکٹو شیل
 settings_link_shell_about	5034	ریموٹ ٹرمینل سیشن کھولیں
 settings_link_show	e2fc	کوڈ دکھائیں
+settings_link_speakers	b343	اسپیکر
+settings_link_speakers_about	7f20	اس کی آواز اس مشین کے اسپیکروں پر چلانا
 settings_link_stop	0c69	جوڑنا روکیں
 settings_link_type	978e	دوسری مشین کا کوڈ لکھیں
 settings_link_up	5940	بھیجے گئے
@@ -556,6 +563,9 @@ settings_unknown	9fb9	نامعلوم
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	فعل [آرگیومنٹس]
 settings_virtual_refused	4202	ایک ورچوئل ڈیوائس اسے آن نہیں کر سکتی: مشین سے جڑا کی بورڈ یا ماؤس استعمال کریں، یا root ٹرمینل میں moonwater ssh
+share_what_plays	fcd8	جو چل رہا ہے
+share_your_microphone	53da	آپ کا مائیکروفون
+share_your_speakers	9244	آپ کے اسپیکر
 software_automatic	6784	خودکار
 software_cannot_start	69cd	کمانڈ شروع نہیں ہو سکی
 software_confirm_remove	be0f	%s ہٹائیں

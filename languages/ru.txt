@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language ru
 @name Русский
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Играть его геймпадами здес
 settings_link_latency	5ef9	Задержка
 settings_link_log	e57a	Журнал ядра
 settings_link_log_about	f0d9	Потоковая передача системных журналов
+settings_link_mic	1969	Микрофон
+settings_link_mic_about	f1e8	Слышать микрофон этой машины
 settings_link_mismatch	5778	Ключ не совпадает
 settings_link_no_key	9963	ключа ещё нет
 settings_link_offline	37c8	Не в сети
 settings_link_online	88aa	В сети
 settings_link_run	9874	Выполнение команд
 settings_link_run_about	ba14	Выполнение отдельных удалённых команд
+settings_link_screen	e7e3	Экран и звук
+settings_link_screen_about	7a65	Видеть экран и слышать то, что здесь играет
 settings_link_self	bc70	этот компьютер
 settings_link_shell	0fbd	Интерактивная оболочка
 settings_link_shell_about	5034	Открытие удалённого сеанса терминала
 settings_link_show	e2fc	Показать код
+settings_link_speakers	b343	Динамики
+settings_link_speakers_about	7f20	Играть его звук через динамики этой машины
 settings_link_stop	0c69	Остановить сопряжение
 settings_link_type	978e	Ввести код другой машины
 settings_link_up	5940	Отправлено
@@ -555,6 +562,9 @@ settings_unknown	9fb9	неизвестно
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ГЛАГОЛ [АРГУМЕНТЫ]
 settings_virtual_refused	4202	виртуальное устройство не может это включить: клавиатура или мышь машины, или moonwater ssh в терминале root
+share_what_plays	fcd8	то, что играет
+share_your_microphone	53da	ваш микрофон
+share_your_speakers	9244	ваши динамики
 software_automatic	6784	Автоматически
 software_cannot_start	69cd	Не удалось запустить команду
 software_confirm_remove	be0f	удалить %s

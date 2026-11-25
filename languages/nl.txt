@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 # machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
+# machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 @language nl
 @name Nederlands
 @translated machine
@@ -422,16 +423,22 @@ settings_link_input_about	4f2f	Zijn controllers hier gebruiken, alsof ze aangesl
 settings_link_latency	5ef9	Latentie
 settings_link_log	e57a	Kernellogboek
 settings_link_log_about	f0d9	Systeemlogboeken streamen
+settings_link_mic	1969	Microfoon
+settings_link_mic_about	f1e8	De microfoon van deze machine horen
 settings_link_mismatch	5778	Sleutel komt niet overeen
 settings_link_no_key	9963	nog geen sleutel
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
 settings_link_run	9874	Opdrachten uitvoeren
 settings_link_run_about	ba14	Losse opdrachten op afstand uitvoeren
+settings_link_screen	e7e3	Scherm en geluid
+settings_link_screen_about	7a65	Het scherm zien en horen wat hier speelt
 settings_link_self	bc70	deze machine
 settings_link_shell	0fbd	Interactieve shell
 settings_link_shell_about	5034	Een terminalsessie op afstand openen
 settings_link_show	e2fc	Een code tonen
+settings_link_speakers	b343	Luidsprekers
+settings_link_speakers_about	7f20	Zijn geluid afspelen op de luidsprekers van deze machine
 settings_link_stop	0c69	Koppelen stoppen
 settings_link_type	978e	De code van een andere machine typen
 settings_link_up	5940	Verzonden
@@ -555,6 +562,9 @@ settings_unknown	9fb9	onbekend
 settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	WERKWOORD [ARGUMENTEN]
 settings_virtual_refused	4202	een virtueel apparaat kan dit niet aanzetten: gebruik een toetsenbord of muis die op de machine is aangesloten, of moonwater ssh in een root-terminal
+share_what_plays	fcd8	wat er speelt
+share_your_microphone	53da	je microfoon
+share_your_speakers	9244	je luidsprekers
 software_automatic	6784	Automatisch
 software_cannot_start	69cd	De opdracht kon niet starten
 software_confirm_remove	be0f	%s verwijderen

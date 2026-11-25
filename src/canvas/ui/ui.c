@@ -6922,16 +6922,22 @@ LANGUAGE_ID(settings_link_input_about, "Play its game pads here, as if plugged i
 LANGUAGE_ID(settings_link_latency, "Latency") \
 LANGUAGE_ID(settings_link_log, "Kernel log") \
 LANGUAGE_ID(settings_link_log_about, "Stream system logs") \
+LANGUAGE_ID(settings_link_mic, "Microphone") \
+LANGUAGE_ID(settings_link_mic_about, "Hear this machine's microphone") \
 LANGUAGE_ID(settings_link_mismatch, "Key mismatch") \
 LANGUAGE_ID(settings_link_no_key, "no key yet") \
 LANGUAGE_ID(settings_link_offline, "Offline") \
 LANGUAGE_ID(settings_link_online, "Online") \
 LANGUAGE_ID(settings_link_run, "Run commands") \
 LANGUAGE_ID(settings_link_run_about, "Execute single remote commands") \
+LANGUAGE_ID(settings_link_screen, "Screen and sound") \
+LANGUAGE_ID(settings_link_screen_about, "See the screen and hear what plays here") \
 LANGUAGE_ID(settings_link_self, "this machine") \
 LANGUAGE_ID(settings_link_shell, "Interactive shell") \
 LANGUAGE_ID(settings_link_shell_about, "Open a remote terminal session") \
 LANGUAGE_ID(settings_link_show, "Show a code") \
+LANGUAGE_ID(settings_link_speakers, "Speakers") \
+LANGUAGE_ID(settings_link_speakers_about, "Play its sound on this machine's speakers") \
 LANGUAGE_ID(settings_link_stop, "Stop pairing") \
 LANGUAGE_ID(settings_link_switched_off, "Switched off") \
 LANGUAGE_ID(settings_link_type, "Type another machine's code") \
