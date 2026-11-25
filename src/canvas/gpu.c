@@ -278,30 +278,31 @@ static const struct gpu_code gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
     {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)},
     {gpu_k_image, sizeof(gpu_k_image)}, {gpu_k_nv12, sizeof(gpu_k_nv12)},
-    {gpu_k_halve, sizeof(gpu_k_halve)}, {gpu_k_rise, sizeof(gpu_k_rise)}};
+    {gpu_k_halve, sizeof(gpu_k_halve)}, {gpu_k_rise, sizeof(gpu_k_rise)}, {gpu_k_rise1, sizeof(gpu_k_rise1)}};
 static const struct gpu_code gpu_kernels_gfx11[] = {
     {gpu_k_11_copy, sizeof(gpu_k_11_copy)}, {gpu_k_11_fill, sizeof(gpu_k_11_fill)}, {gpu_k_11_tone, sizeof(gpu_k_11_tone)}, {gpu_k_11_glass, sizeof(gpu_k_11_glass)},
     {0, 0}, {0, 0}, {gpu_k_11_scene, sizeof(gpu_k_11_scene)}, {gpu_k_11_scale, sizeof(gpu_k_11_scale)},
     {gpu_k_11_image, sizeof(gpu_k_11_image)}, {gpu_k_11_nv12, sizeof(gpu_k_11_nv12)},
-    {gpu_k_11_halve, sizeof(gpu_k_11_halve)}, {gpu_k_11_rise, sizeof(gpu_k_11_rise)}};
+    {gpu_k_11_halve, sizeof(gpu_k_11_halve)}, {gpu_k_11_rise, sizeof(gpu_k_11_rise)}, {gpu_k_11_rise1, sizeof(gpu_k_11_rise1)}};
 static const struct gpu_code gpu_kernels_gfx12[] = {
     {gpu_k_12_copy, sizeof(gpu_k_12_copy)}, {gpu_k_12_fill, sizeof(gpu_k_12_fill)}, {gpu_k_12_tone, sizeof(gpu_k_12_tone)}, {gpu_k_12_glass, sizeof(gpu_k_12_glass)},
     {0, 0}, {0, 0}, {gpu_k_12_scene, sizeof(gpu_k_12_scene)}, {gpu_k_12_scale, sizeof(gpu_k_12_scale)},
     {gpu_k_12_image, sizeof(gpu_k_12_image)}, {gpu_k_12_nv12, sizeof(gpu_k_12_nv12)},
-    {gpu_k_12_halve, sizeof(gpu_k_12_halve)}, {gpu_k_12_rise, sizeof(gpu_k_12_rise)}};
+    {gpu_k_12_halve, sizeof(gpu_k_12_halve)}, {gpu_k_12_rise, sizeof(gpu_k_12_rise)}, {gpu_k_12_rise1, sizeof(gpu_k_12_rise1)}};
 // gfx9's (Vega, and the Raven to Cezanne APUs): the same text, its literals in registers where gfx9's long encodings take none (src/build/gpuasm.c).
 static const struct gpu_code gpu_kernels_gfx9[] = {
     {gpu_k_9_copy, sizeof(gpu_k_9_copy)}, {gpu_k_9_fill, sizeof(gpu_k_9_fill)}, {gpu_k_9_tone, sizeof(gpu_k_9_tone)}, {gpu_k_9_glass, sizeof(gpu_k_9_glass)},
     {0, 0}, {0, 0}, {gpu_k_9_scene, sizeof(gpu_k_9_scene)}, {gpu_k_9_scale, sizeof(gpu_k_9_scale)},
     {gpu_k_9_image, sizeof(gpu_k_9_image)}, {gpu_k_9_nv12, sizeof(gpu_k_9_nv12)},
-    {gpu_k_9_halve, sizeof(gpu_k_9_halve)}, {gpu_k_9_rise, sizeof(gpu_k_9_rise)}};
+    {gpu_k_9_halve, sizeof(gpu_k_9_halve)}, {gpu_k_9_rise, sizeof(gpu_k_9_rise)}, {gpu_k_9_rise1, sizeof(gpu_k_9_rise1)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 #define GPU_OP_HALVE 10u // a scene made its small picture, a pixel a block of 8 by 8 (gpu_halve)
 #define GPU_OP_RISE 11u  // a glass window's ground risen from its small tinted picture, with the grain (gpu_rise)
+#define GPU_OP_RISE1 12u // amdgpu's rise is two jobs: this one makes level 1 (a quarter of the pixels), op 11 the ground from it
 static unsigned int gpu_kernel_at[GPU_KERNELS];
 typedef char gpu_amd_slots_fit[GPU_SLOTS * GPU_AMD_PACKETS + 256 * GPU_SLOTS <= 1024 ? 1 : -1]; // amdgpu's packets and arguments end where its kernels begin
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + sizeof(gpu_k_nv12) + sizeof(gpu_k_halve) + sizeof(gpu_k_rise) + 256 * 12 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + sizeof(gpu_k_nv12) + sizeof(gpu_k_halve) + sizeof(gpu_k_rise) + sizeof(gpu_k_rise1) + 256 * 13 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (GPU_CONTROL(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 #ifndef GPU_WAIT_CS
@@ -2368,7 +2369,7 @@ static unsigned long long gpu_job_ns;
 // a scene (ops 4, 5 and 6: a present, a program's list, a turned screen), 1 a copy (op 0), 2 a picture scaled (op 7), with their time (the waited ones' whole time).
 static unsigned int gpu_jobs_waited, gpu_jobs_unwaited, gpu_jobs_kind[3];
 static unsigned long long gpu_job_submit_ns, gpu_job_wait_ns, gpu_job_ns_kind[3], gpu_submit_took; // (the last submit's own time, gpu_submit)
-#define GPU_JOB_KIND(op) ((op) == 0 ? 1u : (op) == 7 || (op) == 9 || (op) == 10 || (op) == 11 ? 2u : 0u) // scenes, copies, pictures scaled by tables (7, and NV12 made XRGB, 9) or made smaller and larger for glass (10, 11)
+#define GPU_JOB_KIND(op) ((op) == 0 ? 1u : (op) == 7 || (op) == 9 || (op) == 10 || (op) == 11 || (op) == 12 ? 2u : 0u) // scenes, copies, pictures scaled by tables (7, and NV12 made XRGB, 9) or made smaller and larger for glass (10, 11)
 #ifndef GPU_MAP_FAKE
 #define GPU_MAP_FAKE(taken)
 #endif
@@ -3914,17 +3915,17 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
 // amdgpu's two image ops, which Intel has no kernel for, the halve and the rise), the kernels without words marked empty. bx (op 5) has words but no encoder yet, so its slot stays empty. Not in GPU_I915_SETS.
 static const struct gpu_code gpu_i915_gen9_kernels[] = {
         {gpu_i915_copy, sizeof(gpu_i915_copy)}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {gpu_i915_tone, sizeof(gpu_i915_tone)}, {gpu_i915_glass, sizeof(gpu_i915_glass)}, {gpu_i915_cp, sizeof(gpu_i915_cp)}, {0, 0}, {gpu_i915_scene, sizeof(gpu_i915_scene)}, {gpu_i915_scale, sizeof(gpu_i915_scale)},
-        {0, 0}, {0, 0}, {gpu_i915_halve, sizeof(gpu_i915_halve)}, {gpu_i915_rise, sizeof(gpu_i915_rise)}};
+        {0, 0}, {0, 0}, {gpu_i915_halve, sizeof(gpu_i915_halve)}, {gpu_i915_rise, sizeof(gpu_i915_rise)}, {0, 0}};
 // The Intel set takes the AMD set's self-test hash: it is registered only when its kernels draw the same pixels as the AMD ones (bit-exact,
 // the rule every set meets), so one picture stands for both. A set whose picture differs is not registered (the self-test would refuse it).
-static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 12, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
+static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 13, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
 // Gen12's set: the same eight ops and the same encoders (their words by family, gpu_i915_frame), the kernels src/canvas/gpu_i915.asm's NAME12, which
 // are the Gen9 sources assembled for Gen12 (test/gpu_kernels.py --intel-gen12, then iga64 -a -p=12p1 -Xauto-deps -Xforce-no-compact). Nothing of them
 // is patched at the start. Held to the processor by CHECK_gpu_scene on an Alder Lake UHD 710 (0x4693); the other chips of the family are not run.
 static const struct gpu_code gpu_i915_gen12_kernels[] = {
         {gpu_i915_copy12, sizeof(gpu_i915_copy12)}, {gpu_i915_fill12, sizeof(gpu_i915_fill12)}, {gpu_i915_tone12, sizeof(gpu_i915_tone12)}, {gpu_i915_glass12, sizeof(gpu_i915_glass12)}, {gpu_i915_cp12, sizeof(gpu_i915_cp12)}, {0, 0}, {gpu_i915_scene12, sizeof(gpu_i915_scene12)}, {gpu_i915_scale12, sizeof(gpu_i915_scale12)},
-        {0, 0}, {0, 0}, {gpu_i915_halve12, sizeof(gpu_i915_halve12)}, {gpu_i915_rise12, sizeof(gpu_i915_rise12)}};
-static const struct gpu_set gpu_i915_gen12_set = {gpu_i915_gen12_kernels, 12, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
+        {0, 0}, {0, 0}, {gpu_i915_halve12, sizeof(gpu_i915_halve12)}, {gpu_i915_rise12, sizeof(gpu_i915_rise12)}, {0, 0}};
+static const struct gpu_set gpu_i915_gen12_set = {gpu_i915_gen12_kernels, 13, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
 static struct { positive job[2]; unsigned int side; } gpu_bins;
@@ -4947,7 +4948,7 @@ static b32 gpu_has(unsigned int op)
 // The halve (op 10): the small picture w by h at dst (dp pixels a row) made from the picture at src (sp a row), each pixel its block of 8 by 8 by the
 // library's rounding. The rise (op 11): the w by h blocks of 8 by 8 at dst made from the small picture at src (the pixel of the block before the first
 // across and up), with the grain of the side. Card addresses on 64-byte lines, pitches multiples of 16 pixels (Intel's rule; amdgpu's kernels, a lane
-// a pixel, read and write any, and their rise is told its pixels, eight a block each way). gpu_run waits, as gpu_blit does.
+// a pixel, read and write any). gpu_run waits, as gpu_blit does.
 static b32 gpu_halve(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h)
 {
         struct gpu_args address_to a;
@@ -4960,17 +4961,32 @@ static b32 gpu_halve(positive src, unsigned int sp, positive dst, unsigned int d
         return gpu_run();
 }
 
-static b32 gpu_rise(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h, unsigned int light)
+// (amdgpu's rise is two jobs, a pixel a lane: op 12 makes level 1 into the picture at level1, lp pixels a row, which the caller gives it, 4 w + 2 by
+// 4 h + 2 pixels and the card's to write, from the small picture, of which it reads one more round than Intel's does: two round the blocks' own are
+// the caller's to have at src; op 11 then makes the ground from level 1. Intel's sets take neither argument.)
+static b32 gpu_rise(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h, unsigned int light, positive level1, unsigned int lp)
 {
         struct gpu_args address_to a;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (!w || !h || !gpu_has(GPU_OP_RISE) || !gpu_idle())
                 return false;
+        if (gpu_backend == &gpu_amd)
+        {
+                if (!gpu_has(GPU_OP_RISE1) || !level1 || lp < 4 * w + 2 || src < 4ull * (sp + 1))
+                        return false;
+                gpu_slot_take(), a = GPU_ARGS;
+                a->s = src - 4ull * (sp + 1), a->d = level1, a->g = 0, a->sp = sp, a->dp = lp, a->gp = 0, a->w = 4 * w + 2, a->op = GPU_OP_RISE1, a->v = 0, a->x0 = a->y0 = 0;
+                a->rows = 4 * h + 2, a->tab = 0;
+                if (!gpu_run() || !gpu_idle())
+                        return false;
+                gpu_slot_take(), a = GPU_ARGS;
+                a->s = level1, a->d = dst, a->g = 0, a->sp = lp, a->dp = dp, a->gp = 0, a->w = 8 * w, a->op = GPU_OP_RISE, a->v = light ? 1u : 0u, a->x0 = a->y0 = 0;
+                a->rows = 8 * h, a->tab = 0;
+                return gpu_run();
+        }
         gpu_slot_take(), a = GPU_ARGS;
         a->s = src, a->d = dst, a->g = 0, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = GPU_OP_RISE, a->v = light ? 1u : 0u, a->x0 = a->y0 = 0, a->rows = h, a->tab = 0;
-        if (gpu_backend == &gpu_amd)
-                a->w = 8 * w, a->rows = 8 * h;
         return gpu_run();
 }
 

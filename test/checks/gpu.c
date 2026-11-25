@@ -1389,7 +1389,9 @@ b32 main(void)
                                 {
                                         took = clock_monotonic_nanoseconds();
                                         gpu_patient = 1;
-                                        done = gpu_rise(GPU_VA + gs_bins_at + (positive)(first - small) * 4, GS_PITCH, GPU_VA + gs_dst_at, GS_PITCH, w, h, (unsigned int)side);
+                                        // (a lane-a-pixel set's rise is two jobs with level 1 between them: four megabytes into the bins' room)
+                                        done = gpu_rise(GPU_VA + gs_bins_at + (positive)(first - small) * 4, GS_PITCH, GPU_VA + gs_dst_at, GS_PITCH, w, h, (unsigned int)side,
+                                                        GPU_VA + gs_bins_at + (4 << 20), GS_PITCH);
                                         gpu_patient = 0;
                                         took = clock_monotonic_nanoseconds() - took, card = took < card ? took : card;
                                         took = clock_monotonic_nanoseconds();

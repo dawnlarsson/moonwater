@@ -1592,7 +1592,7 @@ static struct
 {
         unsigned int *memory;
         unsigned long bytes;
-} compositor_gpu_small_buf, compositor_gpu_rise_buf;
+} compositor_gpu_small_buf, compositor_gpu_rise_buf, compositor_gpu_level1_buf;
 
 // Whether the card makes a glass window's backdrop: it is up and its set has the halve and the rise.
 static int compositor_gpu_glass_passes(void)
@@ -1639,17 +1639,12 @@ static int compositor_gpu_glass_rise(int row, const int *c)
         unsigned long pitch = compositor_glass_pitch(row);
         int gx0 = compositor.x[row] & ~7, gy0 = compositor.y[row] & ~7; // the ground's first pixel: the block of the window's
         int x0 = c[0] & ~7, y0 = c[1] & ~7, x1 = (c[2] + 7) & ~7, y1 = (c[3] + 7) & ~7, w, h;
-        unsigned int cols, sp;
-        positive ground, src;
+        unsigned int cols, sp, lp = 0;
+        positive ground, src, level1 = 0;
         b32 was_hold, ok;
 
         if (c[2] <= c[0] || c[3] <= c[1] || !compositor.tinted[row] || !compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead ||
             compositor_gpu_held() || !gpu_has(GPU_OP_RISE) || !gpu_idle() || compositor_card.on)
-                return 0;
-        // amdgpu's rise is a pixel a lane, each making its own three levels (31 of the byte means): 3.1 ms for a 1920 by 1080 ground on a
-        // Granite Ridge's card where its processor makes it in 0.5 to 0.9, the loop waiting. Its pixels are right (CHECK_gpu_scene), and it is
-        // the processor's here until the rise is two jobs (level 1 first, a quarter of the pixels), which is a fifth of the means.
-        if (gpu_backend == &gpu_amd)
                 return 0;
         if ((x0 - gx0) & 8) // the blocks' first byte on a 64-byte line of the ground: two blocks a line
                 x0 -= 8;
@@ -1658,21 +1653,35 @@ static int compositor_gpu_glass_rise(int row, const int *c)
         if (x0 < gx0 || y0 < gy0 || w <= 0 || h <= 0 || w > 512 || h > 2048 || (unsigned long)(x1 - gx0) > pitch || x0 / 8 - 1 < blocks[0] || y0 / 8 - 1 < blocks[1] ||
             x1 / 8 + 1 > blocks[0] + blocks[2] || y1 / 8 + 1 > blocks[1] + blocks[3])
                 return 0;
-        cols = (unsigned int)(w + 5) / 6, sp = (6 * cols + 2 + 15) & ~15u;
-        if (!compositor_scratch(&compositor_gpu_rise_buf.memory, &compositor_gpu_rise_buf.bytes, 4ul * sp * (unsigned long)(h + 2) + 4096))
+        // The small pixels the card reads, copied to a picture on whole lines: the blocks' own and two round them (Intel's rise reads one round,
+        // amdgpu's first job two), the pixel of the block before the first, across and up, on a line: row 2, column 0, so the round before it
+        // is the end of the row above.
+        cols = (unsigned int)(w + 5) / 6, sp = ((6 * cols + 2 > (unsigned int)w + 4 ? 6 * cols + 2 : (unsigned int)w + 4) + 15) & ~15u;
+        if (x0 / 8 - 2 < blocks[0] || y0 / 8 - 2 < blocks[1] || x1 / 8 + 2 > blocks[0] + blocks[2] || y1 / 8 + 2 > blocks[1] + blocks[3])
                 return 0;
-        for (int by = 0; by < h + 2; by++)
-                memory_copy(compositor_gpu_rise_buf.memory + (unsigned long)by * sp,
-                            compositor.tinted[row] + (long)(y0 / 8 - 1 + by - blocks[1]) * blocks[2] + (x0 / 8 - 1 - blocks[0]), (positive)(w + 2) * 4);
+        if (!compositor_scratch(&compositor_gpu_rise_buf.memory, &compositor_gpu_rise_buf.bytes, 4ul * sp * (unsigned long)(h + 6) + 4096))
+                return 0;
+        for (int by = 0; by < h + 4; by++)
+                memory_copy(compositor_gpu_rise_buf.memory + (unsigned long)(by + 1) * sp - 1,
+                            compositor.tinted[row] + (long)(y0 / 8 - 2 + by - blocks[1]) * blocks[2] + (x0 / 8 - 2 - blocks[0]), (positive)(w + 4) * 4);
         if (!(ground = compositor_gpu_glass_ground_va(row)))
                 return 0;
-        if (!gpu_va_bytes(compositor_gpu_rise_buf.memory, 4ull * sp * (positive)(h + 2)) && !gpu_map(compositor_gpu_rise_buf.memory, compositor_gpu_rise_buf.bytes))
+        if (!gpu_va_bytes(compositor_gpu_rise_buf.memory, 4ull * sp * (positive)(h + 6)) && !gpu_map(compositor_gpu_rise_buf.memory, compositor_gpu_rise_buf.bytes))
                 return 0;
-        if (!(src = gpu_va_bytes(compositor_gpu_rise_buf.memory, 4ull * sp * (positive)(h + 2))))
+        if (!(src = gpu_va_bytes(compositor_gpu_rise_buf.memory, 4ull * sp * (positive)(h + 6))))
                 return 0;
+        if (gpu_backend == &gpu_amd) // (its level 1, between its two jobs: the card's to write)
+        {
+                positive bytes;
+
+                lp = (4u * (unsigned int)w + 2 + 15) & ~15u, bytes = 4ull * lp * (4ull * (positive)h + 2);
+                if (!compositor_scratch(&compositor_gpu_level1_buf.memory, &compositor_gpu_level1_buf.bytes, (unsigned long)bytes + 4096) ||
+                    !(level1 = gpu_host_va_written(compositor_gpu_level1_buf.memory, bytes, compositor_gpu_level1_buf.bytes, 1)))
+                        return 0;
+        }
         was_hold = gpu_handed_hold, gpu_handed_hold = 1;
-        ok = gpu_rise(src, sp, ground + 4ull * ((positive)(y0 - gy0) * pitch + (positive)(x0 - gx0)), (unsigned int)pitch, (unsigned int)w, (unsigned int)h,
-                      compositor.glass_side[row]);
+        ok = gpu_rise(src + 8ull * sp, sp, ground + 4ull * ((positive)(y0 - gy0) * pitch + (positive)(x0 - gx0)), (unsigned int)pitch, (unsigned int)w, (unsigned int)h,
+                      compositor.glass_side[row], level1, lp);
         gpu_handed_hold = was_hold;
         if (!ok)
         {

@@ -2043,13 +2043,135 @@ halve:
 	s_endpgm
 .size halve, .-halve
 
-; op 11: a glass window's ground from its small tinted picture, a pixel a lane: d[y * dp + x] for x below w, the small picture s (sp a row) doubled
-; three times as memory_double_u32 doubles it (a pixel of a level (c + ((c + n + 1) >> 1)) >> 1 a byte of the one over it and its neighbour, down the
-; rows and then across) and the ordered grain 2 * ((x ^ y) & 1) + (y & 1) added (v = 0, dark) or taken away (light), clamped, the alpha left. The
-; pixel's block is x >> 3, y >> 3, and s is the small pixel of the block before the first across and up, so the nine small pixels round the block's
-; own are rows y >> 3 to (y >> 3) + 2 at columns x >> 3 to (x >> 3) + 2 (v10 to v18). Of each level only what the pixel is made of is made: the
-; three by three of level 2 round its own (v30 to v38), the two by two of level 1 (v46 to v49: its own and the neighbour's, across and down), by
-; the bits of x and y: bit 2 says which side of the small pixel, bit 1 of the level 2 one, bit 0 of the level 1 one (the masks s[20:31]).
+; ops 12 and 11: a glass window's ground from its small tinted picture, the small picture doubled three times as memory_double_u32 doubles it (a
+; pixel of a level (c + ((c + n + 1) >> 1)) >> 1 a byte of the one over it and its neighbour, down the rows and then across) and the ordered grain,
+; in two jobs: rise1 makes level 1 (a quarter of the pixels, each thirteen of those means), rise makes each pixel from the four of level 1 round it
+; (three means) and puts the grain in. A lane a pixel, of level 1 or of the ground.
+;
+; rise1 (op 12): d[j * dp + i] is the level 1 pixel i - 1, j - 1 (one round the blocks' own, which rise reads), for i below w. s (sp a row) is the
+; small pixel of the block two before the first, across and up (an address is the base and a lane's offset, which is not negative), so with
+; u = i + 3 the pixel's small one is column (u >> 2) + 1 of s and the three read are u >> 2 on; bit 0 of u >> 1 and bit 0 of u say which neighbours.
+; the nine small pixels: rows uy >> 2 to + 2 of s at columns ux >> 2 to + 2 (v10 to v18)
+.globl rise1
+.p2align 8
+.type rise1,@function
+rise1:
+	s_load_dwordx4	s[8:11], s[4:5], 0x0
+	s_load_dwordx2	s[14:15], s[4:5], 0x18
+	s_load_dword	s16, s[4:5], 0x24
+	v_lshl_or_b32	v1, s6, 6, v0
+	s_waitcnt	lgkmcnt(0)
+	v_cmp_gt_u32	vcc, s16, v1
+	s_and_saveexec_b64 s[0:1], vcc
+	s_cbranch_execz	.rise1_done
+	v_add_nc_u32	v2, 3, v1
+	s_add_u32	s17, s7, 3
+	v_mov_b32	v4, s17
+	v_mov_b32	v9, 0x7f7f7f7f
+	v_and_b32	v5, 2, v2
+	v_cmp_ne_u32_e64 s[20:21], 0, v5
+	v_and_b32	v5, 1, v2
+	v_cmp_ne_u32_e64 s[22:23], 0, v5
+	v_and_b32	v5, 2, v4
+	v_cmp_ne_u32_e64 s[26:27], 0, v5
+	v_and_b32	v5, 1, v4
+	v_cmp_ne_u32_e64 s[28:29], 0, v5
+	s_lshr_b32	s18, s17, 2
+	s_mul_i32	s18, s18, s14
+	v_lshrrev_b32	v3, 2, v2
+	v_add_nc_u32	v3, s18, v3
+	v_lshlrev_b32	v3, 2, v3
+	s_lshl_b32	s19, s14, 2
+	global_load_dword v10, v3, s[8:9]
+	v_add_nc_u32	v6, 4, v3
+	global_load_dword v11, v6, s[8:9]
+	v_add_nc_u32	v6, 4, v6
+	global_load_dword v12, v6, s[8:9]
+	v_add_nc_u32	v3, s19, v3
+	global_load_dword v13, v3, s[8:9]
+	v_add_nc_u32	v6, 4, v3
+	global_load_dword v14, v6, s[8:9]
+	v_add_nc_u32	v6, 4, v6
+	global_load_dword v15, v6, s[8:9]
+	v_add_nc_u32	v3, s19, v3
+	global_load_dword v16, v3, s[8:9]
+	v_add_nc_u32	v6, 4, v3
+	global_load_dword v17, v6, s[8:9]
+	v_add_nc_u32	v6, 4, v6
+	global_load_dword v18, v6, s[8:9]
+	s_waitcnt	vmcnt(0)
+	v_cndmask_b32_e64 v6, v10, v16, s[26:27]
+	avgup	v7, v13, v6
+	avgdn	v20, v13, v7
+	v_cndmask_b32_e64 v5, v13, v16, s[26:27]
+	v_cndmask_b32_e64 v6, v10, v13, s[26:27]
+	v_cndmask_b32_e64 v5, v6, v5, s[28:29]
+	v_cndmask_b32_e64 v6, v16, v13, s[26:27]
+	v_cndmask_b32_e64 v3, v13, v10, s[26:27]
+	v_cndmask_b32_e64 v6, v3, v6, s[28:29]
+	avgup	v7, v5, v6
+	avgdn	v23, v5, v7
+	v_cndmask_b32_e64 v6, v11, v17, s[26:27]
+	avgup	v7, v14, v6
+	avgdn	v21, v14, v7
+	v_cndmask_b32_e64 v5, v14, v17, s[26:27]
+	v_cndmask_b32_e64 v6, v11, v14, s[26:27]
+	v_cndmask_b32_e64 v5, v6, v5, s[28:29]
+	v_cndmask_b32_e64 v6, v17, v14, s[26:27]
+	v_cndmask_b32_e64 v3, v14, v11, s[26:27]
+	v_cndmask_b32_e64 v6, v3, v6, s[28:29]
+	avgup	v7, v5, v6
+	avgdn	v24, v5, v7
+	v_cndmask_b32_e64 v6, v12, v18, s[26:27]
+	avgup	v7, v15, v6
+	avgdn	v22, v15, v7
+	v_cndmask_b32_e64 v5, v15, v18, s[26:27]
+	v_cndmask_b32_e64 v6, v12, v15, s[26:27]
+	v_cndmask_b32_e64 v5, v6, v5, s[28:29]
+	v_cndmask_b32_e64 v6, v18, v15, s[26:27]
+	v_cndmask_b32_e64 v3, v15, v12, s[26:27]
+	v_cndmask_b32_e64 v6, v3, v6, s[28:29]
+	avgup	v7, v5, v6
+	avgdn	v25, v5, v7
+	v_cndmask_b32_e64 v6, v20, v22, s[20:21]
+	avgup	v7, v21, v6
+	avgdn	v30, v21, v7
+	v_cndmask_b32_e64 v5, v21, v22, s[20:21]
+	v_cndmask_b32_e64 v6, v20, v21, s[20:21]
+	v_cndmask_b32_e64 v5, v6, v5, s[22:23]
+	v_cndmask_b32_e64 v6, v22, v21, s[20:21]
+	v_cndmask_b32_e64 v3, v21, v20, s[20:21]
+	v_cndmask_b32_e64 v6, v3, v6, s[22:23]
+	avgup	v7, v5, v6
+	avgdn	v31, v5, v7
+	v_cndmask_b32_e64 v6, v23, v25, s[20:21]
+	avgup	v7, v24, v6
+	avgdn	v32, v24, v7
+	v_cndmask_b32_e64 v5, v24, v25, s[20:21]
+	v_cndmask_b32_e64 v6, v23, v24, s[20:21]
+	v_cndmask_b32_e64 v5, v6, v5, s[22:23]
+	v_cndmask_b32_e64 v6, v25, v24, s[20:21]
+	v_cndmask_b32_e64 v3, v24, v23, s[20:21]
+	v_cndmask_b32_e64 v6, v3, v6, s[22:23]
+	avgup	v7, v5, v6
+	avgdn	v33, v5, v7
+	avgup	v7, v30, v32
+	avgdn	v34, v30, v7
+	avgup	v7, v31, v33
+	avgdn	v35, v31, v7
+	avgup	v7, v34, v35
+	avgdn	v36, v34, v7
+	s_mul_i32	s20, s7, s15
+	v_add_nc_u32	v6, s20, v1
+	v_lshlrev_b32	v6, 2, v6
+	global_store_dword v6, v36, s[10:11]
+.rise1_done:
+	s_endpgm
+.size rise1, .-rise1
+
+; rise (op 11): d[y * dp + x] for x below w from level 1 at s (sp a row; its pixel i, j the level 1 pixel i - 1, j - 1, as rise1 wrote it): the pixel's
+; own level 1 pixel is (x >> 1) + 1, (y >> 1) + 1 and its neighbour the one after (bit 0 set) or before; then the grain, 2 * ((x ^ y) & 1) + (y & 1)
+; added to the blue, green and red bytes and no more than 255 (v = 0, dark), or taken away and no less than 0 (light); the alpha left.
 .globl rise
 .p2align 8
 .type rise,@function
@@ -2063,161 +2185,41 @@ rise:
 	v_cmp_gt_u32	vcc, s16, v1
 	s_and_saveexec_b64 s[0:1], vcc
 	s_cbranch_execz	.rise_done
-	s_lshr_b32	s18, s7, 3
-	s_mul_i32	s18, s18, s14
-	v_lshrrev_b32	v2, 3, v1
-	v_add_nc_u32	v2, s18, v2
-	v_lshlrev_b32	v2, 2, v2
-	s_lshl_b32	s19, s14, 2
-	global_load_dword v10, v2, s[8:9]
-	v_add_nc_u32	v4, 4, v2
-	global_load_dword v11, v4, s[8:9]
-	v_add_nc_u32	v4, 4, v4
-	global_load_dword v12, v4, s[8:9]
-	v_add_nc_u32	v3, s19, v2
-	global_load_dword v13, v3, s[8:9]
-	v_add_nc_u32	v4, 4, v3
-	global_load_dword v14, v4, s[8:9]
-	v_add_nc_u32	v4, 4, v4
-	global_load_dword v15, v4, s[8:9]
-	v_add_nc_u32	v3, s19, v3
-	global_load_dword v16, v3, s[8:9]
-	v_add_nc_u32	v4, 4, v3
-	global_load_dword v17, v4, s[8:9]
-	v_add_nc_u32	v4, 4, v4
-	global_load_dword v18, v4, s[8:9]
 	v_mov_b32	v9, 0x7f7f7f7f
 	v_mov_b32	v4, s7
-	v_and_b32	v5, 4, v1
-	v_cmp_ne_u32_e64 s[20:21], 0, v5
-	v_and_b32	v5, 2, v1
-	v_cmp_ne_u32_e64 s[22:23], 0, v5
-	v_lshrrev_b32	v5, 1, v1
-	v_xor_b32	v5, v1, v5
-	v_and_b32	v5, 1, v5
-	v_cmp_eq_u32_e64 s[24:25], 0, v5
-	v_and_b32	v5, 4, v4
-	v_cmp_ne_u32_e64 s[26:27], 0, v5
-	v_and_b32	v5, 2, v4
-	v_cmp_ne_u32_e64 s[28:29], 0, v5
-	v_lshrrev_b32	v5, 1, v4
-	v_xor_b32	v5, v4, v5
-	v_and_b32	v5, 1, v5
-	v_cmp_eq_u32_e64 s[30:31], 0, v5
+; the columns: the own (v2) and the neighbour's (v3), in bytes; the rows the same in s18 and s21
+	v_lshrrev_b32	v2, 1, v1
+	v_add_nc_u32	v2, 1, v2
+	v_and_b32	v5, 1, v1
+	v_lshlrev_b32	v5, 1, v5
+	v_add_nc_u32	v3, v2, v5
+	v_subrev_nc_u32	v3, 1, v3
+	v_lshlrev_b32	v2, 2, v2
+	v_lshlrev_b32	v3, 2, v3
+	s_lshr_b32	s18, s7, 1
+	s_add_u32	s18, s18, 1
+	s_and_b32	s21, s7, 1
+	s_lshl_b32	s21, s21, 1
+	s_add_u32	s21, s18, s21
+	s_sub_u32	s21, s21, 1
+	s_lshl_b32	s19, s14, 2
+	s_mul_i32	s18, s18, s19
+	s_mul_i32	s21, s21, s19
+	v_add_nc_u32	v6, s18, v2
+	global_load_dword v10, v6, s[8:9]
+	v_add_nc_u32	v6, s21, v2
+	global_load_dword v11, v6, s[8:9]
+	v_add_nc_u32	v6, s18, v3
+	global_load_dword v12, v6, s[8:9]
+	v_add_nc_u32	v6, s21, v3
+	global_load_dword v13, v6, s[8:9]
 	s_waitcnt	vmcnt(0)
-	v_cndmask_b32_e64 v5, v10, v13, s[26:27]
-	v_cndmask_b32_e64 v6, v13, v10, s[26:27]
-	avgup	v7, v5, v6
-	avgdn	v20, v5, v7
-	v_cndmask_b32_e64 v6, v10, v16, s[26:27]
-	avgup	v7, v13, v6
-	avgdn	v23, v13, v7
-	v_cndmask_b32_e64 v5, v13, v16, s[26:27]
-	v_cndmask_b32_e64 v6, v16, v13, s[26:27]
-	avgup	v7, v5, v6
-	avgdn	v26, v5, v7
-	v_cndmask_b32_e64 v5, v11, v14, s[26:27]
-	v_cndmask_b32_e64 v6, v14, v11, s[26:27]
-	avgup	v7, v5, v6
-	avgdn	v21, v5, v7
-	v_cndmask_b32_e64 v6, v11, v17, s[26:27]
-	avgup	v7, v14, v6
-	avgdn	v24, v14, v7
-	v_cndmask_b32_e64 v5, v14, v17, s[26:27]
-	v_cndmask_b32_e64 v6, v17, v14, s[26:27]
-	avgup	v7, v5, v6
-	avgdn	v27, v5, v7
-	v_cndmask_b32_e64 v5, v12, v15, s[26:27]
-	v_cndmask_b32_e64 v6, v15, v12, s[26:27]
-	avgup	v7, v5, v6
-	avgdn	v22, v5, v7
-	v_cndmask_b32_e64 v6, v12, v18, s[26:27]
-	avgup	v7, v15, v6
-	avgdn	v25, v15, v7
-	v_cndmask_b32_e64 v5, v15, v18, s[26:27]
-	v_cndmask_b32_e64 v6, v18, v15, s[26:27]
-	avgup	v7, v5, v6
-	avgdn	v28, v5, v7
-	v_cndmask_b32_e64 v5, v20, v21, s[20:21]
-	v_cndmask_b32_e64 v6, v21, v20, s[20:21]
-	avgup	v7, v5, v6
-	avgdn	v30, v5, v7
-	v_cndmask_b32_e64 v6, v20, v22, s[20:21]
-	avgup	v7, v21, v6
-	avgdn	v31, v21, v7
-	v_cndmask_b32_e64 v5, v21, v22, s[20:21]
-	v_cndmask_b32_e64 v6, v22, v21, s[20:21]
-	avgup	v7, v5, v6
-	avgdn	v32, v5, v7
-	v_cndmask_b32_e64 v5, v23, v24, s[20:21]
-	v_cndmask_b32_e64 v6, v24, v23, s[20:21]
-	avgup	v7, v5, v6
-	avgdn	v33, v5, v7
-	v_cndmask_b32_e64 v6, v23, v25, s[20:21]
-	avgup	v7, v24, v6
-	avgdn	v34, v24, v7
-	v_cndmask_b32_e64 v5, v24, v25, s[20:21]
-	v_cndmask_b32_e64 v6, v25, v24, s[20:21]
-	avgup	v7, v5, v6
-	avgdn	v35, v5, v7
-	v_cndmask_b32_e64 v5, v26, v27, s[20:21]
-	v_cndmask_b32_e64 v6, v27, v26, s[20:21]
-	avgup	v7, v5, v6
-	avgdn	v36, v5, v7
-	v_cndmask_b32_e64 v6, v26, v28, s[20:21]
-	avgup	v7, v27, v6
-	avgdn	v37, v27, v7
-	v_cndmask_b32_e64 v5, v27, v28, s[20:21]
-	v_cndmask_b32_e64 v6, v28, v27, s[20:21]
-	avgup	v7, v5, v6
-	avgdn	v38, v5, v7
-	v_cndmask_b32_e64 v5, v30, v36, s[28:29]
-	v_cndmask_b32_e64 v6, v36, v30, s[28:29]
-	avgup	v7, v33, v5
-	avgdn	v40, v33, v7
-	v_cndmask_b32_e64 v6, v6, v33, s[30:31]
-	v_cndmask_b32_e64 v5, v33, v5, s[30:31]
-	avgup	v7, v5, v6
-	avgdn	v43, v5, v7
-	v_cndmask_b32_e64 v5, v31, v37, s[28:29]
-	v_cndmask_b32_e64 v6, v37, v31, s[28:29]
-	avgup	v7, v34, v5
-	avgdn	v41, v34, v7
-	v_cndmask_b32_e64 v6, v6, v34, s[30:31]
-	v_cndmask_b32_e64 v5, v34, v5, s[30:31]
-	avgup	v7, v5, v6
-	avgdn	v44, v5, v7
-	v_cndmask_b32_e64 v5, v32, v38, s[28:29]
-	v_cndmask_b32_e64 v6, v38, v32, s[28:29]
-	avgup	v7, v35, v5
-	avgdn	v42, v35, v7
-	v_cndmask_b32_e64 v6, v6, v35, s[30:31]
-	v_cndmask_b32_e64 v5, v35, v5, s[30:31]
-	avgup	v7, v5, v6
-	avgdn	v45, v5, v7
-	v_cndmask_b32_e64 v5, v40, v42, s[22:23]
-	v_cndmask_b32_e64 v6, v42, v40, s[22:23]
-	avgup	v7, v41, v5
-	avgdn	v46, v41, v7
-	v_cndmask_b32_e64 v6, v6, v41, s[24:25]
-	v_cndmask_b32_e64 v5, v41, v5, s[24:25]
-	avgup	v7, v5, v6
-	avgdn	v47, v5, v7
-	v_cndmask_b32_e64 v5, v43, v45, s[22:23]
-	v_cndmask_b32_e64 v6, v45, v43, s[22:23]
-	avgup	v7, v44, v5
-	avgdn	v48, v44, v7
-	v_cndmask_b32_e64 v6, v6, v44, s[24:25]
-	v_cndmask_b32_e64 v5, v44, v5, s[24:25]
-	avgup	v7, v5, v6
-	avgdn	v49, v5, v7
-	avgup	v7, v46, v48
-	avgdn	v50, v46, v7
-	avgup	v7, v47, v49
-	avgdn	v51, v47, v7
-	avgup	v7, v50, v51
-	avgdn	v52, v50, v7
-; the grain: its level in v5, each of the blue, green and red bytes plus it and no more than 255 (dark), or less it and no less than 0 (light)
+	avgup	v7, v10, v11
+	avgdn	v14, v10, v7
+	avgup	v7, v12, v13
+	avgdn	v15, v12, v7
+	avgup	v7, v14, v15
+	avgdn	v52, v14, v7
 	v_xor_b32	v5, v1, v4
 	v_and_b32	v5, 1, v5
 	v_and_b32	v6, 1, v4
@@ -2282,3 +2284,4 @@ kernel image, 16, 40
 kernel nv12, 16, 40
 kernel halve, 44, 24
 kernel rise, 60, 32
+kernel rise1, 40, 32
