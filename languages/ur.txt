@@ -37,6 +37,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
+# machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 @language ur
 @name اردو
 @translated machine
@@ -490,8 +491,18 @@ settings_role_other	ff95	دیگر
 settings_role_swap	d36e	سویپ
 settings_role_unpartitioned	3c10	پارٹیشن ٹیبل نہیں
 settings_router	fd76	مکس راؤٹر
-settings_router_hint	6509	آواز وہاں بھیجنے کے لیے ایک کے دائیں سے دوسرے کے بائیں تک گھسیٹیں؛ سطح کے لیے نوب گھمائیں، اور کسی آؤٹ پٹ پر چلانے کے لیے اسے دو بار دبائیں
+settings_router_add	badd	کمبائنر شامل کریں
+settings_router_away	7976	دور: ابھی کوئی ربط نہیں
+settings_router_combiner	2833	کمبائنر، مائیکروفون بھی
+settings_router_denied	ccf1	%s پر اجازت نہیں
+settings_router_hint	6509	ایک کے دائیں سے دوسرے کے بائیں تک کھینچیں؛ نوب سطح ہے؛ آؤٹ پٹ پر دو بار دبائیں تو وہاں چلے
+settings_router_keys	e8ec	تیر چنیں، Enter جوڑیں، Tab تار، Delete الگ، Page Up اور Down گھمائیں، F2 نام
 settings_router_main	7928	مین
+settings_router_microphone	1969	مائیکروفون
+settings_router_new	1db9	کمبائنر %d
+settings_router_remote	d9c2	%s Waterlink کے ذریعے
+settings_router_remove	901d	ہٹائیں
+settings_router_rename	31f3	نام بدلیں
 settings_run_any	3ffd	کوئی بھی moonwater کمانڈ چلائیں
 settings_running	d0e2	%s چل رہا ہے (Escape اسے روکتا ہے)
 settings_saved	9f44	محفوظ شدہ

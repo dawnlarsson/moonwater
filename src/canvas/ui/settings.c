@@ -4502,8 +4502,13 @@ static b32 settings_map_key(const struct window_event address_to event)
 
 static const struct ui_page_keys settings_page_keys = {settings_steps, settings_activate, settings_said_of, settings_group_choose, settings_forget};
 
+static b32 settings_router_keyed(const struct window_event address_to event);
+static b32 settings_router_enter(void);
 static b32 settings_key(const struct window_event address_to event)
 {
+        int focus = settings.list.focus;
+        if (settings_router_keyed(event))
+                return true;
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return ui_graph_key(&settings.ui, &settings.map.graph, event), true;
         if (settings.page.menu_row >= 0 || (settings.popup.open && ((settings.popup.list && !settings.popup.field) || settings.ways)))
@@ -4574,6 +4579,9 @@ static b32 settings_key(const struct window_event address_to event)
         if (settings.page.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) && settings_map_count())
                 return settings.map.keys = true, ui_page_redraw(&settings.page), true;
         ui_page_key(&settings.ui, &settings.page, &settings.list, (int)event->a, &settings_page_keys);
+        // Down past the page's last row: the keys go to the mix router under it (its graph, ui.c's wiring keys).
+        if (event->a == UI_KEY_DOWN && settings.page.pane && settings.list.focus == focus)
+                settings_router_enter();
         return true;
 }
 
@@ -5045,58 +5053,61 @@ static fn settings_field_menu(void)
 }
 
 /*
-        The mix router, at the foot of the Sound page: what plays and where it goes, as nodes wired on the kit's graph (the display map's).
-        Every program that has a sound is a node wired into Main, its knob its volume and its wire taken off its mute; Main is wired to the
-        output that plays, its knob the master volume, and to every output that mirrors it and the loopback microphone, each knob that
-        one's own level (a wire from Main in the sound graph's file, /root/audio.graph). A wire drawn from Main to another output mirrors it there,
-        and taken off lets it go; the output that plays, taken off, gives its place to the first mirror (or to Automatic where the person
-        had chosen it); a second press on an output makes it the one that plays. The server's page (src/audio/state.c) is read four times a
-        second while the page is up, and what the router does goes to the server as the mixer's does: its socket, and the files it reads.
-        Where the person put a node is kept for the session by what the node is.
+        The mix router, at the foot of the Sound page: the sound server's graph (src/audio/graph.c) as nodes wired on the kit's graph (the
+        display map's). Every node the server has is one: each program with a sound, each microphone, Main and the person's combiners, each
+        output and the loopback microphone, and each device of another machine over Waterlink, which says the machine and that it comes over
+        Waterlink (or that it is not allowed there, and the line that allows it) and is ringed in the information accent. Any out is wired to
+        any in by the hand or the keys (ui.c's ui_graph_wire_key: arrows, Enter, Tab, Delete, Page Up and Down, F2), each wire's knob its
+        level (the master volume on Main's wire to the output that plays); a wire that would close a loop of combiners is not drawn. Add
+        combiner makes one, offered to programs as a microphone too; a second press on a combiner's name (or Rename, or F2) names it in place,
+        and Remove lets it go with its wires; a second press on an output makes it the one that plays. The server's page (src/audio/state.c,
+        version 5) is read four times a second while the page is up; what the router does goes to the server's file of the wiring
+        (control.c's ctl_graph_*), and the master volume over its socket. Where the person put a node is kept for the session by what it is.
 */
 #define SETTINGS_ROUTER_WHOLE 65536ul // a volume of 100%, PulseAudio's
-#define SETTINGS_ROUTER_NODES (AUDIO_STATE_STREAMS + AUDIO_STATE_DEVICES + 1)
 #define SETTINGS_ROUTER_POLL_NS 250000000ll
 #define SETTINGS_ROUTER_AGAIN_NS 400000000ll // a second press on an output this soon makes it the one that plays
 #define SETTINGS_ROUTER_HOLD_NS 1500000000ll  // what the hand did is shown this long while the page catches up
-#define SETTINGS_ROUTER_WRITE_NS 100000000ll  // a mirror's level turned is written at most this often, and when its knob is let go
+#define SETTINGS_ROUTER_WRITE_NS 100000000ll  // a knob turned is written at most this often, and when it is let go
 #define SETTINGS_ROUTER_REMAP_NS 2000000000ll // a page that has not moved for this long is a server that went: its new page is looked for
 #define SETTINGS_ROUTER_PANEL 220
 #define SETTINGS_ROUTER_TALL 420
 #define SETTINGS_ROUTER_SOCKET "/run/moonwater/pulse/native"
-#define SETTINGS_ROUTE_MAIN 1
-#define SETTINGS_ROUTE_PROGRAM 2
-#define SETTINGS_ROUTE_OUTPUT 3
+#define SETTINGS_ROUTER_HOLDS 8
 
 static struct settings_router
 {
         struct ui_graph graph;
-        struct ui_graph_node node[SETTINGS_ROUTER_NODES];
-        struct ui_graph_edge edge[SETTINGS_ROUTER_NODES];
-        unsigned char kind[SETTINGS_ROUTER_NODES]; // SETTINGS_ROUTE_*
-        int what[SETTINGS_ROUTER_NODES];           // an output's place in the page's list
-        unsigned long id[SETTINGS_ROUTER_NODES];   // what the node is, for where it was put
-        char label[SETTINGS_ROUTER_NODES][48];
-        int member_of[AUDIO_STATE_STREAMS];        // each stream's program node, -1 none
-        struct { unsigned long id; int x, y; } place[SETTINGS_ROUTER_NODES * 2];
-        int places, pressed;
+        // A kit node and a page row for each of the server's nodes, a kit edge for each of its wires: as many as there are (grown).
+        struct ui_graph_node address_to node;
+        struct ui_graph_edge address_to edge;
+        struct audio_state_node address_to rows;
+        struct audio_state_edge address_to wires;
+        unsigned long address_to id;          // what a node is (its kind and name), for where it was put and what the hand did
+        char (address_to lines)[2][128];      // a node's two lines under its label
+        long node_room, edge_room, row_room, wire_room, id_room, lines_room;
+        unsigned int address_to ends;         // the check of a loop's: the combiners' wires (from, to a pair) and a mark a node
+        unsigned char address_to marks;
+        long ends_room, marks_room;
+        struct { unsigned long id; int x, y; } address_to place;
+        long places, place_room;
+        int pressed;
         b64 pressed_at;
-        // What the hand did that the page does not say yet (the server reads a file within half a second, and writes its page after): a wire
-        // drawn (1) or taken off (0), its knob at level (-1 the page's), between two nodes by what they are, until a moment has passed.
-        struct settings_route_hold { unsigned long from, to; int level; signed char wired; b64 until; } hold[8];
-        int level_of[SETTINGS_ROUTER_NODES];       // a node's level as the page says it (a program's volume, an output's level), for a wire drawn back
-        // A mirror's level turned and not yet written (a knob's drag is many turns: the file is written at most every SETTINGS_ROUTER_WRITE_NS).
-        char pending_name[64];
-        int pending_level;
+        // What the hand did that the page does not say yet (the server reads the file at once, and writes its page after): a wire drawn
+        // (1) or taken off (0), its knob at level (-1 the page's), between two nodes by what they are, until a moment has passed.
+        struct settings_route_hold { unsigned long from, to; int level; signed char wired; b64 until; } hold[SETTINGS_ROUTER_HOLDS];
+        // A knob turned and not yet written (a drag is many turns: the file is written at most every SETTINGS_ROUTER_WRITE_NS).
+        char pending_from[AUDIO_GRAPH_KEY], pending_to[AUDIO_GRAPH_KEY];
+        int pending_level, pending_mute, pending_default;
         b64 written_at, seen_at;
         struct audio_state copy;
         const volatile struct audio_state address_to page;
-        b32 have, connected;
+        long mapped;
+        b32 have, connected, keys;
         b64 polled;
-        unsigned int seq;
         struct ctl ctl;
         struct ui_rect panel;
-        struct ui_control fit;
+        struct ui_control fit, add, rename, remove;
 } address_to settings_route;
 
 static b32 settings_router_on(void)
@@ -5118,103 +5129,126 @@ static b32 settings_router_ready(void)
         return settings_route != null;
 }
 
+// A table of the router's made room for want rows of size bytes (doubling, in pages), what it held kept: false when there was no memory.
+static b32 settings_router_fit(void address_to address_to table, long address_to room, long want, long size)
+{
+        long next = *room ? *room : 16;
+        void address_to made;
+        if (want <= *room)
+                return true;
+        while (next < want)
+                next *= 2;
+        if (!(made = settings_alloc_pages((positive)(next * size))))
+                return false;
+        if (*table)
+        {
+                memory_copy(made, *table, (positive)(*room * size));
+                compositor_call(syscall(munmap), (positive)*table, (positive)(((positive)(*room * size) + 4095) & ~(positive)4095), 0, 0, 0, 0);
+        }
+        *table = made, *room = next;
+        return true;
+}
+
 static int settings_router_percent(unsigned int volume)
 {
         unsigned long percent = ((unsigned long)volume * 100 + SETTINGS_ROUTER_WHOLE / 2) / SETTINGS_ROUTER_WHOLE;
-        return percent > 100 ? 100 : (int)percent;
+        return percent > 200 ? 200 : (int)percent;
 }
 
-// A node: its kind, its words, its ports, its size, and where it was put (else where it is laid out first).
-static int settings_router_node(int kind, unsigned long id, const char address_to label, int x, int y, b32 address_to fresh)
+// A page row's key, as the graph's file names it (graph.c's audio_node_key).
+static fn settings_router_key(long k, char address_to key, positive room)
 {
-        struct settings_router address_to r = settings_route;
-        int n = r->graph.nodes;
-        struct ui_graph_node address_to node = &r->node[n];
-        if (n >= SETTINGS_ROUTER_NODES)
-                return -1;
-        memory_zero(node, sizeof(*node));
-        r->kind[n] = (unsigned char)kind, r->id[n] = id, r->what[n] = -1;
-        string_copy_bounded((string_address)r->label[n], (string_address)label, sizeof(r->label[n]));
-        node->label = r->label[n];
-        node->ins = kind != SETTINGS_ROUTE_PROGRAM, node->outs = kind != SETTINGS_ROUTE_OUTPUT;
-        node->w = kind == SETTINGS_ROUTE_MAIN ? 140 : 200, node->h = 56, node->x = x, node->y = y;
-        for (int k = 0; k < r->places; k++)
-                if (r->place[k].id == id)
-                        return node->x = r->place[k].x, node->y = r->place[k].y, r->graph.nodes = n + 1, n;
-        *fresh = true;
-        r->graph.nodes = n + 1;
-        return n;
+        audio_node_key(key, (long)room, (int)settings_route->rows[k].kind, settings_route->rows[k].name);
 }
 
-static fn settings_router_wire(int from, int to, int level, b32 quiet)
+static unsigned long settings_router_id_of(unsigned int kind, const char address_to name)
+{
+        return (unsigned long)kind << 56 ^ hash_fnv1a(2166136261u, name, string_length((string_address)name));
+}
+
+// The words of a node: its label, and its lines (the machine it is of and that it comes over Waterlink, or that it is not allowed there
+// and the line that allows it; what an output does; that a combiner is a microphone too).
+static fn settings_router_words(long k)
 {
         struct settings_router address_to r = settings_route;
-        struct ui_graph_edge address_to e = &r->edge[r->graph.edges];
-        if (from < 0 || to < 0 || r->graph.edges >= SETTINGS_ROUTER_NODES)
+        const struct audio_state_node address_to row = &r->rows[k];
+        struct ui_graph_node address_to node = &r->node[k];
+        unsigned int f = row->flags;
+        b32 is_main = row->kind == AUDIO_NODE_COMBINER && string_equals((string_address)row->name, (string_address)AUDIO_GRAPH_MAIN);
+        node->label = is_main ? WORDS(settings_router_main)
+                      : row->kind == AUDIO_NODE_LOOPBACK ? WORDS(mixer_loopback)
+                      : row->description[0] ? row->description : row->name;
+        node->line[0] = node->line[1] = null;
+        r->lines[k][0][0] = r->lines[k][1][0] = 0;
+        if (row->kind == AUDIO_NODE_REMOTE_SOURCE || row->kind == AUDIO_NODE_REMOTE_OUTPUT)
+        {
+                language_format(r->lines[k][0], sizeof(r->lines[k][0]), f & AUDIO_NODE_DENIED ? WORDS(settings_router_denied) : WORDS(settings_router_remote), row->machine);
+                node->line[0] = r->lines[k][0];
+                if ((f & AUDIO_NODE_DENIED) && row->allow[0])
+                        string_copy_bounded((string_address)r->lines[k][1], (string_address)row->allow, sizeof(r->lines[k][1])), node->line[1] = r->lines[k][1];
+                else if (f & AUDIO_NODE_AWAY)
+                        node->line[1] = WORDS(settings_router_away);
                 return;
-        *e = (struct ui_graph_edge){(unsigned short)from, (unsigned short)to, 0, 0, 1, 1, (unsigned char)quiet, (unsigned short)level};
-        r->graph.edges++;
+        }
+        if (row->kind == AUDIO_NODE_OUTPUT)
+                node->line[0] = (f & AUDIO_NODE_CLOCK) && (f & AUDIO_NODE_PLAYING) ? WORDS(mixer_state_playing) : f & AUDIO_NODE_PLAYING ? WORDS(mixer_state_mirrored)
+                                : f & AUDIO_NODE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
+        else if (row->kind == AUDIO_NODE_CAPTURE)
+                node->line[0] = WORDS(settings_router_microphone);
+        else if (row->kind == AUDIO_NODE_COMBINER && !is_main)
+                node->line[0] = WORDS(settings_router_combiner);
 }
 
-// The graph from the page copied: Main, the programs (the streams of one program, by its name and its user, are one), the outputs.
+// The graph from the page's rows: a kit node for each (put where the person left it, else in the column of its side: sources, combiners,
+// sinks), a kit edge for each wire (its knob the wire's level), and what the hand did that the page does not say yet over it.
 static fn settings_router_list(void)
 {
         struct settings_router address_to r = settings_route;
-        const struct audio_state address_to page = &r->copy;
         struct ui_graph address_to g = &r->graph;
-        int main, programs = 0, outputs = 0, playing[SETTINGS_ROUTER_NODES] = {0}, level[SETTINGS_ROUTER_NODES] = {0}, muted[SETTINGS_ROUTER_NODES];
+        long nodes = r->copy.graph_nodes, edges = r->copy.graph_edges, column[3] = {0, 0, 0};
         b32 fresh = false;
+        if (!settings_router_fit((void address_to address_to)&r->node, &r->node_room, nodes + 1, sizeof(r->node[0])) ||
+            !settings_router_fit((void address_to address_to)&r->id, &r->id_room, nodes + 1, sizeof(r->id[0])) ||
+            !settings_router_fit((void address_to address_to)&r->lines, &r->lines_room, nodes + 1, sizeof(r->lines[0])) ||
+            !settings_router_fit((void address_to address_to)&r->edge, &r->edge_room, edges + SETTINGS_ROUTER_HOLDS + 1, sizeof(r->edge[0])))
+                return;
         g->nodes = g->edges = 0;
-        main = settings_router_node(SETTINGS_ROUTE_MAIN, 1, WORDS(settings_router_main), 280, 0, &fresh);
-        for (int slot = 0; slot < AUDIO_STATE_STREAMS; slot++)
+        for (long k = 0; k < nodes; k++)
         {
-                const struct audio_state_stream address_to s = &page->stream[slot];
-                const char address_to name = s->app[0] ? s->app : s->media[0] ? s->media : "?";
-                unsigned long id = s->app[0] ? (unsigned long)s->uid << 32 | hash_fnv1a(2166136261u, s->app, string_length(s->app)) : 0x100000000ul + s->client;
-                int k = -1;
-                r->member_of[slot] = -1;
-                if (s->index == 0xffffffffu)
-                        continue;
-                for (int j = 0; j < g->nodes && k < 0; j++)
-                        if (r->kind[j] == SETTINGS_ROUTE_PROGRAM && r->id[j] == (id | 0x2000000000000000ul))
-                                k = j;
-                if (k < 0 && (k = settings_router_node(SETTINGS_ROUTE_PROGRAM, id | 0x2000000000000000ul, name, 0, programs * 80, &fresh)) >= 0)
-                        programs++, muted[k] = 1;
-                if (k < 0)
-                        continue;
-                r->member_of[slot] = k;
-                level[k] = settings_router_percent(s->volume) > level[k] ? settings_router_percent(s->volume) : level[k];
-                muted[k] = muted[k] && (s->flags & AUDIO_STATE_MUTED);
-                playing[k] |= (s->flags & AUDIO_STATE_PLAYING) && !(s->flags & AUDIO_STATE_CORKED);
+                const struct audio_state_node address_to row = &r->rows[k];
+                struct ui_graph_node address_to node = &r->node[k];
+                int side = audio_node_ins((int)row->kind) && audio_node_outs((int)row->kind) ? 1 : audio_node_outs((int)row->kind) ? 0 : 2;
+                b32 placed = false;
+                memory_zero(node, sizeof(*node));
+                r->id[k] = settings_router_id_of(row->kind == AUDIO_NODE_REMOTE_OUTPUT ? AUDIO_NODE_REMOTE_SOURCE : row->kind, row->name);
+                node->ins = audio_node_ins((int)row->kind) ? 1 : 0, node->outs = audio_node_outs((int)row->kind) ? 1 : 0;
+                node->w = side == 1 ? 160 : 200, node->h = 56;
+                node->flags = (row->flags & AUDIO_NODE_CLOCK ? UI_GRAPH_MARKED : 0) |
+                              (row->kind == AUDIO_NODE_REMOTE_SOURCE || row->kind == AUDIO_NODE_REMOTE_OUTPUT ? UI_GRAPH_FAR : 0) |
+                              (row->flags & (AUDIO_NODE_DENIED | AUDIO_NODE_AWAY) ? UI_GRAPH_DIM : 0) |
+                              (row->kind == AUDIO_NODE_COMBINER && !string_equals((string_address)row->name, (string_address)AUDIO_GRAPH_MAIN) ? UI_GRAPH_NAMABLE : 0);
+                settings_router_words(k);
+                for (long at = 0; at < r->places && !placed; at++)
+                        if (r->place[at].id == r->id[k])
+                                node->x = r->place[at].x, node->y = r->place[at].y, placed = true;
+                if (!placed)
+                        node->x = side * 300, node->y = (int)column[side] * 80, fresh = true;
+                column[side]++;
         }
-        for (int k = 0; k < g->nodes; k++)
-                if (r->kind[k] == SETTINGS_ROUTE_PROGRAM)
-                {
-                        r->level_of[k] = level[k];
-                        if (!muted[k])
-                                settings_router_wire(k, main, level[k], !playing[k]);
-                }
-        for (unsigned int d = 0; d < page->devices && d < AUDIO_STATE_DEVICES; d++)
+        g->nodes = (int)nodes;
+        // Main sits in the middle of its column's height where nobody moved it.
+        for (long k = 0; k < nodes; k++)
+                if (r->rows[k].kind == AUDIO_NODE_COMBINER && string_equals((string_address)r->rows[k].name, (string_address)AUDIO_GRAPH_MAIN) && r->node[k].y == 0 &&
+                    r->node[k].x == 300 && column[1] == 1)
+                        r->node[k].y = (int)((column[0] > column[2] ? column[0] : column[2]) - 1) * 40;
+        for (long e = 0; e < edges; e++)
         {
-                const struct audio_state_device address_to device = &page->device_list[d];
-                unsigned int f = device->flags;
-                const char address_to label = f & AUDIO_STATE_DEVICE_VIRTUAL ? WORDS(mixer_loopback) : device->description[0] ? device->description : device->name;
-                int k = settings_router_node(SETTINGS_ROUTE_OUTPUT, hash_fnv1a(2166136261u, device->name, string_length(device->name)) | 0x3000000000000000ul, label, 560,
-                                             outputs * 80, &fresh);
-                if (k < 0)
-                        break;
-                outputs++, r->what[k] = (int)d;
-                r->level_of[k] = f & AUDIO_STATE_DEVICE_ACTIVE ? settings_router_percent(page->volume) : f & AUDIO_STATE_DEVICE_MIRROR ? (int)device->level : 100;
-                r->node[k].line[0] = f & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : f & AUDIO_STATE_DEVICE_MIRRORING ? WORDS(mixer_state_mirrored)
-                                     : f & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
-                r->node[k].flags = f & AUDIO_STATE_DEVICE_ACTIVE ? UI_GRAPH_MARKED : 0;
-                if (f & AUDIO_STATE_DEVICE_ACTIVE)
-                        settings_router_wire(main, k, settings_router_percent(page->volume), page->muted != 0);
-                else if (f & AUDIO_STATE_DEVICE_MIRROR)
-                        settings_router_wire(main, k, (int)(device->level > 100 ? 100 : device->level), !(f & AUDIO_STATE_DEVICE_MIRRORING));
+                const struct audio_state_edge address_to wire = &r->wires[e];
+                r->edge[g->edges++] = (struct ui_graph_edge){(unsigned short)wire->from, (unsigned short)wire->to, 0, 0, 1, 1,
+                                                             (unsigned char)(!(wire->flags & AUDIO_EDGE_LIVE) || (wire->flags & AUDIO_EDGE_MUTED)), (unsigned short)wire->level};
         }
         // What the hand did and the page does not say yet, shown as the hand left it.
-        for (int h = 0; h < (int)(sizeof(r->hold) / sizeof(r->hold[0])); h++)
+        for (int h = 0; h < SETTINGS_ROUTER_HOLDS; h++)
         {
                 struct settings_route_hold address_to hold = &r->hold[h];
                 int from = -1, to = -1, e;
@@ -5232,21 +5266,22 @@ static fn settings_router_list(void)
                 if (!hold->wired && e < g->edges)
                         r->edge[e] = r->edge[--g->edges];
                 else if (hold->wired && e == g->edges)
-                        settings_router_wire(from, to, hold->level >= 0 ? hold->level : r->level_of[r->kind[from] == SETTINGS_ROUTE_PROGRAM ? from : to], false);
+                        r->edge[g->edges++] = (struct ui_graph_edge){(unsigned short)from, (unsigned short)to, 0, 0, 1, 1, 0, (unsigned short)(hold->level >= 0 ? hold->level : 100)};
                 else if (hold->wired && hold->level >= 0)
                         r->edge[e].level = (unsigned short)hold->level;
         }
-        // Main sits between its two columns where nobody moved it.
-        if (main >= 0 && r->node[main].y == 0 && r->node[main].x == 280)
-                r->node[main].y = ((programs > outputs ? programs : outputs) - 1) * 40;
         g->node = r->node, g->edge = r->edge;
+        if (g->chosen >= g->nodes)
+                g->chosen = -1;
+        if (g->edge_chosen >= g->edges)
+                g->edge_chosen = -1;
         if (fresh)
                 g->homed = 0;
 }
 
 static b32 settings_router_holding(void)
 {
-        for (int h = 0; h < (int)(sizeof(settings_route->hold) / sizeof(settings_route->hold[0])); h++)
+        for (int h = 0; h < SETTINGS_ROUTER_HOLDS; h++)
                 if (settings_route->hold[h].until)
                         return true;
         return false;
@@ -5257,7 +5292,7 @@ static fn settings_router_hold(int from, int to, int wired, int level)
 {
         struct settings_router address_to r = settings_route;
         int at = 0, oldest = 0;
-        for (int h = 0; h < (int)(sizeof(r->hold) / sizeof(r->hold[0])); h++)
+        for (int h = 0; h < SETTINGS_ROUTER_HOLDS; h++)
         {
                 if (r->hold[h].until && r->hold[h].from == r->id[from] && r->hold[h].to == r->id[to])
                 {
@@ -5270,39 +5305,60 @@ static fn settings_router_hold(int from, int to, int wired, int level)
         r->hold[at] = (struct settings_route_hold){r->id[from], r->id[to], level, (signed char)wired, (b64)ui_kit.now + SETTINGS_ROUTER_HOLD_NS};
 }
 
-// The page read again (mapped read-only as the mixer maps it): true when what the router shows changed.
+// The page read again (mapped read-only as the mixer maps it, as much of it as it says it is): true when what the router shows changed.
 static b32 settings_router_poll(b32 now)
 {
         struct settings_router address_to r = settings_route;
-        unsigned int before = r->copy.seq;
+        unsigned int before = r->copy.seq, gen = r->copy.graph_gen;
+        long want_nodes = 0, want_edges = 0;
         b32 had = r->have;
         if (!now && (b64)ui_kit.now - r->polled < SETTINGS_ROUTER_POLL_NS)
                 return false;
-        // Nothing is listed again while the hand holds a node, a wire or a knob: the edges it names keep their places.
-        if (r->graph.turning >= 0 || r->graph.drag_from >= 0 || r->graph.held >= 0)
+        // Nothing is listed again while the hand holds a node, a wire or a knob, or types a name: the edges it names keep their places.
+        if (r->graph.turning >= 0 || r->graph.drag_from >= 0 || r->graph.held >= 0 || r->graph.naming)
                 return false;
         r->polled = (b64)ui_kit.now;
         // A page that stopped moving (it is written twice a second at the least) is an old server's: it is let go, and the new one's mapped.
         if (r->page && (b64)ui_kit.now - r->seen_at > SETTINGS_ROUTER_REMAP_NS)
         {
-                compositor_call(syscall(munmap), (positive)r->page, (positive)((sizeof(struct audio_state) + 4095) & ~4095ul), 0, 0, 0, 0);
+                compositor_call(syscall(munmap), (positive)r->page, (positive)r->mapped, 0, 0, 0, 0);
                 r->page = null, r->seen_at = (b64)ui_kit.now;
         }
-        if (!r->page)
+        for (int tries = 0; tries < 3; tries++)
         {
-                long fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)AUDIO_STATE_PATH, FILE_READ | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0), got = -1;
-                if (fd >= 0)
+                if (!r->page)
                 {
-                        if (compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0) >= (long)sizeof(struct audio_state))
-                                got = compositor_call(syscall(mmap), 0, (positive)((sizeof(struct audio_state) + 4095) & ~4095ul), 1, 1, (positive)fd, 0);
-                        compositor_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                        long fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)AUDIO_STATE_PATH, FILE_READ | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0), got = -1, size = 0;
+                        if (fd >= 0)
+                        {
+                                size = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
+                                if (size >= (long)sizeof(struct audio_state))
+                                        got = compositor_call(syscall(mmap), 0, (positive)((size + 4095) & ~4095l), 1, 1, (positive)fd, 0);
+                                compositor_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                        }
+                        r->page = got < 0 && got > -4096 ? null : (const volatile struct audio_state address_to)got;
+                        r->mapped = r->page ? (size + 4095) & ~4095l : 0;
                 }
-                r->page = got < 0 && got > -4096 ? null : (const volatile struct audio_state address_to)got;
+                r->have = r->page && audio_state_graph_read(r->page, (unsigned long)r->mapped, &r->copy, r->rows, r->row_room, r->wires, r->wire_room, &want_nodes, &want_edges);
+                // The graph outgrew the map or the rows: the page mapped again at its size, the rows grown, and read again.
+                if (r->page && (long)r->copy.total > r->mapped)
+                {
+                        compositor_call(syscall(munmap), (positive)r->page, (positive)r->mapped, 0, 0, 0, 0);
+                        r->page = null;
+                        continue;
+                }
+                if (want_nodes > r->row_room || want_edges > r->wire_room)
+                {
+                        if (!settings_router_fit((void address_to address_to)&r->rows, &r->row_room, want_nodes + 1, sizeof(r->rows[0])) ||
+                            !settings_router_fit((void address_to address_to)&r->wires, &r->wire_room, want_edges + 1, sizeof(r->wires[0])))
+                                break;
+                        continue;
+                }
+                break;
         }
-        r->have = r->page && audio_state_read(r->page, &r->copy);
         if (r->have && (r->copy.seq != before || !had))
                 r->seen_at = (b64)ui_kit.now;
-        if (r->have == had && (!r->have || r->copy.seq == before) && r->graph.nodes && !settings_router_holding())
+        if (r->have == had && (!r->have || (r->copy.seq == before && r->copy.graph_gen == gen)) && r->graph.nodes && !settings_router_holding())
                 return false;
         if (r->have)
                 settings_router_list();
@@ -5322,7 +5378,7 @@ static long settings_router_tick(long timeout)
 {
         if (!settings_router_on() || !settings_router_ready())
                 return timeout;
-        if (settings_route->pending_name[0] && (b64)ui_kit.now - settings_route->written_at >= SETTINGS_ROUTER_WRITE_NS)
+        if (settings_route->pending_from[0] && (b64)ui_kit.now - settings_route->written_at >= SETTINGS_ROUTER_WRITE_NS)
                 settings_router_flush();
         if (settings_router_poll(false))
                 settings_router_damage();
@@ -5335,23 +5391,43 @@ static fn settings_router_frame(void)
         g->x = settings_route->panel.x, g->y = settings_route->panel.y, g->w = settings_route->panel.w, g->h = settings_route->panel.h;
         g->top = ui_px(&settings.ui, SETTINGS_MAP_STRIP + UI_GAP2);
         g->rules = UI_GRAPH_SIDES | UI_GRAPH_GRID | UI_GRAPH_APART | UI_GRAPH_WIRING, g->grid = 20, g->least = UI_GRAPH_ONE / 4, g->most = UI_GRAPH_ONE * 2;
-        g->knob_most = 100;
+        g->knob_most = 200;
+        g->keys = settings_route->keys || g->naming;
+}
+
+// The person's combiner chosen (not Main), or -1.
+static long settings_router_combiner(void)
+{
+        int k = settings_route->graph.chosen;
+        return k >= 0 && k < settings_route->graph.nodes && (settings_route->node[k].flags & UI_GRAPH_NAMABLE) ? k : -1;
 }
 
 static fn settings_router_below(void)
 {
         int tall = settings.ui.scale > 0 ? settings.height * 100 / settings.ui.scale * 2 / 5 : 0;
-        struct ui_control address_to fit;
+        struct settings_router address_to r;
         if (!settings_router_on() || !settings_router_ready())
                 return;
-        fit = &settings_route->fit;
+        r = settings_route;
         tall = tall < SETTINGS_ROUTER_PANEL ? SETTINGS_ROUTER_PANEL : tall > SETTINGS_ROUTER_TALL ? SETTINGS_ROUTER_TALL : tall;
-        fit->kind = UI_BUTTON, fit->variant = UI_BUTTON_DEFAULT, fit->label = (string_address)WORDS(settings_map_fit);
+        r->fit.kind = UI_BUTTON, r->fit.variant = UI_BUTTON_DEFAULT, r->fit.label = (string_address)WORDS(settings_map_fit);
+        r->add.kind = UI_BUTTON, r->add.variant = UI_BUTTON_DEFAULT, r->add.label = (string_address)WORDS(settings_router_add);
+        r->rename.kind = UI_BUTTON, r->rename.variant = UI_BUTTON_DEFAULT, r->rename.label = (string_address)WORDS(settings_router_rename);
+        r->remove.kind = UI_BUTTON, r->remove.variant = UI_BUTTON_DEFAULT, r->remove.label = (string_address)WORDS(settings_router_remove);
         ui_text(WORDS(settings_router), .class = "title");
-        ui_col(.host = &settings_route->panel, .class = "map", .h = tall)
+        ui_col(.host = &r->panel, .class = "map", .h = tall)
                 ui_row(.class = "foot", .h = SETTINGS_MAP_STRIP)
-                        ui_control(fit, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
-        ui_text(settings_route->have ? WORDS(settings_router_hint) : WORDS(mixer_off), .class = "caption");
+                {
+                        ui_control(&r->fit, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                        if (r->have)
+                                ui_control(&r->add, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                        if (r->have && settings_router_combiner() >= 0)
+                        {
+                                ui_control(&r->rename, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                                ui_control(&r->remove, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                        }
+                }
+        ui_text(!r->have ? WORDS(mixer_off) : r->keys ? WORDS(settings_router_keys) : WORDS(settings_router_hint), .class = "caption");
 }
 
 static fn settings_router_paint(struct ui address_to ui)
@@ -5363,7 +5439,7 @@ static fn settings_router_paint(struct ui address_to ui)
                 ui_graph_draw(ui, &settings_route->graph);
 }
 
-/* What the router does: through the server's socket, as the mixer does, and the files the server reads. */
+/* What the router does: the graph's file (control.c's ctl_graph_*), and the master volume through the server's socket. */
 
 static b32 settings_router_connect(void)
 {
@@ -5379,111 +5455,157 @@ static fn settings_router_answer(long answer)
                 ctl_disconnect(&settings_route->ctl), settings_route->connected = false;
 }
 
-// A program's streams given a volume (mute 0 or 1 instead where it is not -1).
-static fn settings_router_program(int k, int percent, int mute)
+// A wire's two ends as the file names them: Main's wire to the output that plays is to output:default, whichever output that is.
+static fn settings_router_ends(int e, char address_to from, char address_to to)
 {
-        struct settings_router address_to r = settings_route;
-        long answer = 0;
-        for (int slot = 0; slot < AUDIO_STATE_STREAMS && answer >= 0; slot++)
-                if (r->member_of[slot] == k && settings_router_connect())
-                        answer = mute >= 0 ? ctl_set_input_mute(&r->ctl, r->copy.stream[slot].index, mute)
-                                           : ctl_set_input_volume(&r->ctl, r->copy.stream[slot].index, (unsigned long)percent * SETTINGS_ROUTER_WHOLE / 100);
-        settings_router_answer(answer);
+        const struct ui_graph_edge address_to edge = &settings_route->edge[e];
+        settings_router_key(edge->from, from, AUDIO_GRAPH_KEY);
+        settings_router_key(edge->to, to, AUDIO_GRAPH_KEY);
+        if (e < (int)settings_route->copy.graph_edges && (settings_route->wires[e].flags & AUDIO_EDGE_PLAYING))
+                string_copy_bounded((string_address)to, (string_address)AUDIO_GRAPH_DEFAULT_OUTPUT, AUDIO_GRAPH_KEY);
 }
 
-// Main's wire to an output in the sound graph's file taken off (level -1), or drawn at level (control.c's ctl_graph_*: the rest kept).
-static fn settings_router_mirror(const char address_to name, int level)
+// The page's wire an edge is, while the list is the page's (a held edge is none): its flags, else 0.
+static unsigned int settings_router_flags(int e)
 {
-        char main[AUDIO_GRAPH_KEY], to[AUDIO_GRAPH_KEY];
-        audio_node_key(main, sizeof(main), AUDIO_NODE_COMBINER, AUDIO_GRAPH_MAIN);
-        audio_node_key(to, sizeof(to), string_equals((string_address)name, (string_address) "moonwater.loopback") ? AUDIO_NODE_LOOPBACK : AUDIO_NODE_OUTPUT, name);
-        if (level < 0)
-                ctl_graph_unwire(main, to, 0);
-        else
-                ctl_graph_wire(main, to, level, 0, 0);
-}
-
-static fn settings_router_device(const char address_to name)
-{
-        char line[80];
-        positive n = 0;
-        string_copy_bounded((string_address)line, (string_address)name, sizeof(line) - 2);
-        n = string_length((string_address)line), line[n++] = '\n', line[n] = 0;
-        (void)file_write_atomic_at(AT_FDCWD, (string_address)SETTING_AUDIO_DEVICE_PATH, line, n, 0644);
-}
-
-// A wire's knob turned: a program's volume, the master volume, or a mirror's (the loopback's) level.
-static fn settings_router_turned(int e, int level)
-{
-        struct settings_router address_to r = settings_route;
-        const struct ui_graph_edge address_to edge = &r->edge[e];
-        const struct audio_state_device address_to device;
-        r->edge[e].level = (unsigned short)level;
-        if (r->kind[edge->from] == SETTINGS_ROUTE_PROGRAM)
-                return settings_router_program(edge->from, level, -1);
-        if (r->kind[edge->to] != SETTINGS_ROUTE_OUTPUT || r->what[edge->to] < 0)
-                return;
-        device = &r->copy.device_list[r->what[edge->to]];
-        if (device->flags & AUDIO_STATE_DEVICE_ACTIVE)
-        {
-                if (settings_router_connect())
-                        settings_router_answer(ctl_set_sink_volume(&r->ctl, r->copy.name, (unsigned long)level * SETTINGS_ROUTER_WHOLE / 100));
-                return;
-        }
-        // A drag is many turns: the file is written now and then, and at the knob's release (settings_router_flush).
-        if (r->pending_name[0] && !string_equals((string_address)r->pending_name, (string_address)device->name))
-                settings_router_flush();
-        string_copy_bounded((string_address)r->pending_name, (string_address)device->name, sizeof(r->pending_name));
-        r->pending_level = level;
-        if ((b64)ui_kit.now - r->written_at >= SETTINGS_ROUTER_WRITE_NS)
-                settings_router_flush();
+        const struct settings_router address_to r = settings_route;
+        return e >= 0 && e < (int)r->copy.graph_edges && r->wires[e].from == r->edge[e].from && r->wires[e].to == r->edge[e].to ? r->wires[e].flags : 0;
 }
 
 static fn settings_router_flush(void)
 {
         struct settings_router address_to r = settings_route;
-        if (!r->pending_name[0])
+        if (!r->pending_from[0])
                 return;
-        settings_router_mirror(r->pending_name, r->pending_level);
-        r->pending_name[0] = 0, r->written_at = (b64)ui_kit.now;
+        ctl_graph_wire(r->pending_from, r->pending_to, r->pending_level, r->pending_mute, r->pending_default);
+        r->pending_from[0] = 0, r->written_at = (b64)ui_kit.now;
 }
 
-// A wire taken off: a program muted; a mirror let go; the output that plays given up to the first mirror, or to Automatic where chosen.
+// A wire's knob turned: the master volume on Main's wire to the output that plays, the wire's own level in the file on any other.
+static fn settings_router_turned(int e, int level)
+{
+        struct settings_router address_to r = settings_route;
+        unsigned int flags = settings_router_flags(e);
+        char from[AUDIO_GRAPH_KEY], to[AUDIO_GRAPH_KEY];
+        r->edge[e].level = (unsigned short)level;
+        if (flags & AUDIO_EDGE_PLAYING)
+        {
+                if (settings_router_connect())
+                        settings_router_answer(ctl_set_sink_volume(&r->ctl, r->copy.name, (unsigned long)level * SETTINGS_ROUTER_WHOLE / 100));
+                return;
+        }
+        settings_router_ends(e, from, to);
+        // A drag is many turns: the file is written now and then, and at the knob's release (settings_router_flush).
+        if (r->pending_from[0] && !(string_equals((string_address)r->pending_from, (string_address)from) && string_equals((string_address)r->pending_to, (string_address)to)))
+                settings_router_flush();
+        string_copy_bounded((string_address)r->pending_from, (string_address)from, sizeof(r->pending_from));
+        string_copy_bounded((string_address)r->pending_to, (string_address)to, sizeof(r->pending_to));
+        r->pending_level = level, r->pending_mute = (flags & AUDIO_EDGE_MUTED) != 0, r->pending_default = (flags & AUDIO_EDGE_DEFAULT) != 0;
+        if ((b64)ui_kit.now - r->written_at >= SETTINGS_ROUTER_WRITE_NS)
+                settings_router_flush();
+}
+
+// A wire taken off: a wire of the server's own is cut in the file, the person's own goes from it.
 static fn settings_router_unwired(int e)
 {
-        struct settings_router address_to r = settings_route;
-        const struct ui_graph_edge address_to edge = &r->edge[e];
-        const struct audio_state_device address_to device;
-        if (r->kind[edge->from] == SETTINGS_ROUTE_PROGRAM)
-                return settings_router_program(edge->from, 0, 1);
-        if (r->kind[edge->to] != SETTINGS_ROUTE_OUTPUT || r->what[edge->to] < 0)
-                return;
-        device = &r->copy.device_list[r->what[edge->to]];
-        if (!(device->flags & AUDIO_STATE_DEVICE_ACTIVE))
-                return settings_router_mirror(device->name, -1);
-        for (unsigned int d = 0; d < r->copy.devices && d < AUDIO_STATE_DEVICES; d++)
-                if ((r->copy.device_list[d].flags & AUDIO_STATE_DEVICE_MIRROR) && !(r->copy.device_list[d].flags & AUDIO_STATE_DEVICE_VIRTUAL))
-                {
-                        settings_router_mirror(r->copy.device_list[d].name, -1);
-                        settings_router_device(r->copy.device_list[d].name);
-                        return;
-                }
-        if (r->copy.output_why == AUDIO_STATE_WHY_CHOSEN)
-                settings_router_device("default");
+        char from[AUDIO_GRAPH_KEY], to[AUDIO_GRAPH_KEY];
+        settings_router_ends(e, from, to);
+        ctl_graph_unwire(from, to, (settings_router_flags(e) & AUDIO_EDGE_DEFAULT) != 0);
 }
 
-// A wire drawn: a program into Main is heard again; Main to an output mirrors it there (an output that plays already has it).
-static fn settings_router_wired(int from, int to)
+// Whether a wire from one node to another would close a loop of combiners: to reaches from already (graph.c's audio_graph_reaches).
+static b32 settings_router_loops(int from, int to)
 {
         struct settings_router address_to r = settings_route;
-        const struct audio_state_device address_to device;
-        if (r->kind[from] == SETTINGS_ROUTE_PROGRAM && r->kind[to] == SETTINGS_ROUTE_MAIN)
-                return settings_router_program(from, 0, 0);
-        if (r->kind[from] != SETTINGS_ROUTE_MAIN || r->kind[to] != SETTINGS_ROUTE_OUTPUT || r->what[to] < 0)
-                return;
-        device = &r->copy.device_list[r->what[to]];
-        if (!(device->flags & AUDIO_STATE_DEVICE_ACTIVE))
-                settings_router_mirror(device->name, 100);
+        long count = 0, edges = r->graph.edges;
+        if (r->rows[from].kind != AUDIO_NODE_COMBINER || r->rows[to].kind != AUDIO_NODE_COMBINER)
+                return false;
+        // The combiners' wires among themselves (the only ones a loop can run along); with no room for the check the server's refusal is the one.
+        if (!settings_router_fit((void address_to address_to)&r->ends, &r->ends_room, 2 * edges + 2, sizeof(r->ends[0])) ||
+            !settings_router_fit((void address_to address_to)&r->marks, &r->marks_room, r->graph.nodes + 1, 1))
+                return false;
+        for (long e = 0; e < edges; e++)
+                if (r->rows[r->edge[e].from].kind == AUDIO_NODE_COMBINER && r->rows[r->edge[e].to].kind == AUDIO_NODE_COMBINER)
+                        r->ends[count] = r->edge[e].from, r->ends[edges + count++] = r->edge[e].to;
+        return audio_graph_reaches(r->ends, r->ends + edges, count, r->marks, r->graph.nodes, (unsigned int)to, (unsigned int)from);
+}
+
+// A wire drawn from one node's out to another's in, at a whole (what the hand gets back is a wire of its own in the file).
+static b32 settings_router_wired(int from, int to)
+{
+        char a[AUDIO_GRAPH_KEY], b[AUDIO_GRAPH_KEY];
+        if (from < 0 || to < 0 || from >= settings_route->graph.nodes || to >= settings_route->graph.nodes || settings_router_loops(from, to))
+                return false;
+        settings_router_key(from, a, sizeof(a));
+        settings_router_key(to, b, sizeof(b));
+        ctl_graph_wire(a, b, 100, 0, 0);
+        return true;
+}
+
+// A combiner of the person's made, named the first "Combiner N" no node has.
+static fn settings_router_make(void)
+{
+        char name[AUDIO_GRAPH_KEY];
+        for (long n = 1; n < 1000; n++)
+        {
+                b32 taken = false;
+                language_format(name, sizeof(name), WORDS(settings_router_new), n);
+                for (long k = 0; k < (long)settings_route->copy.graph_nodes && !taken; k++)
+                        taken = settings_route->rows[k].kind == AUDIO_NODE_COMBINER && string_equals((string_address)settings_route->rows[k].name, (string_address)name);
+                if (!taken)
+                {
+                        ctl_graph_combiner(CTL_GRAPH_MAKE, name, null);
+                        settings_route->polled = 0;
+                        return;
+                }
+        }
+}
+
+// What an event did to the graph (the hand's or the keys'), done: a knob, a wire taken off and drawn, a name given, a node let go.
+static fn settings_router_did(unsigned int did)
+{
+        struct settings_router address_to r = settings_route;
+        struct ui_graph address_to g = &r->graph;
+        if (did & UI_GRAPH_TURNED)
+        {
+                settings_router_hold(r->edge[g->turned].from, r->edge[g->turned].to, 1, g->turned_level);
+                settings_router_turned(g->turned, g->turned_level);
+        }
+        if (did & UI_GRAPH_UNWIRED)
+        {
+                settings_router_hold(r->edge[g->unwired].from, r->edge[g->unwired].to, 0, -1);
+                settings_router_unwired(g->unwired);
+        }
+        if ((did & UI_GRAPH_WIRED) && settings_router_wired(g->wired_from, g->wired_to))
+                settings_router_hold(g->wired_from, g->wired_to, 1, 100);
+        if (g->turning < 0 && r->pending_from[0])
+                settings_router_flush();
+        if ((did & UI_GRAPH_NAMED) && settings_router_combiner() >= 0)
+        {
+                long k = settings_router_combiner();
+                if (ctl_graph_combiner(CTL_GRAPH_RENAME, r->rows[k].name, g->naming_text) == 0)
+                        for (long at = 0; at < r->places; at++)
+                                if (r->place[at].id == r->id[k])
+                                        r->place[at].id = settings_router_id_of(AUDIO_NODE_COMBINER, g->naming_text);
+                r->polled = 0;
+        }
+        if ((did & UI_GRAPH_DROP) && g->dropped >= 0 && g->dropped < g->nodes)
+        {
+                int k = g->dropped;
+                long at = 0;
+                r->node[k].x = g->at_x, r->node[k].y = g->at_y;
+                while (at < r->places && r->place[at].id != r->id[k])
+                        at++;
+                if (at < r->places || settings_router_fit((void address_to address_to)&r->place, &r->place_room, r->places + 1, sizeof(r->place[0])))
+                        r->place[at].id = r->id[k], r->place[at].x = g->at_x, r->place[at].y = g->at_y, r->places += at == r->places;
+        }
+        // A wire's change is listed at once over the page (its hold); a turned knob moved its edge itself.
+        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED))
+                r->polled = 0;
+        if (did & (UI_GRAPH_DRAW | UI_GRAPH_CHOSE | UI_GRAPH_NAMED))
+                settings_router_damage();
+        if (did & UI_GRAPH_CHOSE)
+                ui_page_redraw(&settings.page); // the buttons of a combiner come and go with it
 }
 
 static b32 settings_router_event(const struct window_event address_to event)
@@ -5499,59 +5621,73 @@ static b32 settings_router_event(const struct window_event address_to event)
         settings_router_poll(false), settings_router_frame();
         if (!r->have)
                 return false;
-        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT &&
-            ui_control_hit(&settings.ui, &r->fit, x, y) >= 0)
-                return ui_graph_home(&settings.ui, g), settings_router_damage(), true;
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT)
+        {
+                long combiner = settings_router_combiner();
+                if (ui_control_hit(&settings.ui, &r->fit, x, y) >= 0)
+                        return ui_graph_home(&settings.ui, g), settings_router_damage(), true;
+                if (ui_control_hit(&settings.ui, &r->add, x, y) >= 0)
+                        return settings_router_make(), true;
+                if (combiner >= 0 && ui_control_hit(&settings.ui, &r->rename, x, y) >= 0)
+                        return ui_graph_name_begin(g, (int)combiner), settings_router_damage(), true;
+                if (combiner >= 0 && ui_control_hit(&settings.ui, &r->remove, x, y) >= 0)
+                        return ctl_graph_combiner(CTL_GRAPH_REMOVE, r->rows[combiner].name, null), g->chosen = -1, r->polled = 0, ui_page_redraw(&settings.page), true;
+                r->keys = false;
+        }
         did = ui_graph_event(&settings.ui, g, event);
-        if (did & UI_GRAPH_TURNED)
-        {
-                settings_router_hold(r->edge[g->turned].from, r->edge[g->turned].to, 1, g->turned_level);
-                settings_router_turned(g->turned, g->turned_level);
-        }
-        if (did & UI_GRAPH_UNWIRED)
-        {
-                settings_router_hold(r->edge[g->unwired].from, r->edge[g->unwired].to, 0, -1);
-                settings_router_unwired(g->unwired);
-        }
-        if (did & UI_GRAPH_WIRED)
-        {
-                if ((r->kind[g->wired_from] == SETTINGS_ROUTE_PROGRAM && r->kind[g->wired_to] == SETTINGS_ROUTE_MAIN) ||
-                    (r->kind[g->wired_from] == SETTINGS_ROUTE_MAIN && r->kind[g->wired_to] == SETTINGS_ROUTE_OUTPUT))
-                        settings_router_hold(g->wired_from, g->wired_to, 1, r->kind[g->wired_to] == SETTINGS_ROUTE_OUTPUT ? 100 : -1);
-                settings_router_wired(g->wired_from, g->wired_to);
-        }
-        if (g->turning < 0 && r->pending_name[0])
-                settings_router_flush();
-        if ((did & UI_GRAPH_DROP) && g->dropped >= 0 && g->dropped < g->nodes)
-        {
-                int k = g->dropped, at = 0;
-                r->node[k].x = g->at_x, r->node[k].y = g->at_y;
-                while (at < r->places && r->place[at].id != r->id[k])
-                        at++;
-                if (at < (int)(sizeof(r->place) / sizeof(r->place[0])))
-                        r->place[at].id = r->id[k], r->place[at].x = g->at_x, r->place[at].y = g->at_y, r->places += at == r->places;
-        }
+        settings_router_did(did);
         // A second press on an output soon after the first: the one that plays.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && g->held >= 0)
         {
                 int k = g->held;
-                if (k == r->pressed && (b64)ui_kit.now - r->pressed_at < SETTINGS_ROUTER_AGAIN_NS && r->kind[k] == SETTINGS_ROUTE_OUTPUT && r->what[k] >= 0 &&
-                    !(r->copy.device_list[r->what[k]].flags & (AUDIO_STATE_DEVICE_ACTIVE | AUDIO_STATE_DEVICE_VIRTUAL)))
+                if (k == r->pressed && (b64)ui_kit.now - r->pressed_at < SETTINGS_ROUTER_AGAIN_NS && k < (int)r->copy.graph_nodes && r->rows[k].kind == AUDIO_NODE_OUTPUT &&
+                    !(r->rows[k].flags & AUDIO_NODE_CLOCK))
                 {
-                        const char address_to name = r->copy.device_list[r->what[k]].name;
-                        if (r->copy.device_list[r->what[k]].flags & AUDIO_STATE_DEVICE_MIRROR)
-                                settings_router_mirror(name, -1);
-                        settings_router_device(name);
+                        char line[sizeof(r->rows[k].name) + 2];
+                        positive n;
+                        string_copy_bounded((string_address)line, (string_address)r->rows[k].name, sizeof(line) - 2);
+                        n = string_length((string_address)line), line[n++] = '\n', line[n] = 0;
+                        (void)file_write_atomic_at(AT_FDCWD, (string_address)SETTING_AUDIO_DEVICE_PATH, line, n, 0644);
                         k = -1;
                 }
                 r->pressed = k, r->pressed_at = (b64)ui_kit.now;
         }
-        // A wire's change is listed at once over the page (its hold); a turned knob moved its edge itself.
-        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED))
-                r->polled = 0;
-        if (did & UI_GRAPH_DRAW)
-                settings_router_damage();
         return event->type == WINDOW_EVENT_MOTION ? had || (did & UI_GRAPH_TAKEN) != 0 : (did & UI_GRAPH_TAKEN) != 0;
+}
+
+/*
+        The router's keys (Down past the page's last row takes them there, Escape gives them back): the kit's wiring keys on its graph, and
+        Insert, which makes a combiner. True when the router took the key.
+*/
+static b32 settings_router_keyed(const struct window_event address_to event)
+{
+        struct settings_router address_to r = settings_route;
+        unsigned int did;
+        if (!r || !settings_router_on() || !r->have || (!r->keys && !r->graph.naming))
+                return false;
+        settings_router_frame();
+        if ((event->flags & WINDOW_KEY_DOWN) && event->a == 110 && !r->graph.naming) // Insert
+                return settings_router_make(), true;
+        did = ui_graph_key(&settings.ui, &r->graph, event);
+        settings_router_did(did);
+        if (did & UI_GRAPH_TAKEN)
+                return true;
+        if ((event->flags & WINDOW_KEY_DOWN) && (event->a == UI_KEY_ESCAPE || event->a == UI_KEY_UP))
+                r->keys = false, r->graph.keys = false, ui_page_redraw(&settings.page);
+        return (event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE;
+}
+
+// Down at the page's last row with the router there: the keys go to it, the first node chosen.
+static b32 settings_router_enter(void)
+{
+        struct settings_router address_to r = settings_route;
+        if (!r || !settings_router_on() || !r->have || !r->graph.nodes)
+                return false;
+        r->keys = r->graph.keys = true;
+        if (r->graph.chosen < 0)
+                r->graph.chosen = 0;
+        ui_page_redraw(&settings.page);
+        return true;
 }
 
 /* ---- pointer/touch events, drawing, fold stepping & lifecycle ---- */

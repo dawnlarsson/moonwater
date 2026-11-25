@@ -451,8 +451,18 @@ settings_role_other	ff95	Other
 settings_role_swap	d36e	Swap
 settings_role_unpartitioned	3c10	No partition table
 settings_router	fd76	Mix router
+settings_router_add	badd	Add combiner
+settings_router_away	7976	Away: no link now
+settings_router_combiner	2833	Combiner, a microphone too
+settings_router_denied	ccf1	Not allowed on %s
 settings_router_hint	6509	Drag from the right of one to the left of another to send its sound there; turn a knob for its level, and press an output twice to play on it
+settings_router_keys	e8ec	Arrows choose, Enter wires, Tab picks a wire, Delete unwires, Page Up and Down turn it, F2 names
 settings_router_main	7928	Main
+settings_router_microphone	1969	Microphone
+settings_router_new	1db9	Combiner %d
+settings_router_remote	d9c2	%s over Waterlink
+settings_router_remove	901d	Remove
+settings_router_rename	31f3	Rename
 settings_run_any	3ffd	Run any moonwater command
 settings_running	d0e2	running %s (Escape stops it)
 settings_saved	9f44	saved

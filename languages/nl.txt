@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
+# machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 @language nl
 @name Nederlands
 @translated machine
@@ -489,8 +490,18 @@ settings_role_other	ff95	Overig
 settings_role_swap	d36e	Swap
 settings_role_unpartitioned	3c10	Geen partitietabel
 settings_router	fd76	Mixrouter
+settings_router_add	badd	Combinator toevoegen
+settings_router_away	7976	Afwezig: nu geen verbinding
+settings_router_combiner	2833	Combinator, ook een microfoon
+settings_router_denied	ccf1	Niet toegestaan op %s
 settings_router_hint	6509	Sleep van de rechterkant van de een naar de linkerkant van een ander om het geluid daarheen te sturen; draai aan een knop voor het niveau en druk twee keer op een uitgang om erop af te spelen
+settings_router_keys	e8ec	Pijlen kiezen, Enter verbindt, Tab kiest een draad, Delete ontkoppelt, Page Up en Down draaien, F2 noemt
 settings_router_main	7928	Hoofd
+settings_router_microphone	1969	Microfoon
+settings_router_new	1db9	Combinator %d
+settings_router_remote	d9c2	%s via Waterlink
+settings_router_remove	901d	Verwijderen
+settings_router_rename	31f3	Hernoemen
 settings_run_any	3ffd	Een willekeurige moonwater-opdracht uitvoeren
 settings_running	d0e2	%s wordt uitgevoerd (Escape stopt het)
 settings_saved	9f44	opgeslagen

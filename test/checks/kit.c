@@ -6860,6 +6860,60 @@ static fn check_kit_graph(void)
                         }
                 check("graph: a node's label is drawn centred inside its pad at one to one and a quarter, a long one cut, one read from the right", ok);
         }
+        // The keys wire as a hand does (UI_GRAPH_WIRING): arrows choose the node that way, Enter takes a wire from the chosen node and Enter on
+        // another draws it, Tab chooses a wire of the chosen node, Page Up turns its knob a twentieth, Delete takes it off; F2 names a node the
+        // app lets be named, its letters (a character of two bytes too) put at its end, Backspace taking one off, Enter giving it.
+        {
+                static struct ui_graph_edge wires[2] = {{0, 1, 0, 0, 1, 1, 0, 50}};
+                static const char *const names[3] = {"A", "B", "C"};
+                struct ui_graph_node three[3];
+                unsigned int got[10];
+                int steps = 0;
+                static const struct { int a, b; unsigned int flags; } keys[] = {
+                    {UI_KEY_RIGHT, 0, 0}, {UI_KEY_LEFT, 0, 0}, {UI_KEY_ENTER, 0, 0}, {UI_KEY_RIGHT, 0, 0}, {UI_KEY_RIGHT, 0, 0}, {UI_KEY_ENTER, 0, 0},
+                    {UI_KEY_LEFT, 0, 0}, {UI_KEY_TAB, 0, 0}, {UI_KEY_PAGE_UP, 0, 0}, {UI_KEY_DELETE, 0, 0},
+                };
+                for (int k = 0; k < 3; k++)
+                        three[k] = (struct ui_graph_node){k * 300, 0, 200, 56, 0, names[k], {null, null}, k > 0, k < 2};
+                three[1].flags = UI_GRAPH_NAMABLE;
+                ui_graph_start(&g);
+                g.node = three, g.nodes = 3, g.edge = wires, g.edges = 1, g.rules = UI_GRAPH_WIRING, g.keys = 1, g.chosen = 0, g.knob_most = 100;
+                for (unsigned int at = 0; at < sizeof(keys) / sizeof(keys[0]); at++)
+                {
+                        event = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, keys[at].a, keys[at].b, 0};
+                        got[steps++] = ui_graph_key(&ui, &g, &event);
+                        if (got[steps - 1] & UI_GRAPH_TURNED)
+                                wires[0].level = (unsigned short)g.turned_level;
+                }
+                ok = (got[0] & UI_GRAPH_CHOSE) && (got[1] & UI_GRAPH_CHOSE) && !(got[2] & UI_GRAPH_WIRED) && (got[5] & UI_GRAPH_WIRED) && g.wired_from == 0 && g.wired_to == 2 &&
+                     !g.key_wire && g.drag_from < 0;
+                check("graph keys: arrows choose the next node that way, Enter takes a wire from it and Enter on another draws it", ok);
+                ok = g.chosen == 1 && (got[8] & UI_GRAPH_TURNED) && g.turned == 0 && g.turned_level == 55 && (got[9] & UI_GRAPH_UNWIRED) && g.unwired == 0 && g.edge_chosen < 0;
+                check("graph keys: Tab chooses the chosen node's wire, Page Up turns it a twentieth, Delete takes it off", ok);
+                {
+                        static const int typed[] = {UI_GRAPH_KEY_F2, 'X', UI_KEY_BACKSPACE, 0xe9, UI_KEY_ENTER};
+                        unsigned int named = 0;
+                        for (unsigned int at = 0; at < sizeof(typed) / sizeof(typed[0]); at++)
+                        {
+                                b32 key = typed[at] == UI_GRAPH_KEY_F2 || typed[at] == UI_KEY_BACKSPACE || typed[at] == UI_KEY_ENTER;
+                                event = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, key ? typed[at] : 30, key ? 0 : typed[at], 0};
+                                named |= ui_graph_key(&ui, &g, &event);
+                        }
+                        check("graph keys: F2 names a node in place, a letter at its end, Backspace takes one off, a character of two bytes kept whole, Enter gives it",
+                              (named & UI_GRAPH_NAMED) && !g.naming && string_equals((string_address)g.naming_text, (string_address) "B\xc3\xa9"));
+                        g.chosen = 0, event = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_GRAPH_KEY_F2, 0, 0};
+                        check("graph keys: a node the app does not let be named is not", !(ui_graph_key(&ui, &g, &event) & UI_GRAPH_TAKEN) && !g.naming);
+                }
+                // Of another machine: the information accent's bar down its left side, inside its edge, and none on a node of this one.
+                three[0].flags = UI_GRAPH_FAR, three[1].flags = 0;
+                g.nodes = 2, g.edges = 0, g.x = 50, g.y = 20, g.w = 200, g.h = 100, g.keys = 0, g.chosen = -1, g.grid = -1;
+                g.homed = 1, g.zoom = UI_GRAPH_ONE, g.pan_x = -100 * 256, g.pan_y = -28 * 256;
+                for (int at = 0; at < 300 * 200; at++)
+                        pixels[at] = 0xff123456u;
+                ui_graph_draw(&ui, &g);
+                check("graph: a node of another machine is marked down its left side in the information accent",
+                      pixels[70 * 300 + 50 + 2] == (ui_role(UI_INFO) | 0xff000000u) && pixels[70 * 300 + 50 + 12] != (ui_role(UI_INFO) | 0xff000000u));
+        }
 }
 
 // The taskbar globe's press (ui.c taskbar_globe_*): a tap opens on release, a drag away past the slop drives the scenes and opens nothing,

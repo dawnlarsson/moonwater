@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
+# machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 @language pt
 @name Português
 @translated machine
@@ -489,8 +490,18 @@ settings_role_other	ff95	Outro
 settings_role_swap	d36e	Troca
 settings_role_unpartitioned	3c10	Sem tabela de partições
 settings_router	fd76	Roteador de mixagem
+settings_router_add	badd	Adicionar combinador
+settings_router_away	7976	Ausente: sem ligação agora
+settings_router_combiner	2833	Combinador, também um microfone
+settings_router_denied	ccf1	Não permitido em %s
 settings_router_hint	6509	Arraste da direita de um para a esquerda de outro para enviar o som para lá; gire um botão para o nível e pressione uma saída duas vezes para tocar nela
+settings_router_keys	e8ec	Setas escolhem, Enter liga, Tab escolhe um fio, Delete desliga, Page Up e Down rodam-no, F2 dá nome
 settings_router_main	7928	Principal
+settings_router_microphone	1969	Microfone
+settings_router_new	1db9	Combinador %d
+settings_router_remote	d9c2	%s por Waterlink
+settings_router_remove	901d	Remover
+settings_router_rename	31f3	Mudar nome
 settings_run_any	3ffd	Executar qualquer comando do moonwater
 settings_running	d0e2	executando %s (Escape interrompe)
 settings_saved	9f44	salva

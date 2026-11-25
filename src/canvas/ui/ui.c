@@ -6991,8 +6991,18 @@ LANGUAGE_ID(settings_role_other, "Other") \
 LANGUAGE_ID(settings_role_swap, "Swap") \
 LANGUAGE_ID(settings_role_unpartitioned, "No partition table") \
 LANGUAGE_ID(settings_router, "Mix router") \
+LANGUAGE_ID(settings_router_add, "Add combiner") \
+LANGUAGE_ID(settings_router_away, "Away: no link now") \
+LANGUAGE_ID(settings_router_combiner, "Combiner, a microphone too") \
+LANGUAGE_ID(settings_router_denied, "Not allowed on %s") \
 LANGUAGE_ID(settings_router_hint, "Drag from the right of one to the left of another to send its sound there; turn a knob for its level, and press an output twice to play on it") \
+LANGUAGE_ID(settings_router_keys, "Arrows choose, Enter wires, Tab picks a wire, Delete unwires, Page Up and Down turn it, F2 names") \
 LANGUAGE_ID(settings_router_main, "Main") \
+LANGUAGE_ID(settings_router_microphone, "Microphone") \
+LANGUAGE_ID(settings_router_new, "Combiner %d") \
+LANGUAGE_ID(settings_router_remote, "%s over Waterlink") \
+LANGUAGE_ID(settings_router_remove, "Remove") \
+LANGUAGE_ID(settings_router_rename, "Rename") \
 LANGUAGE_ID(settings_run_any, "Run any moonwater command") \
 LANGUAGE_ID(settings_running, "running %s (Escape stops it)") \
 LANGUAGE_ID(settings_saved, "saved") \
@@ -17523,6 +17533,9 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_FIXED 1u  // no hand moves it (it is chosen still)
 #define UI_GRAPH_MARKED 2u // marked: a bar of the accent along its top (the primary screen)
 #define UI_GRAPH_PICKED 4u // picked with others (Shift and a press): a drag moves them all
+#define UI_GRAPH_FAR 8u    // of another machine: a ring of the third accent round it, under its lines (which the app says)
+#define UI_GRAPH_DIM 16u   // quiet: its face and words faded (a device that is not allowed, or away)
+#define UI_GRAPH_NAMABLE 32u // its label is the person's to name in place (a second press on it, or F2 with the keys): UI_GRAPH_NAMED
 
 // What an event did (ui_graph_event, ui_graph_key).
 #define UI_GRAPH_TAKEN 1u // it was the graph's
@@ -17534,6 +17547,9 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_WIRED 64u    // a wire was drawn: wired_from's out wired_out to wired_to's in wired_in (the app makes the edge, or does not)
 #define UI_GRAPH_UNWIRED 128u // edge unwired was taken off (let go of away from an in port; with UI_GRAPH_WIRED as well, moved to another)
 #define UI_GRAPH_TURNED 256u  // edge turned's knob is at turned_level now
+#define UI_GRAPH_NAMED 512u   // the chosen node was named in place: naming_text is its new name
+#define UI_GRAPH_NAME 64      // bytes of a name typed in place, its end with it
+#define UI_GRAPH_KEY_F2 60
 
 struct ui_graph_node
 {
@@ -17591,6 +17607,13 @@ struct ui_graph
         b64 knob_at;
         // What an event did (UI_GRAPH_WIRED, _UNWIRED, _TURNED).
         int wired_from, wired_out, wired_to, wired_in, unwired, turned, turned_level;
+        // The keys' wiring (UI_GRAPH_WIRING with keys): the edge chosen among the chosen node's (-1 none), a wire in hand from the keys (its
+        // far end the chosen node's in port), and a name being typed in place on the chosen node (UI_GRAPH_NAMABLE).
+        int edge_chosen;
+        b32 key_wire, naming;
+        int naming_length, named_press;
+        b64 named_at;
+        char naming_text[UI_GRAPH_NAME];
 };
 
 // A graph with nothing chosen, in hand or under the pointer, its camera to be set by the first picture.
@@ -17599,6 +17622,7 @@ static fn ui_graph_start(struct ui_graph address_to g)
         g->chosen = g->hover = g->held = g->dropped = -1;
         g->moving = 0, g->panning = 0, g->homed = 0, g->zoom = UI_GRAPH_ONE, g->pan_x = g->pan_y = 0;
         g->drag_from = g->lifted = g->turning = g->knob_hover = g->knob_last = g->unwired = g->turned = -1;
+        g->edge_chosen = g->named_press = -1, g->key_wire = g->naming = 0, g->naming_length = 0;
 }
 
 // a / b rounded down, b above 0.
@@ -17900,13 +17924,142 @@ static fn ui_graph_check_active(struct ui_graph address_to g)
 }
 
 // The graph's keys while they are in it: Home and F frame the nodes, + and = zoom in about the middle, - out; Space held makes a press pan.
+static int ui_graph_most_level(const struct ui_graph address_to g);
+static unsigned int ui_graph_turn(struct ui_graph address_to g, int e, int level);
+
+// A name typed in place begun on node k (UI_GRAPH_NAMABLE): its label as it is, the caret at its end.
+static fn ui_graph_name_begin(struct ui_graph address_to g, int k)
+{
+        const char address_to label = k >= 0 && k < g->nodes && g->node[k].label ? g->node[k].label : "";
+        positive n = string_length((string_address)label);
+        n = n < UI_GRAPH_NAME - 1 ? n : UI_GRAPH_NAME - 1;
+        while (n > 0 && ((p8)label[n] & 0xc0) == 0x80)
+                n--;
+        memory_copy(g->naming_text, label, n);
+        g->naming_text[n] = 0, g->naming_length = (int)n, g->naming = 1, g->chosen = k;
+}
+
+// The node nearest the chosen one in a direction (dx, dy of -1, 0, 1) on the plane: the least distance with the off-axis part weighed
+// twice, among the nodes whose middles lie that way; -1 none. With nothing chosen, the first node.
+static int ui_graph_toward(const struct ui_graph address_to g, int dx, int dy)
+{
+        int best = -1;
+        b64 least = 0;
+        const struct ui_graph_node address_to c;
+        b64 cx, cy;
+        if (g->chosen < 0 || g->chosen >= g->nodes)
+                return g->nodes ? 0 : -1;
+        c = &g->node[g->chosen], cx = (b64)c->x * 2 + c->w, cy = (b64)c->y * 2 + c->h;
+        for (int k = 0; k < g->nodes; k++)
+        {
+                const struct ui_graph_node address_to n = &g->node[k];
+                b64 ax = (b64)n->x * 2 + n->w - cx, ay = (b64)n->y * 2 + n->h - cy, along = ax * dx + ay * dy, across = dx ? ay : ax, far;
+                if (k == g->chosen || along <= 0)
+                        continue;
+                across = across < 0 ? -across : across;
+                far = along + 2 * across;
+                if (best < 0 || far < least)
+                        best = k, least = far;
+        }
+        return best;
+}
+
+/*
+        The keys in a graph whose wiring is the hand's (UI_GRAPH_WIRING), as the pointer's are, so a keyboard, a pad (the access engine's arrows,
+        its primary and back) or a switch wires as a hand does: an arrow chooses the nearest node that way; Enter on a node with an out takes a
+        wire from it, an arrow carries its far end to another node, and Enter there draws it (UI_GRAPH_WIRED) while Escape lets it go; Tab and
+        Shift+Tab choose among the chosen node's wires, Delete or Backspace takes the chosen wire off (UI_GRAPH_UNWIRED), Page Up and Page Down
+        (or ] and [) turn its knob a twentieth (UI_GRAPH_TURNED); F2 names a node the app lets be named in place, and while a name is typed the
+        keys are its: a letter is put at its end, Backspace takes one off, Enter gives it (UI_GRAPH_NAMED), Escape keeps the old one.
+*/
+static unsigned int ui_graph_wire_key(struct ui_graph address_to g, const struct window_event address_to event)
+{
+        int dx = (event->a == UI_KEY_RIGHT) - (event->a == UI_KEY_LEFT), dy = (event->a == UI_KEY_DOWN) - (event->a == UI_KEY_UP), k = g->chosen;
+        if (g->naming)
+        {
+                if (event->a == UI_KEY_ESCAPE)
+                        return g->naming = 0, UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                if (event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD)
+                        return g->naming = 0, UI_GRAPH_TAKEN | UI_GRAPH_DRAW | (g->naming_length ? UI_GRAPH_NAMED : 0);
+                if (event->a == UI_KEY_BACKSPACE)
+                {
+                        while (g->naming_length > 0 && ((p8)g->naming_text[g->naming_length - 1] & 0xc0) == 0x80)
+                                g->naming_length--;
+                        g->naming_length -= g->naming_length > 0;
+                        g->naming_text[g->naming_length] = 0;
+                        return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                }
+                if (event->b >= 0x20 && event->b != 0x7f && event->b < 0x110000 && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
+                {
+                        p8 code[4];
+                        positive size = memory_utf8_encode(code, 4, (p32)event->b);
+                        if (size && g->naming_length + (int)size < UI_GRAPH_NAME)
+                                memory_copy(g->naming_text + g->naming_length, code, size), g->naming_length += (int)size, g->naming_text[g->naming_length] = 0;
+                }
+                return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        }
+        if (dx || dy)
+        {
+                int to = ui_graph_toward(g, dx, dy);
+                if (to < 0)
+                        return UI_GRAPH_TAKEN;
+                g->chosen = to, g->edge_chosen = -1;
+                return UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_CHOSE;
+        }
+        if (k < 0 || k >= g->nodes)
+                return 0;
+        if (event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD)
+        {
+                if (g->key_wire)
+                {
+                        unsigned int did = UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                        if (k != g->drag_from && g->node[k].ins)
+                                g->wired_from = g->drag_from, g->wired_out = g->drag_out, g->wired_to = k, g->wired_in = 0, did |= UI_GRAPH_WIRED;
+                        g->drag_from = -1, g->key_wire = 0;
+                        return did;
+                }
+                if (!g->node[k].outs)
+                        return UI_GRAPH_TAKEN;
+                g->drag_from = k, g->drag_out = 0, g->lifted = -1, g->key_wire = 1;
+                return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        }
+        if (event->a == UI_KEY_ESCAPE && g->key_wire)
+                return g->drag_from = -1, g->key_wire = 0, UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        if (event->a == UI_KEY_TAB)
+        {
+                int count = 0, at = -1, step = (event->flags & WINDOW_KEY_SHIFT) ? -1 : 1;
+                for (int e = 0; e < g->edges; e++)
+                        if (g->edge[e].from == k || g->edge[e].to == k)
+                                at = e == g->edge_chosen ? count : at, count++;
+                if (!count)
+                        return UI_GRAPH_TAKEN;
+                at = at < 0 ? (step > 0 ? 0 : count - 1) : (at + step + count) % count;
+                for (int e = 0, n = 0; e < g->edges; e++)
+                        if (g->edge[e].from == k || g->edge[e].to == k)
+                                g->edge_chosen = n++ == at ? e : g->edge_chosen;
+                return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        }
+        if ((event->a == UI_KEY_DELETE || event->a == UI_KEY_BACKSPACE) && g->edge_chosen >= 0 && g->edge_chosen < g->edges)
+                return g->unwired = g->edge_chosen, g->edge_chosen = -1, UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_UNWIRED;
+        if ((event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN || event->b == ']' || event->b == '[') && g->edge_chosen >= 0 && g->edge_chosen < g->edges &&
+            g->edge[g->edge_chosen].knob)
+        {
+                int step = ui_graph_most_level(g) / 20, up = event->a == UI_KEY_PAGE_UP || event->b == ']';
+                return UI_GRAPH_TAKEN | ui_graph_turn(g, g->edge_chosen, (int)g->edge[g->edge_chosen].level + (up ? step : -step));
+        }
+        if (event->a == UI_GRAPH_KEY_F2 && (g->node[k].flags & UI_GRAPH_NAMABLE))
+                return ui_graph_name_begin(g, k), UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        return 0;
+}
+
 static unsigned int ui_graph_key(const struct ui address_to ui, struct ui_graph address_to g, const struct window_event address_to event)
 {
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
         int mx = g->x + g->w / 2, my = g->y + g->h / 2;
+        unsigned int did;
         if (event->type != WINDOW_EVENT_KEY)
                 return 0;
-        if (event->a == UI_KEY_SPACE)
+        if (event->a == UI_KEY_SPACE && !g->naming)
         {
                 g->space = down && g->keys;
                 g->panning = !down && g->panning == 3 ? 0 : g->panning;
@@ -17914,6 +18067,8 @@ static unsigned int ui_graph_key(const struct ui address_to ui, struct ui_graph 
         }
         if (!down || !g->keys)
                 return 0;
+        if ((g->rules & UI_GRAPH_WIRING) && (did = ui_graph_wire_key(g, event)))
+                return did;
         if (event->a == UI_KEY_HOME || event->b == 'f' || event->b == 'F')
         {
                 ui_graph_home(ui, g);
@@ -18113,6 +18268,13 @@ static unsigned int ui_graph_event(const struct ui address_to ui, struct ui_grap
                                 for (int k = 0; k < g->nodes; k++)
                                         g->node[k].flags &= ~UI_GRAPH_PICKED;
                         out = hit != g->chosen ? UI_GRAPH_CHOSE : 0;
+                        // A name typed in place is given by a press anywhere else; a second press soon on a node the app lets be named names it.
+                        if (g->naming && hit != g->chosen)
+                                g->naming = 0, out |= g->naming_length ? UI_GRAPH_NAMED : 0;
+                        if (hit == g->named_press && (g->node[hit].flags & UI_GRAPH_NAMABLE) && (b64)ui_kit.now - g->named_at < UI_GRAPH_AGAIN_NS && !g->naming)
+                                ui_graph_name_begin(g, hit), g->named_press = -1;
+                        else
+                                g->named_press = hit, g->named_at = (b64)ui_kit.now;
                         g->chosen = g->held = hit, g->moving = 0;
                         g->grab_x = ui_graph_wx(g, px) - g->node[hit].x, g->grab_y = ui_graph_wy(g, py) - g->node[hit].y;
                         g->want_x = g->at_x = g->node[hit].x, g->want_y = g->at_y = g->node[hit].y;
@@ -18412,11 +18574,18 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
 {
         const struct ui_graph_node address_to n = &g->node[k];
         int x, y, x0, y0, x1, y1, radius = ui_dev(ui, UI_RADIUS), pad = ui_dev(ui, 6), top = ui->top, bottom = ui->bottom;
-        b32 lit = k == g->chosen || k == g->held || (n->flags & UI_GRAPH_PICKED);
+        b32 lit = k == g->chosen || k == g->held || (n->flags & UI_GRAPH_PICKED), named = g->naming && k == g->chosen;
         unsigned int face = ui_role(lit ? UI_PRIMARY_CONTAINER : UI_SURFACE_HIGHEST) | 0xff000000u;
         unsigned int ink = ui_text_colour(ui, lit ? UI_ON_PRIMARY_CONTAINER : UI_ON_SURFACE), quiet = ui_text_colour(ui, lit ? UI_ON_PRIMARY_CONTAINER : UI_ON_SURFACE_VARIANT);
         struct ui_graph_words words;
+        struct ui_graph_node shown_as = *n;
         struct ui_box box;
+        // A quiet node (not allowed, or away): its face toward the ground and its words the quiet ink.
+        if ((n->flags & UI_GRAPH_DIM) && !lit)
+                face = ui_mix(ui_role(UI_SURFACE_LOW) | 0xff000000u, 50, face), ink = quiet;
+        // A name typed in place is the label while it is typed.
+        if (named)
+                shown_as.label = g->naming_text;
         ui_graph_shown(g, k, &x, &y);
         ui_graph_box(g, k, x, y, &x0, &y0, &x1, &y1);
         if (x1 <= g->x || x0 >= g->x + g->w || y1 <= g->y || y0 >= g->y + g->h)
@@ -18456,6 +18625,16 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
                 struct ui_box bar = ui_graph_rect(x0 > g->x ? x0 : g->x, y0, x1 < g->x + g->w ? x1 : g->x + g->w, y0 + (ui_dev(ui, 3) > 1 ? ui_dev(ui, 3) : 1), 0);
                 ui_kit_fill(ui, &bar, ui_role(UI_PRIMARY) | 0xff000000u, &box);
         }
+        // Of another machine: a ring of the information accent inside its edge, and a short bar of it down its left (its lines say whose).
+        if ((n->flags & UI_GRAPH_FAR) && x1 - x0 > 4 && y1 - y0 > 4)
+        {
+                int in = ui_dev(ui, 1) > 0 ? ui_dev(ui, 1) : 1, wide = ui_dev(ui, 3) > 1 ? ui_dev(ui, 3) : 2;
+                struct ui_box ring = ui_graph_rect(x0 + in, y0 + in, x1 - in, y1 - in, radius > in ? radius - in : 0);
+                struct ui_box bar = ui_graph_rect(x0 + in, y0 + radius, x0 + in + wide, y1 - radius, 0);
+                ui_kit_ring(ui, &ring, ui_q8(ui, 2), ui_role(UI_INFO));
+                if (y1 - y0 > 2 * radius)
+                        ui_kit_fill(ui, &bar, ui_role(UI_INFO) | 0xff000000u, &box);
+        }
         for (int side = 0; side < 2; side++)
                 for (int port = 0; port < (side ? n->outs : n->ins); port++)
                 {
@@ -18466,7 +18645,7 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
                         ui_kit_fill(ui, &dot, ui_role(UI_OUTLINE) | 0xff000000u, panel);
                 }
         // The words: the label always, centred, stepped down to fit (ui_graph_words), and the lines under it that fit with it.
-        ui_graph_words(ui, n, x0, y0, x1, y1, &words);
+        ui_graph_words(ui, &shown_as, x0, y0, x1, y1, &words);
         ui->top = y0 > top ? y0 : top, ui->bottom = y1 < bottom ? y1 : bottom;
         // Over a picture the words are on a piece of the face, so they read whatever the picture is.
         if (n->picture && words.shown && x1 - x0 > 4 * pad)
@@ -18477,6 +18656,13 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
         for (int at = 0, low = x0 > g->x ? x0 : g->x, high = x1 < g->x + g->w ? x1 : g->x + g->w; at < words.shown; at++)
                 ui_kit_text_in_at(ui, words.left[at], ui_graph_baseline(ui, words.top[at], ui_graph_types[at], words.size[at], words.line[at]), (string_address)words.text[at],
                                   ui_graph_types[at], words.size[at], at ? quiet : ink, 0, low, high);
+        // The caret of a name typed in place, at its end.
+        if (named && words.shown)
+        {
+                int end_x = words.left[0] + (g->naming_length ? ui_kit_measure_at(ui, (string_address)words.text[0], UI_TITLE_LARGE, words.size[0]) : 0);
+                struct ui_box caret = ui_graph_rect(end_x, words.top[0] + words.line[0] / 8, end_x + (ui_dev(ui, 2) > 1 ? ui_dev(ui, 2) : 1), words.top[0] + words.line[0] * 7 / 8, 0);
+                ui_kit_fill(ui, &caret, ink | 0xff000000u, &box);
+        }
         ui->top = top, ui->bottom = bottom;
         if (g->keys && k == g->chosen && x0 >= g->x && x1 <= g->x + g->w)
         {
@@ -18505,20 +18691,23 @@ static fn ui_graph_draw(struct ui address_to ui, struct ui_graph address_to g)
         for (int e = 0; e < g->edges; e++)
                 if (g->edge[e].from < g->nodes && g->edge[e].to < g->nodes && !(wiring && e == g->lifted))
                         ui_graph_wire(ui, g, &panel, &g->edge[e],
-                                      g->edge[e].quiet ? ui_mix(ui_role(UI_OUTLINE) | 0xff000000u, 45, ground)
-                                                       : ui_role(g->edge[e].from == g->chosen || g->edge[e].to == g->chosen ? UI_PRIMARY : UI_OUTLINE) | 0xff000000u);
+                                      wiring && e == g->edge_chosen ? ui_role(UI_INFO) | 0xff000000u
+                                      : g->edge[e].quiet ? ui_mix(ui_role(UI_OUTLINE) | 0xff000000u, 45, ground)
+                                                         : ui_role(g->edge[e].from == g->chosen || g->edge[e].to == g->chosen ? UI_PRIMARY : UI_OUTLINE) | 0xff000000u);
         for (int k = 0; k < g->nodes; k++)
                 if (k != g->held)
                         ui_graph_face(ui, g, &panel, k);
         for (int e = 0; wiring && e < g->edges; e++)
                 if (g->edge[e].knob && g->edge[e].from < g->nodes && g->edge[e].to < g->nodes && e != g->lifted)
                         ui_graph_knob(ui, g, &panel, e);
-        // The wire in hand: from its out port to the pointer.
+        // The wire in hand: from its out port to the pointer (to the chosen node's in, or its middle, when the keys hold it).
         if (wiring && g->drag_from >= 0 && g->drag_from < g->nodes)
         {
                 b64 x[4], y[4];
                 ui_graph_port(g, g->drag_from, 1, g->drag_out, &x[0], &y[0]);
                 x[3] = (b64)g->last_x * 256 + 128, y[3] = (b64)g->last_y * 256 + 128;
+                if (g->key_wire && g->chosen >= 0 && g->chosen < g->nodes)
+                        ui_graph_port(g, g->chosen, 0, g->chosen != g->drag_from && g->node[g->chosen].ins ? 0 : -1, &x[3], &y[3]);
                 ui_graph_curve(ui, x, y, true);
                 ui_graph_stroke(ui, &panel, x, y, ui_role(UI_PRIMARY) | 0xff000000u);
         }

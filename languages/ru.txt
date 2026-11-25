@@ -36,6 +36,7 @@
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
+# machine-made 2026-11-25 (the sound graph pass), not yet read by a person: settings_router_add settings_router_away settings_router_combiner settings_router_denied settings_router_keys settings_router_microphone settings_router_new settings_router_remote settings_router_remove settings_router_rename
 @language ru
 @name Русский
 @translated machine
@@ -489,8 +490,18 @@ settings_role_other	ff95	Прочее
 settings_role_swap	d36e	Подкачка
 settings_role_unpartitioned	3c10	Нет таблицы разделов
 settings_router	fd76	Маршрутизатор микса
-settings_router_hint	6509	Перетащите от правого края одного к левому краю другого, чтобы направить туда его звук; поверните ручку для уровня и нажмите на выход дважды, чтобы играть через него
+settings_router_add	badd	Добавить сумматор
+settings_router_away	7976	Нет на связи: соединения нет
+settings_router_combiner	2833	Сумматор, а также микрофон
+settings_router_denied	ccf1	Не разрешено на %s
+settings_router_hint	6509	Тяните справа налево, чтобы направить звук; ручка — уровень; два нажатия на выход — играть на нём
+settings_router_keys	e8ec	Стрелки выбор, Enter соединить, Tab провод, Delete снять, Page Up/Down крутить, F2 имя
 settings_router_main	7928	Главный
+settings_router_microphone	1969	Микрофон
+settings_router_new	1db9	Сумматор %d
+settings_router_remote	d9c2	%s через Waterlink
+settings_router_remove	901d	Удалить
+settings_router_rename	31f3	Переименовать
 settings_run_any	3ffd	Выполнить любую команду moonwater
 settings_running	d0e2	выполняется %s (Escape останавливает)
 settings_saved	9f44	сохранено
