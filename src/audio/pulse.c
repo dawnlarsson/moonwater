@@ -8,7 +8,7 @@
         A client is a connection. This file is given the bytes it sent (pulse_feed) and gives the bytes to send back
         (pulse_out), and turns what it reads into the same things the mixing core (mix.c) works on: a playback stream
         is a voice with a ring the client's data is written to; the sink is a card's worth of mixing, run a block at a
-        time by the service (pulse_sink_mix) when the card wants one. It touches no descriptor, no clock and no
+        time by the service (pulse_sink_mix, or its three steps apart when the service routes streams) when the card wants one. It touches no descriptor, no clock and no
         allocator of its own: it asks the host (struct pulse_host, which is also the seam the checks put a fake
         service behind). It runs in the sound server's process, in ring 3, and is not kernel code.
 
@@ -61,7 +61,8 @@
 
 #define PULSE_VERSION 35
 #define PULSE_SINKS 8
-#define PULSE_SOURCES (PULSE_SINKS + 8) // the first PULSE_SINKS are the sinks' monitors (a monitor has its sink's number), the rest are capture devices
+// The first PULSE_SINKS sources are the sinks' monitors (a monitor has its sink's number); the rest (capture devices, loopbacks) are as
+// many as the host adds: the table grows (p->source_slots).
 #define PULSE_RECORD_CHUNK 16384        // the most of a record stream's data that one frame carries
 #define PULSE_RECORD_RESERVE 32768      // of a client's output queue kept for its replies and events: record data is dropped before they are
 #define PULSE_SAMPLES 64                // sounds in the cache
@@ -233,6 +234,9 @@ struct pulse_host
         // Optional: whether the person shares what plays with the programs of this uid now (a share of the screen with its sound,
         // picked in the share app): then a monitor is theirs to record while the share lasts. A loopback never is.
         int (*shared)(void *context, unsigned int uid);
+        // Optional: a stream the host routes (pulse_stream.routed) has its block, at the stream's own gain, given here instead of to its
+        // sink's bus: the host adds it where the stream goes (service.c, the sound graph).
+        void (*routed)(void *context, long stream, const float *left, const float *right, long frames);
 };
 
 #define PULSE_CHANGED_SINK_VOLUME 1
@@ -280,6 +284,7 @@ struct pulse_stream
         unsigned long ring_bytes;
         long uid, pid;
         int one_shot;                   // a sample being played: it belongs to no connection, and ends when its frames are done
+        int routed;                     // the host's: its block goes to host.routed, not into its sink's bus
         long sample_ref;                // the sample it plays, plus one
         unsigned long maker;            // the connection (its index) that asked for it
         struct audio_voice voice;
@@ -406,14 +411,15 @@ struct pulse
         struct pulse_stream *stream;
         long stream_slots;
         struct pulse_sink sink[PULSE_SINKS];
-        struct pulse_source source[PULSE_SOURCES];
+        struct pulse_source *source;    // grows by doubling (pulse_source_room); the first PULSE_SINKS are the monitors
+        long source_slots;
+        struct audio_sink route;        // the block of a routed stream, before the host has it
         struct pulse_record *record;
         long record_slots;
         struct pulse_sample sample[PULSE_SAMPLES];
         struct pulse_upload upload[PULSE_UPLOADS];
         unsigned long sample_total, upload_total, next_sample;
         long default_sink, default_source;
-        int loops;                      // loopback sources (pulse_loopback_add): the mix looks for none while there are none
         int capture_off;                // the person has turned capture off: no program records
         unsigned long next_client, next_input, next_output;
         unsigned long ring_total;
@@ -951,6 +957,27 @@ static void pulse_monitor_set(struct pulse *p, long slot);
 static void pulse_source_retable(struct pulse *p, long slot);
 static int pulse_record_move(struct pulse *p, struct pulse_record *r, long slot);
 
+// The source table holds at least want places (doubling from what it has, in the host's memory): 0 when it could not grow.
+static int pulse_source_room(struct pulse *p, long want)
+{
+        while (p->source_slots < want)
+                if (!pulse_table_grow(p, (void **)&p->source, &p->source_slots, (long)sizeof(struct pulse_source)))
+                        return 0;
+        return 1;
+}
+
+// A free place for a capture device or a loopback (from PULSE_SINKS up), the table grown when there is none: -1 with no memory.
+static long pulse_source_free(struct pulse *p)
+{
+        long i = PULSE_SINKS;
+
+        if (!pulse_source_room(p, PULSE_SINKS + 1))
+                return -1;
+        while (i < p->source_slots && p->source[i].used)
+                i++;
+        return i < p->source_slots || pulse_source_room(p, i + 1) ? i : -1;
+}
+
 /*
         A sink for a card (or a clock): its name as clients see it, the description the person sees, and the rate the
         card is run at. Answers its slot or a negative number. The first becomes the default. Its monitor, the source that
@@ -958,6 +985,8 @@ static int pulse_record_move(struct pulse *p, struct pulse_record *r, long slot)
 */
 AUDIO_API long pulse_sink_add(struct pulse *p, const char *name, const char *description, long rate)
 {
+        if (!pulse_source_room(p, PULSE_SINKS))
+                return -1;
         for (long i = 0; i < PULSE_SINKS; i++)
                 if (!p->sink[i].used)
                 {
@@ -1199,11 +1228,11 @@ static long pulse_source_named(struct pulse *p, const char *name)
 {
         long number;
 
-        for (long i = 0; i < PULSE_SOURCES; i++)
+        for (long i = 0; i < p->source_slots; i++)
                 if (p->source[i].used && pulse_equal(p->source[i].name, name))
                         return i;
         number = pulse_number(name);
-        return number >= 0 && number < PULSE_SOURCES && p->source[number].used ? number : -1;
+        return number >= 0 && number < p->source_slots && p->source[number].used ? number : -1;
 }
 
 static long pulse_find_source(struct pulse *p, unsigned long index, const char *name)
@@ -1212,7 +1241,7 @@ static long pulse_find_source(struct pulse *p, unsigned long index, const char *
                 return pulse_source_named(p, name);
         if (index == PULSE_INVALID)
                 return -1;
-        return index < PULSE_SOURCES && p->source[index].used ? (long)index : -1;
+        return index < (unsigned long)p->source_slots && p->source[index].used ? (long)index : -1;
 }
 
 /* ---- the record streams ---- */
@@ -1456,7 +1485,7 @@ AUDIO_API void pulse_source_feed(struct pulse *p, long slot, const float *left, 
         float target, a, b;
         int any = 0;
 
-        if (slot < 0 || slot >= PULSE_SOURCES)
+        if (slot < 0 || slot >= p->source_slots)
                 return;
         s = p->source + slot;
         if (!s->used || frames < 1)
@@ -1490,7 +1519,7 @@ AUDIO_API long pulse_source_wanted(struct pulse *p, long slot)
 
 AUDIO_API void pulse_source_delay(struct pulse *p, long slot, long frames)
 {
-        if (slot >= 0 && slot < PULSE_SOURCES)
+        if (slot >= 0 && slot < p->source_slots)
                 p->source[slot].delay_frames = frames;
 }
 
@@ -1511,7 +1540,7 @@ AUDIO_API void pulse_capture_allow(struct pulse *p, int allowed)
 // no program's microphone that did not ask for it.
 static long pulse_source_fallback(struct pulse *p)
 {
-        for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
+        for (long i = PULSE_SINKS; i < p->source_slots; i++)
                 if (p->source[i].used && !p->source[i].loop)
                         return i;
         return p->default_sink >= 0 && p->source[p->default_sink].used ? p->default_sink : -1;
@@ -1523,56 +1552,57 @@ static long pulse_source_fallback(struct pulse *p)
 */
 AUDIO_API long pulse_source_add(struct pulse *p, const char *name, const char *description, long rate)
 {
-        for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
-                if (!p->source[i].used)
-                {
-                        struct pulse_source *s = p->source + i;
+        long i = pulse_source_free(p);
 
-                        memory_zero(s, sizeof(*s));
-                        s->used = 1;
-                        s->capture = 1;
-                        s->sink = -1;
-                        pulse_copy(s->name, (long)sizeof(s->name), name);
-                        pulse_copy(s->description, (long)sizeof(s->description), description);
-                        s->rate = rate;
-                        s->volume[0] = s->volume[1] = AUDIO_VOLUME_NORM;
-                        s->now = 1.0f;
-                        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
-                        if (p->default_source < 0 || p->default_source < PULSE_SINKS)
-                        {
-                                p->default_source = i;
-                                pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
-                                pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, i);
-                        }
-                        return i;
+        if (i >= 0)
+        {
+                struct pulse_source *s = p->source + i;
+
+                memory_zero(s, sizeof(*s));
+                s->used = 1;
+                s->capture = 1;
+                s->sink = -1;
+                pulse_copy(s->name, (long)sizeof(s->name), name);
+                pulse_copy(s->description, (long)sizeof(s->description), description);
+                s->rate = rate;
+                s->volume[0] = s->volume[1] = AUDIO_VOLUME_NORM;
+                s->now = 1.0f;
+                pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
+                if (p->default_source < 0 || p->default_source < PULSE_SINKS)
+                {
+                        p->default_source = i;
+                        pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+                        pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, i);
                 }
+                return i;
+        }
         return -1;
 }
 
 /*
-        A loopback: a source that is what the default sink plays (after its volume, as its monitor is), shown to programs as a microphone is
-        (no monitor_of, the class of sound): the person's virtual cable from what plays to a program that records, which Chromium and the
-        programs built on it (they list no monitor) can choose. It is never the default source by itself, and another user's program does not
+        A loopback: a source whose sound the host feeds it (pulse_source_feed: the sound graph's loopback microphone, what is wired into
+        it, or a combiner's block), shown to programs as a microphone is (no monitor_of, the class of sound): the person's virtual cable
+        from what plays to a program that records, which Chromium and the programs built on it (they list no monitor) can choose. It is never the default source by itself, and another user's program does not
         record it, as it records no monitor. Answers its slot or a negative number.
 */
 AUDIO_API long pulse_loopback_add(struct pulse *p, const char *name, const char *description)
 {
-        for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
-                if (!p->source[i].used)
-                {
-                        struct pulse_source *s = p->source + i;
+        long i = pulse_source_free(p);
 
-                        memory_zero(s, sizeof(*s));
-                        s->used = 1, s->capture = 1, s->loop = 1, s->sink = -1;
-                        p->loops++;
-                        pulse_copy(s->name, (long)sizeof(s->name), name);
-                        pulse_copy(s->description, (long)sizeof(s->description), description);
-                        s->rate = p->default_sink >= 0 && p->sink[p->default_sink].used ? p->sink[p->default_sink].rate : 48000;
-                        s->volume[0] = s->volume[1] = AUDIO_VOLUME_NORM;
-                        s->now = 1.0f;
-                        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
-                        return i;
-                }
+        if (i >= 0)
+        {
+                struct pulse_source *s = p->source + i;
+
+                memory_zero(s, sizeof(*s));
+                s->used = 1, s->capture = 1, s->loop = 1, s->sink = -1;
+                pulse_copy(s->name, (long)sizeof(s->name), name);
+                pulse_copy(s->description, (long)sizeof(s->description), description);
+                s->rate = p->default_sink >= 0 && p->sink[p->default_sink].used ? p->sink[p->default_sink].rate : 48000;
+                s->volume[0] = s->volume[1] = AUDIO_VOLUME_NORM;
+                s->now = 1.0f;
+                pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
+                return i;
+        }
         return -1;
 }
 
@@ -1582,7 +1612,7 @@ AUDIO_API void pulse_source_reconfigure(struct pulse *p, long slot, const char *
         struct pulse_source *s;
         int changed;
 
-        if (slot < 0 || slot >= PULSE_SOURCES || !p->source[slot].used)
+        if (slot < 0 || slot >= p->source_slots || !p->source[slot].used)
                 return;
         s = p->source + slot;
         changed = rate != s->rate;
@@ -1598,12 +1628,11 @@ AUDIO_API void pulse_source_reconfigure(struct pulse *p, long slot, const char *
 // The capture device is gone: its streams are ended (the programs are told), and the default source is another.
 AUDIO_API void pulse_source_remove(struct pulse *p, long slot)
 {
-        if (slot < 0 || slot >= PULSE_SOURCES || !p->source[slot].used)
+        if (slot < 0 || slot >= p->source_slots || !p->source[slot].used)
                 return;
         for (int i = 0; i < p->record_slots; i++)
                 if (p->record[i].used && p->record[i].source == slot)
                         pulse_record_end(p, p->record + i, 1);
-        p->loops -= p->source[slot].loop != 0;
         p->source[slot].used = 0, p->source[slot].loop = 0;
         pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_REMOVE, (unsigned long)slot);
         if (p->default_source == slot)
@@ -1620,7 +1649,7 @@ AUDIO_API void pulse_source_remove(struct pulse *p, long slot)
 */
 AUDIO_API int pulse_source_default(struct pulse *p, long slot)
 {
-        if (slot < 0 || slot >= PULSE_SOURCES || !p->source[slot].used)
+        if (slot < 0 || slot >= p->source_slots || !p->source[slot].used)
                 return 0;
         if (slot == p->default_source)
                 return 1;
@@ -3411,7 +3440,7 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                 return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_SOURCE_INFO:
         case PULSE_COMMAND_GET_SOURCE_INFO_LIST:
-                for (long i = 0; i < PULSE_SOURCES; i++)
+                for (long i = 0; i < p->source_slots; i++)
                 {
                         if (!p->source[i].used)
                                 continue;
@@ -3643,7 +3672,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 }
                 else
                 {
-                        for (long i = 0; i < PULSE_SOURCES && found < 0; i++)
+                        for (long i = 0; i < p->source_slots && found < 0; i++)
                                 if (p->source[i].used && pulse_equal(p->source[i].name, name))
                                         found = i;
                 }
@@ -4196,7 +4225,7 @@ AUDIO_API void pulse_open(struct pulse *p, const struct pulse_host *host)
 
 /* ---- running the sink ---- */
 
-static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pulse_sink *sink, long frames)
+static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct audio_sink *mix, long frames)
 {
         unsigned long fill = audio_ring_fill(&s->voice.ring);
         long played;
@@ -4207,7 +4236,7 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
         if (s->dying)
         {
                 // Fading out: it plays its ring until its gain has reached nothing, and is then freed.
-                audio_voice_mix(&sink->mix, &s->voice, frames, 0);
+                audio_voice_mix(mix, &s->voice, frames, 0);
                 if (s->voice.now[0] == 0 && s->voice.now[1] == 0)
                         pulse_stream_free(p, s);
                 return;
@@ -4216,7 +4245,7 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
         {
                 // Its gain goes to nothing over a ramp, taking what the ramp plays from the ring; then its time stands still.
                 if (s->voice.now[0] != 0 || s->voice.now[1] != 0)
-                        audio_voice_mix(&sink->mix, &s->voice, frames, 0);
+                        audio_voice_mix(mix, &s->voice, frames, 0);
                 return;
         }
         if (s->underrun)
@@ -4258,7 +4287,7 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                         return;
                 }
         }
-        played = audio_voice_mix(&sink->mix, &s->voice, frames, s->drain_pending || s->one_shot);
+        played = audio_voice_mix(mix, &s->voice, frames, s->drain_pending || s->one_shot);
         if (!s->voice.table || s->voice.out_rate <= 0)
                 s->playing_for += (unsigned long long)played * s->voice.frame;
         else
@@ -4299,45 +4328,89 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
 }
 
 /*
-        One block of the sink to the card: frames (at most AUDIO_BLOCK) of every stream on it, mixed, at the master volume,
-        encoded to the card's format and channels into dst. Answers the bytes. The programs of the streams are asked for
-        what they have left room for, and a stream that was ending is finished.
+        One block of the sink, in three steps a host that routes (the sound graph) calls apart, and pulse_sink_mix calls in a row:
+
+        pulse_sink_streams: frames (at most AUDIO_BLOCK) of every stream on the sink mixed into its bus, each at its own gain; a stream
+        the host routes (pulse_stream.routed) is mixed into a bus of its own instead and given to host.routed.
+        pulse_sink_master: the bus at the sink's volume as the sink's mix (the floats a card is given), and its monitor fed with it.
+        pulse_sink_finish: the frames counted, and the programs of the streams asked for what they have left room for.
 */
-AUDIO_API long pulse_sink_mix(struct pulse *p, long slot, unsigned char *dst, long format, long channels, long frames)
+AUDIO_API void pulse_sink_streams(struct pulse *p, long slot, long frames)
 {
         struct pulse_sink *sink;
-        long bytes;
 
-        if (slot < 0 || slot >= PULSE_SINKS || !p->sink[slot].used)
-                return 0;
+        if (slot < 0 || slot >= PULSE_SINKS || !p->sink[slot].used || frames < 1)
+                return;
         sink = p->sink + slot;
-
         if (frames > AUDIO_BLOCK)
                 frames = AUDIO_BLOCK;
         audio_sink_begin(&sink->mix, frames);
         audio_sink_gain(&sink->mix, sink->muted ? 0.0f : pulse_mean_gain(sink->volume, 2));
         for (int i = 0; i < p->stream_slots; i++)
                 if (p->stream[i].used && p->stream[i].sink == slot)
-                        pulse_stream_play(p, p->stream + i, sink, frames);
-        bytes = audio_sink_end(&sink->mix, dst, format, channels, frames);
-        sink->played += (unsigned long long)frames;
-        pulse_source_feed(p, slot, sink->mix.mix[0], sink->mix.mix[1], frames);
-        // A loopback is what the default sink plays, at its rate.
-        if (slot == p->default_sink && p->loops)
-                for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
-                        if (p->source[i].used && p->source[i].loop)
+                {
+                        if (!p->stream[i].routed || !p->host.routed)
                         {
-                                if (p->source[i].rate != sink->rate)
-                                {
-                                        p->source[i].rate = sink->rate;
-                                        pulse_source_retable(p, i);
-                                }
-                                pulse_source_feed(p, i, sink->mix.mix[0], sink->mix.mix[1], frames);
+                                pulse_stream_play(p, p->stream + i, &sink->mix, frames);
+                                continue;
                         }
+                        audio_sink_begin(&p->route, frames);
+                        pulse_stream_play(p, p->stream + i, &p->route, frames);
+                        p->host.routed(p->host.context, i, p->route.bus[0], p->route.bus[1], frames);
+                }
+}
+
+AUDIO_API void pulse_sink_master(struct pulse *p, long slot, long frames)
+{
+        struct audio_sink *mix;
+
+        if (slot < 0 || slot >= PULSE_SINKS || !p->sink[slot].used || frames < 1)
+                return;
+        mix = &p->sink[slot].mix;
+        if (frames > AUDIO_BLOCK)
+                frames = AUDIO_BLOCK;
+        for (int c = 0; c < 2; c++)
+        {
+                float now = mix->master_now;
+
+                audio_gain_run(mix->mix[c], mix->bus[c], frames, &now, mix->master_target, audio_slope(mix->master_now, mix->master_target), mix->peak + c, 0);
+                if (c)
+                        mix->master_now = now;
+        }
+        pulse_source_feed(p, slot, mix->mix[0], mix->mix[1], frames);
+}
+
+AUDIO_API void pulse_sink_finish(struct pulse *p, long slot, long frames)
+{
+        if (slot < 0 || slot >= PULSE_SINKS || !p->sink[slot].used)
+                return;
+        p->sink[slot].played += (unsigned long long)frames;
         for (int i = 0; i < p->stream_slots; i++)
                 if (p->stream[i].used && p->stream[i].sink == slot)
                         pulse_stream_request(p, p->stream + i);
-        return bytes;
+}
+
+/*
+        One block of the sink to the card: frames (at most AUDIO_BLOCK) of every stream on it, mixed, at the master volume,
+        encoded to the card's format and channels into dst. Answers the bytes. The programs of the streams are asked for
+        what they have left room for, and a stream that was ending is finished.
+*/
+AUDIO_API long pulse_sink_mix(struct pulse *p, long slot, unsigned char *dst, long format, long channels, long frames)
+{
+        struct audio_sink *mix;
+
+        if (slot < 0 || slot >= PULSE_SINKS || !p->sink[slot].used)
+                return 0;
+        if (frames > AUDIO_BLOCK)
+                frames = AUDIO_BLOCK;
+        if (frames < 1)
+                return 0;
+        mix = &p->sink[slot].mix;
+        pulse_sink_streams(p, slot, frames);
+        pulse_sink_master(p, slot, frames);
+        mix->clips += f32_pair_clip(mix->mix[0], mix->mix[1], (unsigned long)frames);
+        pulse_sink_finish(p, slot, frames);
+        return audio_encode(format, dst, frames, channels, mix->mix[0], mix->mix[1]);
 }
 
 // Time has passed: a drain whose last frames have left the card is answered.

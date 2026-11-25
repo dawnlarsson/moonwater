@@ -5048,7 +5048,7 @@ static fn settings_field_menu(void)
         The mix router, at the foot of the Sound page: what plays and where it goes, as nodes wired on the kit's graph (the display map's).
         Every program that has a sound is a node wired into Main, its knob its volume and its wire taken off its mute; Main is wired to the
         output that plays, its knob the master volume, and to every output that mirrors it and the loopback microphone, each knob that
-        one's own level (/root/audio.mirror, a name, a tab and the level a line). A wire drawn from Main to another output mirrors it there,
+        one's own level (a wire from Main in the sound graph's file, /root/audio.graph). A wire drawn from Main to another output mirrors it there,
         and taken off lets it go; the output that plays, taken off, gives its place to the first mirror (or to Automatic where the person
         had chosen it); a second press on an output makes it the one that plays. The server's page (src/audio/state.c) is read four times a
         second while the page is up, and what the router does goes to the server as the mixer's does: its socket, and the files it reads.
@@ -5064,7 +5064,6 @@ static fn settings_field_menu(void)
 #define SETTINGS_ROUTER_PANEL 220
 #define SETTINGS_ROUTER_TALL 420
 #define SETTINGS_ROUTER_SOCKET "/run/moonwater/pulse/native"
-#define SETTINGS_ROUTER_TEXT (AUDIO_STATE_DEVICES * 2 * 64)
 #define SETTINGS_ROUTE_MAIN 1
 #define SETTINGS_ROUTE_PROGRAM 2
 #define SETTINGS_ROUTE_OUTPUT 3
@@ -5392,43 +5391,16 @@ static fn settings_router_program(int k, int percent, int mute)
         settings_router_answer(answer);
 }
 
-// The mirror list with name taken out, and put back at level where level is not -1: read and written whole, other lines kept as they are.
+// Main's wire to an output in the sound graph's file taken off (level -1), or drawn at level (control.c's ctl_graph_*: the rest kept).
 static fn settings_router_mirror(const char address_to name, int level)
 {
-        char was[SETTINGS_ROUTER_TEXT], now[SETTINGS_ROUTER_TEXT];
-        positive length = string_length((string_address)name), out = 0;
-        bipolar handle, got = 0;
-        if ((handle = system_open_at(AT_FDCWD, (string_address)SETTING_AUDIO_MIRROR_PATH, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
-        {
-                got = system_read_once(handle, was, sizeof(was) - 1);
-                system_close(handle);
-        }
-        was[got > 0 ? got : 0] = 0;
-        for (char address_to line = was; *line;)
-        {
-                char address_to stop = line, address_to cut = line;
-                positive each;
-                while (*stop && *stop != '\n')
-                        stop++;
-                while (cut < stop && *cut != '\t')
-                        cut++;
-                each = (positive)(stop - line);
-                if (each && !((positive)(cut - line) == length && !memory_compare(line, name, length)) && out + each + 2 < sizeof(now))
-                {
-                        memory_copy(now + out, line, each);
-                        out += each, now[out++] = '\n';
-                }
-                line = *stop ? stop + 1 : stop;
-        }
-        if (level >= 0 && out + length + 8 < sizeof(now))
-        {
-                memory_copy(now + out, name, length);
-                out += length, now[out++] = '\t';
-                out += positive_into_string((p8 address_to)now + out, (positive)level);
-                now[out++] = '\n';
-        }
-        now[out] = 0;
-        (void)file_write_atomic_at(AT_FDCWD, (string_address)SETTING_AUDIO_MIRROR_PATH, now, out, 0644);
+        char main[AUDIO_GRAPH_KEY], to[AUDIO_GRAPH_KEY];
+        audio_node_key(main, sizeof(main), AUDIO_NODE_COMBINER, AUDIO_GRAPH_MAIN);
+        audio_node_key(to, sizeof(to), string_equals((string_address)name, (string_address) "moonwater.loopback") ? AUDIO_NODE_LOOPBACK : AUDIO_NODE_OUTPUT, name);
+        if (level < 0)
+                ctl_graph_unwire(main, to, 0);
+        else
+                ctl_graph_wire(main, to, level, 0, 0);
 }
 
 static fn settings_router_device(const char address_to name)

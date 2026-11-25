@@ -4,7 +4,7 @@
         given first and then a strip for every program that records from one (a program that records what plays is none), and Outputs, a
         table of the outputs the server can play on, Automatic first, whose Plays check is the one that plays: Automatic while nobody chose,
         the server picking by what is plugged in; checked on an output, that output (/root/audio.device, which `moonwater audio device` writes);
-        and a Mirror check on every other output, which then plays what that one plays too (/root/audio.mirror, a name a line), the last of
+        and a Mirror check on every other output, which then plays what Main plays too (a wire from Main in the sound graph, /root/audio.graph), the last of
         them the Loopback microphone: mirrored to, it is a microphone programs can choose that records what plays (a virtual cable);
         the kit's strips, ui.c: every channel its name on end beside a level meter and a vertical slider, and under them its volume and the glyph that mutes it. It says
         what each strip is, hands the strips its events and acts on the one that changed; the sliders,
@@ -61,7 +61,6 @@
 #define MIXER_PAGE_OUTPUTS 2           // the third tab: the outputs' table
 #define MIXER_COLUMN_PLAYS 2           // the Outputs table's columns: the output, its state, the check of the one that plays,
 #define MIXER_COLUMN_MIRROR 3          // and the check of each that plays it too
-#define MIXER_MIRRORS_TEXT (AUDIO_STATE_DEVICES * 2 * 64) // the mirror list's file read and written: the server keeps as many mirrors as outputs it lists
 
 struct mixer_group
 {
@@ -346,52 +345,23 @@ static fn mixer_output_choose(int id)
         compositor_volume_write(SETTING_AUDIO_DEVICE_PATH, line);
 }
 
-// A Mirror check pressed: the output is put in the mirror list, or taken out of it. The file is read and written whole, so a mirror whose
-// output is not plugged in now (and is not on the page) is kept; the server reads it within half a second.
+// A Mirror check pressed: Main is wired to the output in the sound graph's file, or the wire is taken off (control.c's ctl_graph_*: the file
+// is read and written whole, so the rest of the person's wiring stays as it was); the server reads it when it moves.
 static fn mixer_mirror_turn(int id)
 {
         const struct audio_state address_to page = &mixer.big->copy;
-        char was[MIXER_MIRRORS_TEXT], now[MIXER_MIRRORS_TEXT];
-        const char address_to name;
-        positive length, out = 0;
-        b32 found = false;
-        bipolar handle, got = 0;
+        const struct audio_state_device address_to device;
+        char main[AUDIO_GRAPH_KEY], to[AUDIO_GRAPH_KEY];
 
         if (id < 1 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES || (page->device_list[id - 1].flags & AUDIO_STATE_DEVICE_ACTIVE))
                 return;
-        name = page->device_list[id - 1].name, length = string_length((string_address)name);
-        if ((handle = system_open_at(AT_FDCWD, (string_address)SETTING_AUDIO_MIRROR_PATH, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
-        {
-                got = system_read_once(handle, was, sizeof(was) - 1);
-                system_close(handle);
-        }
-        was[got > 0 ? got : 0] = 0;
-        for (char address_to line = was; *line;)
-        {
-                char address_to stop = line, address_to cut = line;
-                positive each;
-
-                while (*stop && *stop != '\n')
-                        stop++;
-                while (cut < stop && *cut != '\t')
-                        cut++;
-                each = (positive)(stop - line);
-                if (each && (positive)(cut - line) == length && !memory_compare(line, name, length))
-                        found = true;
-                else if (each && out + each + 2 < sizeof(now))
-                {
-                        memory_copy(now + out, line, each);
-                        out += each, now[out++] = '\n';
-                }
-                line = *stop ? stop + 1 : stop;
-        }
-        if (!found && length && out + length + 2 < sizeof(now))
-        {
-                memory_copy(now + out, name, length);
-                out += length, now[out++] = '\n';
-        }
-        now[out] = 0;
-        compositor_volume_write(SETTING_AUDIO_MIRROR_PATH, now);
+        device = &page->device_list[id - 1];
+        audio_node_key(main, sizeof(main), AUDIO_NODE_COMBINER, AUDIO_GRAPH_MAIN);
+        audio_node_key(to, sizeof(to), device->flags & AUDIO_STATE_DEVICE_VIRTUAL ? AUDIO_NODE_LOOPBACK : AUDIO_NODE_OUTPUT, device->name);
+        if (device->flags & AUDIO_STATE_DEVICE_MIRROR)
+                ctl_graph_unwire(main, to, 0);
+        else
+                ctl_graph_wire(main, to, 100, 0, 0);
 }
 
 // The page read again: true when what is shown changed. The strips follow it.

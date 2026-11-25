@@ -775,6 +775,145 @@ static long ctl_connect(struct ctl *c, const char *path)
         }
         return 0;
 }
+
+/* ---- the sound graph's file ---- */
+
+/*
+        What a person wires in the sound graph is kept in the server's file of it (/root/audio.graph, src/audio/graph.c), which the server
+        reads when it moves: a program that changes the wiring reads the file whole, changes its plan (one of the edits below) and writes it
+        whole again under another name and renames it over, so the server reads the old wiring or the new, never a part. 0 when it is
+        written; CTL_FAILED when there was no memory, or it could not be written; CTL_INVALID when the edit was refused (a combiner's name
+        that is Main's or another's).
+*/
+#include "graph.c"
+
+#define CTL_GRAPH_WIRE 1     // a wire from a to b at level, muted or not (was_default: the server's own)
+#define CTL_GRAPH_UNWIRE 2   // the wire from a to b taken off
+#define CTL_GRAPH_MAKE 3     // a combiner named a made
+#define CTL_GRAPH_REMOVE 4   // the combiner a let go, with its wires
+#define CTL_GRAPH_RENAME 5   // the combiner a named b
+
+struct ctl_graph_edit
+{
+        int op;
+        const char *a, *b;
+        long level;
+        int mute, was_default;
+};
+
+static void *ctl_graph_memory(void *context, void *old, long old_bytes, long bytes)
+{
+        long got;
+
+        (void)context;
+        if (old && old_bytes > 0)
+                ctl_call(syscall(munmap), (positive)old, (positive)old_bytes, 0, 0, 0, 0);
+        if (bytes <= 0)
+                return 0;
+        got = ctl_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0); // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
+        return got < 0 && got > -4096 ? 0 : (void *)got;
+}
+
+static long ctl_graph_change(const char *path, const struct ctl_graph_edit *edit)
+{
+        struct audio_plan plan = {.grow = ctl_graph_memory};
+        unsigned char st[144];
+        char temporary[192];
+        char *text = 0;
+        long size = 0, room, got = 0, fd, result = 0, length, put = 0, n = (long)wire_len(path);
+
+        if (n + 5 > (long)sizeof(temporary))
+                return CTL_FAILED;
+        if (ctl_call(syscall(newfstatat), (positive)AT_FDCWD, (positive)path, (positive)st, 0x100, 0, 0) == 0) // AT_SYMLINK_NOFOLLOW
+                memory_copy_apart(&size, st + 48, 8);
+        room = (size > 0 ? size : 0) + 1;
+        if (!(text = ctl_graph_memory(0, 0, 0, room)))
+                return CTL_FAILED;
+        fd = ctl_call(syscall(openat), (positive)AT_FDCWD, (positive)path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0, 0, 0);
+        if (fd >= 0)
+        {
+                for (long step; got < room - 1; got += step)
+                        if ((step = ctl_call(syscall(read), (positive)fd, (positive)(text + got), (positive)(room - 1 - got), 0, 0, 0)) <= 0)
+                                break;
+                ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        }
+        if (audio_plan_parse(&plan, text, got) < 0)
+                result = CTL_FAILED;
+        ctl_graph_memory(0, text, room, 0);
+        if (!result)
+                switch (edit->op)
+                {
+                case CTL_GRAPH_WIRE:
+                        result = audio_plan_wired(&plan, edit->a, edit->b, edit->level, edit->mute, edit->was_default) < 0 ? CTL_FAILED : 0;
+                        break;
+                case CTL_GRAPH_UNWIRE:
+                        result = audio_plan_unwired(&plan, edit->a, edit->b, edit->was_default) < 0 ? CTL_FAILED : 0;
+                        break;
+                case CTL_GRAPH_MAKE:
+                        result = audio_plan_combiner_add(&plan, edit->a) < 0 ? CTL_INVALID : 0;
+                        break;
+                case CTL_GRAPH_REMOVE:
+                        audio_plan_combiner_remove(&plan, edit->a);
+                        break;
+                case CTL_GRAPH_RENAME:
+                        result = audio_plan_combiner_rename(&plan, edit->a, edit->b) < 0 ? CTL_INVALID : 0;
+                        break;
+                default:
+                        result = CTL_INVALID;
+                }
+        length = audio_plan_format(&plan, 0, 0);
+        text = result ? 0 : ctl_graph_memory(0, 0, 0, length + 1);
+        if (!result && !text)
+                result = CTL_FAILED;
+        if (!result)
+        {
+                audio_plan_format(&plan, text, length + 1);
+                memory_copy_apart(temporary, path, (unsigned long)n);
+                memory_copy_apart(temporary + n, ".new", 5);
+                fd = ctl_call(syscall(openat), (positive)AT_FDCWD, (positive)temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644, 0, 0);
+                while (fd >= 0 && put < length)
+                {
+                        long step = ctl_call(syscall(write), (positive)fd, (positive)(text + put), (positive)(length - put), 0, 0, 0);
+
+                        if (step <= 0)
+                                break;
+                        put += step;
+                }
+                if (fd >= 0)
+                        ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                if (fd < 0 || put != length || ctl_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) < 0)
+                {
+                        ctl_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0, 0, 0, 0);
+                        result = CTL_FAILED;
+                }
+                ctl_graph_memory(0, text, length + 1, 0);
+        }
+        audio_plan_free(&plan);
+        return result;
+}
+
+// A wire drawn in the graph's file: from and to are node keys (graph.c, audio_node_key).
+static long ctl_graph_wire(const char *from, const char *to, long level, int mute, int was_default)
+{
+        struct ctl_graph_edit edit = {CTL_GRAPH_WIRE, from, to, level, mute, was_default};
+
+        return ctl_graph_change(AUDIO_GRAPH_PATH, &edit);
+}
+
+static long ctl_graph_unwire(const char *from, const char *to, int was_default)
+{
+        struct ctl_graph_edit edit = {CTL_GRAPH_UNWIRE, from, to, 0, 0, was_default};
+
+        return ctl_graph_change(AUDIO_GRAPH_PATH, &edit);
+}
+
+// A combiner of the person's: made (b 0, op CTL_GRAPH_MAKE), let go (CTL_GRAPH_REMOVE) or named again b (CTL_GRAPH_RENAME).
+static long ctl_graph_combiner(int op, const char *name, const char *now)
+{
+        struct ctl_graph_edit edit = {op, name, now, 0, 0, 0};
+
+        return ctl_graph_change(AUDIO_GRAPH_PATH, &edit);
+}
 #endif // CTL_NO_SYSTEM
 
 #endif // AUDIO_CONTROL_INCLUDED

@@ -42,6 +42,7 @@
 #include "alsa.c"
 #include "pulse.c"
 #include "state.c"
+#include "graph.c"
 
 #define AUDIO_SOCKET "/run/moonwater/pulse/native"
 #define AUDIO_RUN_DIRECTORY "/run/moonwater"
@@ -73,7 +74,6 @@
 #define AUDIO_POLLOUT 4
 #define AUDIO_POLLERR 8
 #define AUDIO_POLLHUP 16
-#define AUDIO_INPUTS (PULSE_SOURCES - PULSE_SINKS) // capture devices at most
 #define AUDIO_CAPTURE_LINGER_NS 1000000000ull      // a capture device is kept open this long after the last program stopped listening
 #define AUDIO_CAPTURE_RETRY_NS 2000000000ull       // and one that could not be opened is tried again after this
 #define AUDIO_CAPTURE_ROUNDS 4                     // blocks one wake of a capture device reads at most
@@ -86,12 +86,15 @@
 #define AUDIO_MIRROR_RETRY_NS 5000000000ull        // a mirror that could not be opened is tried again after this
 #define AUDIO_LOOPBACK_NAME "moonwater.loopback"     // the loopback microphone's name in the mirror list and the output list
 #define AUDIO_LOOPBACK_DESCRIPTION "Loopback microphone"
+#define AUDIO_MIC_PREFIX "moonwater.combiner." // a combiner's microphone is this and its name, as programs see it
+#define AUDIO_CAPTURE_SLACK 32                 // frames a microphone wired to an output is held beyond the block it is pulled for (its card's pointer moves in steps)
 
 struct audio_poll
 {
         int handle;
         short events, returned;
 };
+
 
 static struct
 {
@@ -160,19 +163,29 @@ static struct
         char applied_device[PULSE_NAME];
         char wanted_device[PULSE_NAME]; // the person's choice of card, "" for the first that is not HDMI
         int device_count;
-        struct audio_state_device devices[AUDIO_STATE_DEVICES];
+        long device_room;
+        struct audio_state_device *devices; // every output of every card (the page's old list shows the first AUDIO_STATE_DEVICES), grown
         struct { char name[PULSE_VALUE + 1]; unsigned long volume; int mute; } apps[AUDIO_APPS];
         int app_count;
         char active_name[PULSE_NAME], active_description[PULSE_DESCRIPTION];
-        // The capture devices: each is a source of the engine; its PCM is open while a program listens.
-        struct
+        // The capture devices: each is a source of the engine; its PCM is open while a program listens, or while it is wired in the graph.
+        // A microphone wired to an output (monitoring) has a resampler of its own the frames it reads are put on, which the mix pulls
+        // from at the output's rate, its step nudged by how full it is (from its card's clock to the output's, as a mirror's is).
+        struct audio_input
         {
-                int used, failed, opening;
+                int used, failed, opening, wired;
                 long slot, card, device;
                 char name[PULSE_NAME], description[PULSE_DESCRIPTION];
                 struct audio_pcm pcm;
                 positive idle_since, retry_at;
-        } input[AUDIO_INPUTS];
+                struct audio_resampler *fifo;   // while it is wired: what it read, to be pulled at the output's rate
+                struct audio_table *fifo_table;
+                unsigned long fifo_step;        // the step at the two rates, which the nudge moves
+                float fifo_error;               // how full it is less its aim, smoothed
+                long fifo_aim, fifo_rin, fifo_rout;
+                unsigned long fifo_short;       // pulls it could not fill (its card was late)
+        } *input;
+        long input_room;
         int inputs_open;
         // The opening and the closing of a capture device are slow on some hardware (a USB device takes 20 ms to prepare and 7 to close),
         // which is longer than the card holds of what is playing: a thread does them, one at a time, and tells the loop on a pipe.
@@ -187,8 +200,8 @@ static struct
         } job;
         int wake[2];
         /*
-                Mirrors (/root/audio.mirror, the mixer's Outputs page): other outputs that play what the output plays, each its own card at
-                its own rate on its own clock. Each block mixed for the output is given to every mirror too (audio_mirrors_feed): resampled
+                Mirrors: the outputs the graph wires something into that are not the output that plays, each its own card at its own rate on
+                its own clock. Each block mixed is given to every mirror too, what is wired into its node (audio_mirrors_feed): resampled
                 from the output's rate to the mirror's by a table that is never exact, whose step is nudged by how far the mirror's card is
                 from its target fill (smoothed), so a card whose clock runs a little fast or slow is followed and never slips. A mirror is
                 opened and closed by the job thread, never on the loop (an HDMI pin takes tens of milliseconds to open: the output holds 8),
@@ -198,7 +211,7 @@ static struct
         {
                 char name[PULSE_NAME];
                 int wanted, opening, open, failed;
-                unsigned int level;             // its own level in percent (its wire's knob in Settings), after the output's volume
+                long node;                      // its node in the graph, -1 while none wires into it
                 long aim;                       // the fill it is kept at: the output's, less what its resampler holds back
                 unsigned int gen;               // the output's open it is for
                 long card, device;
@@ -209,13 +222,41 @@ static struct
                 unsigned long xruns, dropped;
                 positive retry_at;
                 struct audio_resampler rs;
-        } mirror[AUDIO_STATE_DEVICES];
+        } *mirror;
+        long mirror_room;
         unsigned int output_gen;        // counted up at each open of the output
         int mirrors_live;               // mirrors open for this open of the output, with a table: none costs the output one load a block
-        int loopback_wanted;            // the mirror list names the loopback microphone (AUDIO_LOOPBACK_NAME)
+        int loopback_wanted;            // the graph wires something into the loopback microphone (AUDIO_LOOPBACK_NAME)
         long loopback;                  // its source's slot while there is one, 0 for none (a loopback is never a monitor's place)
-        unsigned int loopback_level, loopback_applied; // its level in percent as the list says it, and as its source has it
         float mirror_out[2][AUDIO_BLOCK];
+        /*
+                The sound graph (graph.c): the person's wiring as the file says it (plan), and the nodes there are with their wires (graph),
+                built again when a node comes or goes or the file moves (graph_dirty). Each stream's program node is stream_node[slot]; a
+                combiner of the person's is offered to programs as a microphone (mic, by its name: a loopback source of the engine).
+        */
+        struct audio_plan plan;
+        struct audio_graph graph;
+        int graph_dirty, graph_read, graph_absorbed;
+        int graph_keeps;                // something is wired that plays with no stream of the engine's (a microphone, a machine): the output is kept
+        long node_main, node_clock, node_loopback;
+        long *stream_node;
+        long stream_node_room;
+        unsigned long long *stream_id; // and what that node is, which a stream fading out (no program any more) is still found by
+        unsigned long streams_seen;     // the engine's streams freed at the last build: a stream that faded out is a build too
+        unsigned long long remote_sum;  // what Waterlink's rows said at the last build
+        char *graph_text;               // the file's text as last read
+        long graph_text_room;
+        struct audio_mic { char name[AUDIO_GRAPH_KEY]; long source; int keep; } *mic;
+        long mics, mic_room;
+        float graph_scratch[2][AUDIO_BLOCK];
+        float silence[AUDIO_BLOCK];
+        // The page's graph (state.c, version 5): its rows as this pass makes them and as the page has them, and the file's size.
+        struct audio_state_node *page_nodes, *held_nodes;
+        struct audio_state_edge *page_edges, *held_edges;
+        long page_node_room, page_edge_room;
+        unsigned int page_nodes_held, page_edges_held;
+        long page_bytes;
+        int page_fd;
         unsigned char mirror_bytes[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4];
         struct audio_mixer_report hw;   // what was found and done to the output card's mixer when it was opened
         unsigned int pick_why, why;     // why the card last looked at is the best, and why the one open plays (AUDIO_STATE_WHY_*)
@@ -239,6 +280,8 @@ static struct
         unsigned char read[AUDIO_READ];
         unsigned char file_block[AUDIO_BLOCK * 4];
 } audio_service; // zeroes only: an initialiser with a -1 in it would put its 4 MiB in the file
+
+static void audio_rows_fit(void **table, long *room, long want, long size);
 
 // Something plays or something records: the loop looks at the page and the clients sixty times a second, else twice.
 static int audio_busy(void)
@@ -495,13 +538,12 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
                         automatic = audio_output_rank(&jacks, audio_is_hdmi(cards[i].device[d].name), cards[i].device[d].device);
                         why = automatic == 6 ? AUDIO_STATE_WHY_ANALOG : automatic == 5 ? AUDIO_STATE_WHY_DISPLAY : automatic == 4 ? AUDIO_STATE_WHY_HDMI : AUDIO_STATE_WHY_NOTHING;
                         audio_device_name(listed, sizeof(listed), "alsa_output.", cards + i, cards[i].device[d].device);
-                        if (at < AUDIO_STATE_DEVICES)
-                        {
-                                pulse_copy(audio_service.devices[at].name, sizeof(audio_service.devices[at].name), listed);
-                                audio_describe(audio_service.devices[at].description, sizeof(audio_service.devices[at].description), cards[i].name, cards[i].device[d].name);
-                                audio_service.devices[at].flags = automatic <= 3 ? AUDIO_STATE_DEVICE_UNPLUGGED : 0;
-                                audio_service.device_count++;
-                        }
+                        audio_rows_fit((void **)&audio_service.devices, &audio_service.device_room, at + 2, (long)sizeof(audio_service.devices[0]));
+                        memory_zero(&audio_service.devices[at], sizeof(audio_service.devices[at]));
+                        pulse_copy(audio_service.devices[at].name, sizeof(audio_service.devices[at].name), listed);
+                        audio_describe(audio_service.devices[at].description, sizeof(audio_service.devices[at].description), cards[i].name, cards[i].device[d].name);
+                        audio_service.devices[at].flags = automatic <= 3 ? AUDIO_STATE_DEVICE_UNPLUGGED : 0;
+                        audio_service.device_count++;
                         rank = automatic;
                         if (audio_service.card >= 0 && cards[i].number == audio_service.card && (audio_service.device < 0 || cards[i].device[d].device == audio_service.device))
                                 rank = 90, why = AUDIO_STATE_WHY_NAMED;
@@ -516,8 +558,8 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
                         }
                 }
         }
-        // The loopback microphone is listed with the outputs (it is mirrored to as an output is), never picked to play on.
-        if (audio_service.device_count < AUDIO_STATE_DEVICES)
+        // The loopback microphone is listed with the outputs (it is wired into as an output is), never picked to play on.
+        audio_rows_fit((void **)&audio_service.devices, &audio_service.device_room, audio_service.device_count + 1, (long)sizeof(audio_service.devices[0]));
         {
                 struct audio_state_device *loop = &audio_service.devices[audio_service.device_count++];
 
@@ -580,6 +622,7 @@ static int audio_output_open(long asked_rate, int low)
 
         audio_service.block_left = 0;
         audio_service.output_gen++; // the mirrors of the last open are let go, and opened again for this one (audio_mirrors_pass)
+        audio_service.graph_dirty = 1; // the output that plays, and the rate the graph runs at, may be others
 
         if (!audio_service.no_card && audio_card_pick(&card, &device, name, sizeof(name), description, sizeof(description)))
         {
@@ -937,7 +980,9 @@ static long audio_number_text(char *to, unsigned long value)
 }
 
 static void audio_inputs_choose(void);
-static void audio_mirrors_want(const char *list);
+static void audio_input_fifo(long j);
+static void audio_input_put(long j, const float *left, const float *right, long frames);
+static void audio_graph_read(int first);
 static void audio_mirrors_feed(long frames);
 static void audio_inputs_levels(int bits);
 static void audio_inputs_pass(int first);
@@ -1014,14 +1059,9 @@ static void audio_settings_read(int first)
                                 audio_service.devices_at = 1; // looked at again at once
                 }
         }
-        // The outputs that play what the output plays, besides it: a name a line (the mixer's Outputs page); a file taken away is none.
-        if (audio_file_moved(7, "audio.mirror", first))
-        {
-                char list[AUDIO_STATE_DEVICES * (PULSE_NAME + 1) + 1];
-
-                audio_file_read("audio.mirror", list, sizeof(list));
-                audio_mirrors_want(list);
-        }
+        // The person's wiring (the graph's file; the old list of mirrors is taken in once where there is none).
+        if (audio_file_moved(7, AUDIO_GRAPH_FILE, first))
+                audio_graph_read(first);
         // The person's switch for capture: on unless the file says off (and a file taken away is on).
         if (audio_file_moved(1, "audio.capture", first))
         {
@@ -1279,6 +1319,9 @@ static void audio_host_remember(void *context, const char *name, unsigned long v
 static void audio_host_changed(void *context, int what, long sink)
 {
         (void)context;
+        // A stream began or ended, or the default source moved (what a machine listening here hears): the graph is built again.
+        if (what == PULSE_CHANGED_STREAMS || what == PULSE_CHANGED_DEFAULT_SOURCE)
+                audio_service.graph_dirty = 1;
         if (what == PULSE_CHANGED_SINK_VOLUME)
                 audio_service.dirty |= 1;
         // A program changed the default source's level, or which source is the default: kept. (What the service does to the sources itself is not.)
@@ -1319,6 +1362,99 @@ static void audio_page_text(struct audio_text_cache *k, const struct pulse_clien
 
 #define AUDIO_PAGE_PIECE 64 // the page is compared and copied in pieces this long
 
+/*
+        The graph's rows for the page into the service's own tables (grown to fit): a node's kind, names and flags with what it does now (a
+        program with a stream that plays, a card that is open, a microphone that is read), an edge's ends, level (the master volume's for
+        Main to the output that plays) and flags, and whether it carried sound since the last write. The fixed part's counts are set.
+        Answers whether a row or a count differs from what the page holds.
+*/
+static int audio_page_graph(struct audio_state *build)
+{
+        const struct audio_graph *g = &audio_service.graph;
+        struct pulse *p = &audio_service.pulse;
+        long nodes = g->nodes, edges = g->edges;
+        int moved = nodes != (long)audio_service.page_nodes_held || edges != (long)audio_service.page_edges_held;
+        unsigned long master = audio_service.sink >= 0 ? (p->sink[audio_service.sink].volume[0] * 100 + AUDIO_VOLUME_NORM / 2) / AUDIO_VOLUME_NORM : 100;
+
+        {
+                long node_room = audio_service.page_node_room, edge_room = audio_service.page_edge_room;
+
+                audio_rows_fit((void **)&audio_service.page_nodes, &audio_service.page_node_room, nodes + 1, (long)sizeof(struct audio_state_node));
+                audio_rows_fit((void **)&audio_service.held_nodes, &node_room, audio_service.page_node_room, (long)sizeof(struct audio_state_node));
+                audio_rows_fit((void **)&audio_service.page_edges, &audio_service.page_edge_room, edges + 1, (long)sizeof(struct audio_state_edge));
+                audio_rows_fit((void **)&audio_service.held_edges, &edge_room, audio_service.page_edge_room, (long)sizeof(struct audio_state_edge));
+        }
+        for (long k = 0; k < nodes; k++)
+        {
+                struct audio_state_node row;
+                unsigned int flags = g->flags[k];
+
+                memory_zero(&row, sizeof(row));
+                pulse_copy(row.name, sizeof(row.name), g->name[k]);
+                pulse_copy(row.description, sizeof(row.description), g->description[k]);
+                pulse_copy(row.machine, sizeof(row.machine), g->machine[k]);
+                pulse_copy(row.allow, sizeof(row.allow), g->allow[k]);
+                if (g->kind[k] == AUDIO_NODE_OUTPUT)
+                {
+                        if (k == audio_service.node_clock && audio_service.pcm.fd >= 0)
+                                flags |= AUDIO_NODE_PLAYING;
+                        for (long m = 0; m < audio_service.mirror_room; m++)
+                                if (audio_service.mirror[m].node == k)
+                                        flags |= (audio_service.mirror[m].open && audio_service.mirror[m].table ? AUDIO_NODE_PLAYING : 0) | (audio_service.mirror[m].failed ? AUDIO_NODE_FAILED : 0);
+                }
+                else if (g->kind[k] == AUDIO_NODE_LOOPBACK)
+                        flags |= audio_service.loopback ? AUDIO_NODE_PLAYING : 0;
+                else if (g->kind[k] == AUDIO_NODE_CAPTURE)
+                        flags |= g->slot[k] >= 0 && g->slot[k] < audio_service.input_room && audio_service.input[g->slot[k]].pcm.fd >= 0 ? AUDIO_NODE_PLAYING : 0;
+                row.kind = g->kind[k], row.flags = flags, row.latency_us = g->latency_us[k], row.lost = g->lost[k];
+                audio_service.page_nodes[k] = row;
+        }
+        for (long i = 0; i < p->stream_slots && i < audio_service.stream_node_room; i++)
+        {
+                const struct pulse_stream *s = p->stream + i;
+                long k = audio_service.stream_node[i];
+
+                if (s->used && !s->dying && !s->underrun && !s->corked && k >= 0 && k < nodes)
+                        audio_service.page_nodes[k].flags |= AUDIO_NODE_PLAYING;
+        }
+        for (long e = 0; e < edges; e++)
+        {
+                struct audio_state_edge row = {g->from[e], g->to[e], (g->eflags[e] & AUDIO_EDGE_PLAYING) ? (unsigned int)master : g->level[e], g->eflags[e]};
+
+                row.flags |= g->peak[e] > 1e-5f ? AUDIO_EDGE_LIVE : 0;
+                g->peak[e] = 0;
+                audio_service.page_edges[e] = row;
+        }
+        for (long k = 0; k < nodes && !moved; k++)
+                moved = memory_compare(&audio_service.page_nodes[k], &audio_service.held_nodes[k], sizeof(struct audio_state_node));
+        for (long e = 0; e < edges && !moved; e++)
+                moved = memory_compare(&audio_service.page_edges[e], &audio_service.held_edges[e], sizeof(struct audio_state_edge));
+        build->graph_at = AUDIO_STATE_BYTES;
+        build->graph_nodes = (unsigned int)nodes, build->graph_edges = (unsigned int)edges, build->graph_gen = g->gen, build->refused = (unsigned int)g->refused;
+        build->total = (unsigned int)(AUDIO_STATE_BYTES + nodes * (long)sizeof(struct audio_state_node) + edges * (long)sizeof(struct audio_state_edge));
+        return moved;
+}
+
+// The page's file and map made at least bytes long (rounded up to a page, doubling): 0 when it could not grow.
+static int audio_page_fit(unsigned long bytes)
+{
+        long next = audio_service.page_bytes ? audio_service.page_bytes : AUDIO_STATE_BYTES, got;
+
+        if ((long)bytes <= audio_service.page_bytes)
+                return 1;
+        if (audio_service.page_fd < 0)
+                return 0;
+        while (next < (long)bytes)
+                next *= 2;
+        if (audio_call(syscall(ftruncate), (positive)audio_service.page_fd, (positive)next, 0, 0, 0, 0) < 0)
+                return 0;
+        got = audio_call(syscall(mremap), (positive)audio_service.page, (positive)audio_service.page_bytes, (positive)next, 1, 0, 0); // MREMAP_MAYMOVE
+        if (got < 0 && got > -4096)
+                return 0;
+        audio_service.page = (struct audio_state *)got, audio_service.page_bytes = next;
+        return 1;
+}
+
 static void audio_page_write(void)
 {
         struct audio_state *page = audio_service.page;
@@ -1328,6 +1464,7 @@ static void audio_page_write(void)
         static int primed;
         long streams = 0, records = 0, devices = 0, inputs = 0, off;
         unsigned int seq;
+        int graph_moved;
 
         if (!page || audio_service.sink < 0) // no sink (the sink could not be made): nothing to show, and no sink to index
                 return;
@@ -1355,25 +1492,32 @@ static void audio_page_write(void)
         build.latency_us = (unsigned int)pulse_delay_us(sink->delay_frames, sink->rate);
         pulse_copy(build.device, sizeof(build.device), audio_service.active_description);
         pulse_copy(build.name, sizeof(build.name), audio_service.active_name);
-        for (int i = 0; i < audio_service.device_count; i++)
+        // The old list of outputs (the mixer's): an output Main is wired to that is not the one that plays is mirrored to, at that wire's level.
+        devices = audio_service.device_count < AUDIO_STATE_DEVICES ? audio_service.device_count : AUDIO_STATE_DEVICES;
+        for (long i = 0; i < devices; i++)
         {
+                const struct audio_graph *g = &audio_service.graph;
+                long node = -1, main = audio_service.node_main;
+
                 build.device_list[i] = audio_service.devices[i];
                 if (audio_text_equal(build.device_list[i].name, audio_service.active_name))
                         build.device_list[i].flags |= AUDIO_STATE_DEVICE_ACTIVE;
                 build.device_list[i].level = 0;
-                if (audio_text_equal(build.device_list[i].name, AUDIO_LOOPBACK_NAME))
-                        build.device_list[i].flags |= (audio_service.loopback_wanted ? AUDIO_STATE_DEVICE_MIRROR : 0) | (audio_service.loopback ? AUDIO_STATE_DEVICE_MIRRORING : 0),
-                        build.device_list[i].level = audio_service.loopback_wanted ? audio_service.loopback_level : 0;
-                for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
-                        if (audio_service.mirror[k].wanted && audio_text_equal(build.device_list[i].name, audio_service.mirror[k].name))
-                                build.device_list[i].level = audio_service.mirror[k].level,
-                                build.device_list[i].flags |= AUDIO_STATE_DEVICE_MIRROR |
-                                                              (audio_service.mirror[k].open && audio_service.mirror[k].table && audio_service.mirror[k].gen == audio_service.output_gen
-                                                                   ? AUDIO_STATE_DEVICE_MIRRORING : 0);
+                for (long k = 0; k < g->nodes && node < 0; k++)
+                        if ((g->kind[k] == AUDIO_NODE_OUTPUT || g->kind[k] == AUDIO_NODE_LOOPBACK) && g->slot[k] == i)
+                                node = k;
+                for (long e = main >= 0 && main < g->nodes ? g->first[main] : 0; node >= 0 && main >= 0 && main < g->nodes && e < g->first[main + 1]; e++)
+                        if (g->to[e] == (unsigned int)node && node != audio_service.node_clock)
+                                build.device_list[i].flags |= AUDIO_STATE_DEVICE_MIRROR, build.device_list[i].level = g->level[e];
+                if (build.device_list[i].flags & AUDIO_STATE_DEVICE_VIRTUAL)
+                        build.device_list[i].flags |= audio_service.loopback ? AUDIO_STATE_DEVICE_MIRRORING : 0;
+                for (long k = 0; k < audio_service.mirror_room; k++)
+                        if (audio_service.mirror[k].wanted && audio_text_equal(build.device_list[i].name, audio_service.mirror[k].name) && audio_service.mirror[k].open &&
+                            audio_service.mirror[k].table && audio_service.mirror[k].gen == audio_service.output_gen)
+                                build.device_list[i].flags |= AUDIO_STATE_DEVICE_MIRRORING;
         }
-        for (long i = audio_service.device_count; i < (long)build.devices; i++)
+        for (long i = devices; i < (long)build.devices; i++)
                 memory_zero(build.device_list + i, sizeof(build.device_list[0]));
-        devices = audio_service.device_count;
         build.devices = (unsigned int)devices;
         for (long i = 0; i < audio_service.pulse.stream_slots && i < audio_service.slots; i++)
         {
@@ -1431,7 +1575,7 @@ static void audio_page_write(void)
                         pulse_copy(build.input, sizeof(build.input), in->description);
                         pulse_copy(build.input_name, sizeof(build.input_name), in->name);
                 }
-                for (long i = 0; i < PULSE_SOURCES && inputs < AUDIO_STATE_INPUTS; i++)
+                for (long i = 0; i < p->source_slots && inputs < AUDIO_STATE_INPUTS; i++)
                         if (p->source[i].used)
                         {
                                 pulse_copy(build.input_list[inputs].name, sizeof(build.input_list[0].name), p->source[i].name);
@@ -1472,9 +1616,15 @@ static void audio_page_write(void)
                 }
                 build.records = (unsigned int)records;
         }
+        // The graph's rows, and whether any differs from what the page holds (a count that changed is a difference).
+        graph_moved = audio_page_graph(&build);
         // Nothing differs from what the page holds: nothing is written, and the sequence number is the same as it was.
-        if (!audio_service.page_whole && memory_compare((char *)&build + 16, (char *)&held + 16, sizeof(build) - 16) == 0)
+        if (!audio_service.page_whole && !graph_moved && memory_compare((char *)&build + 16, (char *)&held + 16, sizeof(build) - 16) == 0)
                 return;
+        // A graph that outgrew the file: the file and the map grown first (a reader's map of the old size stays good: it never shrinks).
+        if (!audio_page_fit(build.total))
+                build.graph_nodes = build.graph_edges = 0, build.total = AUDIO_STATE_BYTES;
+        page = audio_service.page;
         //      Even before the write begins whatever the page holds: a server killed mid-write left it odd, and a page
         //      reused (audio_page_open) kept it odd for good, which every reader takes as a write that never ends.
         seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED) & ~1u;
@@ -1492,6 +1642,26 @@ static void audio_page_write(void)
                         memory_copy((char *)&held + off, (char *)&build + off, length);
                 }
         }
+        // The rows that differ from what the page holds (all of them when the page is new or a count moved).
+        {
+                struct audio_state_node *rows = (struct audio_state_node *)(void *)((char *)page + build.graph_at);
+                struct audio_state_edge *wires = (struct audio_state_edge *)(void *)(rows + build.graph_nodes);
+                int whole = audio_service.page_whole || build.graph_nodes != audio_service.page_nodes_held || build.graph_edges != audio_service.page_edges_held;
+
+                for (unsigned int k = 0; k < build.graph_nodes; k++)
+                        if (whole || memory_compare(&audio_service.page_nodes[k], &audio_service.held_nodes[k], sizeof(rows[0])))
+                        {
+                                memory_copy(&rows[k], &audio_service.page_nodes[k], sizeof(rows[0]));
+                                memory_copy(&audio_service.held_nodes[k], &audio_service.page_nodes[k], sizeof(rows[0]));
+                        }
+                for (unsigned int e = 0; e < build.graph_edges; e++)
+                        if (whole || memory_compare(&audio_service.page_edges[e], &audio_service.held_edges[e], sizeof(wires[0])))
+                        {
+                                memory_copy(&wires[e], &audio_service.page_edges[e], sizeof(wires[0]));
+                                memory_copy(&audio_service.held_edges[e], &audio_service.page_edges[e], sizeof(wires[0]));
+                        }
+                audio_service.page_nodes_held = build.graph_nodes, audio_service.page_edges_held = build.graph_edges;
+        }
         audio_service.page_whole = 0;
         page->magic = build.magic;
         page->version = build.version;
@@ -1506,6 +1676,7 @@ static void audio_page_open(void)
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0, 0, 0, 0);
         long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600, 0, 0), got;
 
+        audio_service.page_fd = -1;
         if (fd < 0)
                 return;
         audio_call(syscall(fchmod), (positive)fd, 0600, 0, 0, 0, 0);
@@ -1515,10 +1686,14 @@ static void audio_page_open(void)
                 return;
         }
         got = audio_call(syscall(mmap), 0, AUDIO_STATE_BYTES, 3, 1, (positive)fd, 0); // PROT_READ | PROT_WRITE, MAP_SHARED
-        audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
         if (got < 0 && got > -4096)
+        {
+                audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
                 return;
+        }
+        // The descriptor is kept: the file grows with the graph (audio_page_fit).
         audio_service.page = (struct audio_state *)got;
+        audio_service.page_fd = (int)fd, audio_service.page_bytes = AUDIO_STATE_BYTES;
 }
 
 // The choice of card changed, or one came or went: the list is made again, and the card that is the person's choice, else the best, is the one played on.
@@ -1886,6 +2061,20 @@ static void audio_file_put(const unsigned char *bytes, long count)
         }
 }
 
+// A block of the graph (audio_graph_mix) as the output's bytes: the block the output that plays is given, held to full scale (what passed
+// it counted in the sink's clips) and in its format.
+static void audio_graph_mix(long frames, float **left, float **right);
+static void audio_graph_after(long frames);
+static void audio_block_make(unsigned char *into, long format, long channels, long frames)
+{
+        float *left, *right;
+
+        audio_graph_mix(frames, &left, &right);
+        if (left != audio_service.silence && audio_service.sink >= 0)
+                audio_service.pulse.sink[audio_service.sink].mix.clips += f32_pair_clip(left, right, (unsigned long)frames);
+        audio_encode(format, into, frames, channels, left, right);
+}
+
 // Mixes frames of the sink and plays them: to the card, or the clock's file. A block the card does not take in full is kept (block_at,
 // block_left) and its rest is written first, before anything more is mixed: a short write is the card being full, so it delays the sound
 // and does not lose any of it.
@@ -1905,7 +2094,7 @@ static void audio_produce(long frames)
                         {
                                 long n = frames < AUDIO_BLOCK ? frames : AUDIO_BLOCK;
 
-                                pulse_sink_mix(&audio_service.pulse, audio_service.sink, audio_service.block, pcm->format, pcm->channels, n);
+                                audio_block_make(audio_service.block, pcm->format, pcm->channels, n);
                                 audio_service.block_at = 0;
                                 audio_service.block_left = n;
                                 frames -= n;
@@ -1913,7 +2102,7 @@ static void audio_produce(long frames)
                         }
                         written = audio_pcm_write(pcm, audio_service.block + audio_service.block_at * pcm->frame_bytes, audio_service.block_left);
                         if (mixed)
-                                audio_mirrors_feed(mixed); // the output's card has its frames first
+                                audio_graph_after(mixed); // the output's card has its frames first
                         if (written < 0)
                         {
                                 audio_service.block_left = 0; // refused (an underrun): what was mixed for it is dropped, not played late
@@ -1929,9 +2118,10 @@ static void audio_produce(long frames)
                 {
                         long n = frames < AUDIO_BLOCK ? frames : AUDIO_BLOCK;
 
-                        pulse_sink_mix(&audio_service.pulse, audio_service.sink, audio_service.file_block, AUDIO_FORMAT_S16LE, 2, n);
+                        audio_block_make(audio_service.file_block, AUDIO_FORMAT_S16LE, 2, n);
                         if (audio_service.file >= 0)
                                 audio_file_put(audio_service.file_block, (long)n * 4);
+                        audio_graph_after(n);
                         audio_service.frames_played += (unsigned long long)n;
                         frames -= n;
                 }
@@ -2095,7 +2285,7 @@ static void audio_inputs_choose(void)
         audio_service.input_internal++;
         if (audio_service.wanted_source[0])
                 pick = pulse_source_named(p, audio_service.wanted_source);
-        for (int k = 0; k < AUDIO_INPUTS && pick < 0; k++)
+        for (long k = 0; k < audio_service.input_room && pick < 0; k++)
                 if (audio_service.input[k].used)
                 {
                         long this = audio_service.pcm.fd >= 0 && audio_service.input[k].card == audio_service.pcm.card ? 2 : 1;
@@ -2117,14 +2307,16 @@ static void audio_inputs_choose(void)
 // The cards were looked at again: a capture device that came is a source, one that went is not, and the default is chosen if anything changed.
 static void audio_inputs_pass(int first)
 {
-        struct audio_found found[AUDIO_INPUTS];
+        static struct audio_found *found;
+        static long found_room;
         int count, changed = first;
 
         if (audio_service.no_card)
                 return;
-        count = audio_inputs_scan(found, AUDIO_INPUTS);
+        audio_rows_fit((void **)&found, &found_room, AUDIO_ALSA_CARDS * AUDIO_ALSA_DEVICES, (long)sizeof(found[0]));
+        count = audio_inputs_scan(found, (int)found_room);
         audio_service.input_internal++;
-        for (int k = 0; k < AUDIO_INPUTS; k++)
+        for (long k = 0; k < audio_service.input_room; k++)
         {
                 int still = 0;
 
@@ -2135,24 +2327,32 @@ static void audio_inputs_pass(int first)
                 if (!still)
                 {
                         audio_say_text("a capture device is gone:", audio_service.input[k].description);
-                        audio_input_close(k);
+                        audio_input_close((int)k);
                         audio_service.input[k].opening = 0;
                         pulse_source_remove(&audio_service.pulse, audio_service.input[k].slot);
                         audio_service.input[k].used = 0;
+                        audio_input_fifo(k);
                         changed = 1;
                 }
         }
         for (int f = 0; f < count; f++)
         {
-                int present = 0, free_at = -1;
+                long present = 0, free_at = -1;
 
-                for (int k = 0; k < AUDIO_INPUTS; k++)
+                for (long k = 0; k < audio_service.input_room; k++)
                 {
                         present |= audio_service.input[k].used && audio_text_equal(found[f].name, audio_service.input[k].name);
-                        if (!audio_service.input[k].used && free_at < 0)
+                        if (!audio_service.input[k].used && !audio_service.input[k].opening && free_at < 0)
                                 free_at = k;
                 }
-                if (!present && free_at >= 0)
+                if (!present && free_at < 0)
+                {
+                        free_at = audio_service.input_room;
+                        audio_rows_fit((void **)&audio_service.input, &audio_service.input_room, free_at + 1, (long)sizeof(audio_service.input[0]));
+                        for (long k = free_at; k < audio_service.input_room; k++)
+                                audio_service.input[k].pcm.fd = -1;
+                }
+                if (!present)
                 {
                         long slot = pulse_source_add(&audio_service.pulse, found[f].name, found[f].description, 48000);
 
@@ -2173,7 +2373,10 @@ static void audio_inputs_pass(int first)
         }
         audio_service.input_internal--;
         if (changed)
+        {
                 audio_inputs_choose();
+                audio_service.graph_dirty = 1;
+        }
 }
 
 /* ---- mirrors ---- */
@@ -2198,56 +2401,6 @@ static int audio_output_named(const char *name, long *card, long *device)
                                 return *card = cards[i].number, *device = cards[i].device[d].device, 1;
                 }
         return 0;
-}
-
-// The person's list of mirrors (a name a line, a tab and a level in percent after it where it is not the whole): the ones named are wanted,
-// the others let go of (audio_mirrors_pass closes them).
-static void audio_mirrors_want(const char *list)
-{
-        for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
-                audio_service.mirror[k].wanted = 0;
-        audio_service.loopback_wanted = 0;
-        for (const char *at = list; at && *at;)
-        {
-                char name[PULSE_NAME];
-                long n = 0;
-                unsigned int level = 0;
-                int free = -1, k, digits = 0;
-
-                while (*at == '\n' || *at == '\r' || *at == ' ')
-                        at++;
-                while (*at && *at != '\n' && *at != '\r' && *at != '\t')
-                {
-                        if (n < PULSE_NAME - 1)
-                                name[n++] = *at;
-                        at++;
-                }
-                name[n] = 0;
-                while (*at == '\t' || *at == ' ')
-                        at++;
-                for (; *at >= '0' && *at <= '9'; at++)
-                        level = level < 1000 ? level * 10 + (unsigned int)(*at - '0') : level, digits++;
-                while (*at && *at != '\n')
-                        at++;
-                level = !digits ? 100 : level > 100 ? 100 : level;
-                if (!n)
-                        continue;
-                if (audio_text_equal(name, AUDIO_LOOPBACK_NAME))
-                {
-                        audio_service.loopback_wanted = 1, audio_service.loopback_level = level;
-                        continue;
-                }
-                for (k = 0; k < AUDIO_STATE_DEVICES && !audio_text_equal(audio_service.mirror[k].name, name); k++)
-                        if (free < 0 && !audio_service.mirror[k].wanted && !audio_service.mirror[k].open && !audio_service.mirror[k].opening)
-                                free = k;
-                if (k == AUDIO_STATE_DEVICES && (k = free) >= 0)
-                {
-                        pulse_copy(audio_service.mirror[k].name, sizeof(audio_service.mirror[k].name), name);
-                        audio_service.mirror[k].failed = 0, audio_service.mirror[k].retry_at = 0;
-                }
-                if (k >= 0 && k < AUDIO_STATE_DEVICES)
-                        audio_service.mirror[k].wanted = 1, audio_service.mirror[k].level = level;
-        }
 }
 
 // A mirror's job for the thread, if it has none: 1 when started. A close gives the thread the card, and the mirror has none.
@@ -2350,33 +2503,22 @@ static void audio_mirrors_pass(positive now)
                 pulse_source_remove(&audio_service.pulse, audio_service.loopback);
                 audio_service.loopback = 0;
         }
-        // Its level is its source's volume (what every program that records it is given, before its own).
-        if (audio_service.loopback && audio_service.loopback_applied != audio_service.loopback_level + 1)
-        {
-                struct pulse_source *s = &audio_service.pulse.source[audio_service.loopback];
-
-                s->volume[0] = s->volume[1] = (unsigned long)audio_service.loopback_level * AUDIO_VOLUME_NORM / 100;
-                audio_service.loopback_applied = audio_service.loopback_level + 1;
-                pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.loopback);
-        }
-        if (!audio_service.loopback)
-                audio_service.loopback_applied = 0;
         audio_service.mirrors_live = 0;
-        for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
+        for (long k = 0; k < audio_service.mirror_room; k++)
                 audio_service.mirrors_live += audio_service.mirror[k].open && audio_service.mirror[k].table && audio_service.mirror[k].gen == audio_service.output_gen;
-        for (int k = 0; k < AUDIO_STATE_DEVICES && !audio_service.job.running; k++)
+        for (long k = 0; k < audio_service.mirror_room && !audio_service.job.running; k++)
         {
                 struct audio_mirror *m = &audio_service.mirror[k];
                 int keep = m->wanted && audio_service.pcm.fd >= 0 && !audio_text_equal(m->name, audio_service.active_name);
 
                 if (m->open && (!keep || m->gen != audio_service.output_gen || !m->table || m->pcm.broken))
-                        audio_mirror_job(AUDIO_JOB_MIRROR_CLOSE, k);
+                        audio_mirror_job(AUDIO_JOB_MIRROR_CLOSE, (int)k);
                 else if (!m->open && !m->opening && keep && now >= m->retry_at)
                 {
                         if (!audio_output_named(m->name, &m->card, &m->device))
                                 m->retry_at = now + AUDIO_MIRROR_RETRY_NS; // not plugged in now: looked for again in a while
                         else
-                                audio_mirror_job(AUDIO_JOB_MIRROR_OPEN, k);
+                                audio_mirror_job(AUDIO_JOB_MIRROR_OPEN, (int)k);
                 }
         }
 }
@@ -2405,19 +2547,9 @@ static void audio_mirror_feed(struct audio_mirror *m, const float *left, const f
         rs->step = (unsigned long)((long long)m->step + (long long)m->step / 1000000 * ppm);
         if (audio_rs_room(rs) < frames)
                 audio_rs_reset(rs);
-        if (m->level >= 100)
-        {
-                memory_copy(rs->buf[0] + rs->have, left, (unsigned long)frames * sizeof(float));
-                memory_copy(rs->buf[1] + rs->have, right, (unsigned long)frames * sizeof(float));
-        }
-        else
-        {
-                // Its own level, on the volume's curve as a program's is (a whole the output's volume already has).
-                float gain = audio_volume_gain((unsigned long)m->level * AUDIO_VOLUME_NORM / 100);
-
-                for (long i = 0; i < frames; i++)
-                        rs->buf[0][rs->have + i] = left[i] * gain, rs->buf[1][rs->have + i] = right[i] * gain;
-        }
+        // Its level is its wires' in the graph: its bus has them already.
+        memory_copy(rs->buf[0] + rs->have, left, (unsigned long)frames * sizeof(float));
+        memory_copy(rs->buf[1] + rs->have, right, (unsigned long)frames * sizeof(float));
         rs->have += frames;
         for (;;)
         {
@@ -2434,23 +2566,22 @@ static void audio_mirror_feed(struct audio_mirror *m, const float *left, const f
 }
 
 /*
-        The block just mixed for the output, given to every mirror open for this open of it: the mixer's own floats (the sink's mix, after its
-        volume, as its monitor has them), not the card's bytes decoded again, and after the output's card has its frames, so a mirror's
-        resampling and writes are never between the output's wake and its write.
+        The block just mixed, given to every mirror open for this open of the output: its node's bus in the graph (what is wired into it, at
+        the wires' levels, the mixer's own floats and not the card's bytes decoded again), and after the output's card has its frames, so a
+        mirror's resampling and writes are never between the output's wake and its write.
 */
 static void audio_mirrors_feed(long frames)
 {
-        const struct audio_sink *bus;
+        const struct audio_graph *g = &audio_service.graph;
 
         if (!audio_service.mirrors_live || audio_service.sink < 0 || frames < 1 || frames > AUDIO_BLOCK)
                 return;
-        bus = &audio_service.pulse.sink[audio_service.sink].mix;
-        for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
+        for (long k = 0; k < audio_service.mirror_room; k++)
         {
                 struct audio_mirror *m = &audio_service.mirror[k];
 
-                if (m->open && m->table && m->gen == audio_service.output_gen && !m->pcm.broken)
-                        audio_mirror_feed(m, bus->mix[0], bus->mix[1], frames);
+                if (m->open && m->table && m->gen == audio_service.output_gen && !m->pcm.broken && m->node >= 0 && m->node < g->nodes && g->bus[2 * m->node])
+                        audio_mirror_feed(m, g->bus[2 * m->node], g->bus[2 * m->node + 1], frames);
         }
 }
 
@@ -2576,6 +2707,7 @@ static void audio_job_finish(void)
                 pulse_source_reconfigure(&audio_service.pulse, audio_service.input[k].slot, audio_service.input[k].name, audio_service.input[k].description, audio_service.job.pcm.rate);
                 audio_service.input_internal--;
         }
+        audio_input_fifo(k); // a wired one's resampler, at the rate it opened at
 }
 
 // A capture device opened here, when no thread could be made for it.
@@ -2598,6 +2730,7 @@ static void audio_input_open_now(int k, positive now)
         audio_service.input[k].pcm = pcm;
         audio_service.inputs_open++;
         audio_service.capture.opens++;
+        audio_input_fifo(k);
 }
 
 // A capture device that has data: read, decoded to the pair, and given to the engine, a few blocks at most so the sound waits for nothing.
@@ -2644,6 +2777,7 @@ static void audio_capture_pass(int k)
                         planes[c] = audio_service.in_planes[c];
                 audio_decode(pcm->format, audio_service.in_block, got, pcm->channels, planes);
                 pulse_source_feed(&audio_service.pulse, slot, planes[0], pcm->channels > 1 ? planes[1] : planes[0], got);
+                audio_input_put(k, planes[0], pcm->channels > 1 ? planes[1] : planes[0], got);
                 audio_service.capture.frames += (unsigned long long)got;
                 if (got < want)
                         break;
@@ -2667,15 +2801,19 @@ static void audio_inputs_run(positive now)
 {
         struct pulse *p = &audio_service.pulse;
 
-        if (p->records_made == p->records_freed && !audio_service.inputs_open)
+        int wired = 0;
+
+        for (long k = 0; k < audio_service.input_room; k++)
+                wired |= audio_service.input[k].used && audio_service.input[k].wired;
+        if (p->records_made == p->records_freed && !audio_service.inputs_open && !wired)
                 return;
-        for (int k = 0; k < AUDIO_INPUTS; k++)
+        for (int k = 0; k < audio_service.input_room; k++)
         {
                 long wanted;
 
                 if (!audio_service.input[k].used)
                         continue;
-                wanted = pulse_source_wanted(p, audio_service.input[k].slot);
+                wanted = pulse_source_wanted(p, audio_service.input[k].slot) || audio_service.input[k].wired;
                 if (wanted)
                 {
                         audio_service.input[k].idle_since = 0;
@@ -2701,6 +2839,615 @@ static void audio_inputs_run(positive now)
                         }
                 }
         }
+}
+
+/*
+        Waterlink's half of the server: another machine's microphone, what it plays and its speakers as nodes of the graph (remote.c, the
+        Waterlink agent's: a table of struct audio_remote_row it keeps, sound pulled from a source and pushed to an output, and its own
+        descriptors in the loop). Until it is in the build there is no machine's device: the hooks below do nothing.
+*/
+// remote.c is included here (it defines AUDIO_REMOTE_INCLUDED): after the service's helpers it calls, before the graph that calls it.
+#include "remote.c"
+#ifndef AUDIO_REMOTE_INCLUDED
+static long audio_remote_rows(const struct audio_remote_row **rows)
+{
+        *rows = 0;
+        return 0;
+}
+
+static long remote_pull(long dev, float *left, float *right, long frames, long rate)
+{
+        (void)dev, (void)rate;
+        memory_fill(left, 0, (positive)frames * sizeof(float));
+        memory_fill(right, 0, (positive)frames * sizeof(float));
+        return frames;
+}
+
+static void remote_push(long dev, const float *left, const float *right, long frames, long rate)
+{
+        (void)dev, (void)left, (void)right, (void)frames, (void)rate;
+}
+
+static int audio_remote_poll(struct audio_poll *into, int room)
+{
+        (void)into, (void)room;
+        return 0;
+}
+
+static void audio_remote_ready(const struct audio_poll *polled, int count, positive now)
+{
+        (void)polled, (void)count, (void)now;
+}
+
+static void audio_remote_pass(positive now)
+{
+        (void)now;
+}
+#endif
+
+/* ---- the sound graph ---- */
+
+// The graph's memory (graph.c): the host's blocks, zeroed; a block of no bytes is one let go.
+static void *audio_graph_memory(void *context, void *old, long old_bytes, long bytes)
+{
+        (void)context;
+        if (old && old_bytes > 0)
+                audio_host_release(0, old, old_bytes);
+        return bytes > 0 ? audio_host_alloc(0, bytes) : 0;
+}
+
+// A table of the service's made room for want rows of size bytes (doubling), the new rows zeroed (the server stops when it cannot).
+static void audio_rows_fit(void **table, long *room, long want, long size)
+{
+        long next = *room ? *room : 8;
+
+        if (want <= *room)
+                return;
+        while (next < want)
+                next *= 2;
+        *table = audio_table_grow(*table, *room * size, next * size);
+        *room = next;
+}
+
+// The key of a stream's program ("uid/name", what its volume is remembered by) and the name it is shown: 0 for a stream of no program
+// (a sample, or a stream whose connection has gone).
+static int audio_stream_program(const struct pulse_stream *s, char *key, long key_room, char *shown, long shown_room)
+{
+        struct pulse *p = &audio_service.pulse;
+        const struct pulse_client *c;
+
+        if (s->client < 0 || s->client >= p->client_slots || !(c = p->client[s->client]))
+                return 0;
+        if (!pulse_app_key(c, key, key_room))
+        {
+                long n = 7;
+
+                memory_copy(key, "client:", 7);
+                n += audio_number_text(key + n, c->index);
+                key[n] = 0;
+        }
+        if (!pulse_props_text(&c->props, "application.name", shown, shown_room) || !shown[0])
+                if (!pulse_props_text(&s->props, "media.name", shown, shown_room) || !shown[0])
+                        pulse_copy(shown, shown_room, "?");
+        return 1;
+}
+
+// A node of the graph a key names: output:default is the output that plays.
+static long audio_graph_key_node(const char *key)
+{
+        if (audio_text_equal(key, AUDIO_GRAPH_DEFAULT_OUTPUT))
+                return audio_service.node_clock;
+        return audio_graph_named(&audio_service.graph, key);
+}
+
+// A combiner's microphone's name as programs see it: the prefix and its name, a byte a source name may not have an underscore.
+static void audio_mic_name(char *to, long room, const char *name)
+{
+        long n = (long)audio_text_length(AUDIO_MIC_PREFIX);
+
+        pulse_copy(to, room, AUDIO_MIC_PREFIX);
+        for (; *name && n < room - 1; name++)
+        {
+                char c = *name;
+
+                to[n++] = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' ? c : '_';
+        }
+        to[n] = 0;
+}
+
+// A capture device's resampler while it is wired (its frames pulled at the output's rate), let go while it is not; taken again when
+// either rate is not what it was made for.
+static void audio_input_fifo(long j)
+{
+        struct audio_input *in = &audio_service.input[j];
+        const struct pulse *p = &audio_service.pulse;
+        // A device that is not open yet is taken to open at its source's rate; its open takes the table again if it does not.
+        long rin = in->pcm.fd >= 0 ? in->pcm.rate : in->slot >= 0 && in->slot < p->source_slots ? p->source[in->slot].rate : 0, rout = audio_service.rate;
+
+        if (!in->wired || !in->used)
+        {
+                audio_table_give(in->fifo_table);
+                in->fifo_table = 0;
+                if (in->fifo)
+                        audio_host_release(0, in->fifo, (long)sizeof(*in->fifo));
+                in->fifo = 0;
+                return;
+        }
+        if (!in->fifo && !(in->fifo = audio_host_alloc(0, (long)sizeof(*in->fifo))))
+                return;
+        if (rin <= 0 || rout <= 0 || (in->fifo_table && in->fifo_rin == rin && in->fifo_rout == rout))
+                return;
+        audio_table_give(in->fifo_table);
+        if (!(in->fifo_table = audio_table_take_adapting(rin, rout)))
+                return;
+        audio_rs_open(in->fifo, in->fifo_table);
+        in->fifo_step = in->fifo->step, in->fifo_error = 0, in->fifo_rin = rin, in->fifo_rout = rout;
+}
+
+// What a capture device read, put on its resampler (where it is wired): a resampler that has no room starts over.
+static void audio_input_put(long j, const float *left, const float *right, long frames)
+{
+        struct audio_resampler *rs = audio_service.input[j].fifo;
+
+        if (!rs || !audio_service.input[j].fifo_table || frames < 1)
+                return;
+        if (audio_rs_room(rs) < frames)
+                audio_rs_reset(rs);
+        if (audio_rs_room(rs) < frames)
+                return;
+        memory_copy(rs->buf[0] + rs->have, left, (positive)frames * sizeof(float));
+        memory_copy(rs->buf[1] + rs->have, right, (positive)frames * sizeof(float));
+        rs->have += frames;
+}
+
+/*
+        A wired capture device's frames for the output's block: what its card has is read first (so the sound waits for no wake of the
+        microphone's own), and frames are made from its resampler at the output's rate. It is held at the block and AUDIO_CAPTURE_SLACK
+        frames beyond what the filter needs (in the microphone's frames), the step nudged by how far it is from that, smoothed, as a
+        mirror's is; held much fuller (the loop was late) it starts over at its aim. A block it cannot fill is silence where it ran short.
+*/
+static void audio_input_pull(long j, float *left, float *right, long frames)
+{
+        struct audio_input *in = &audio_service.input[j];
+        struct audio_resampler *rs = in->fifo;
+        long made = 0, held, aim, ppm;
+
+        if (in->pcm.fd >= 0)
+                audio_capture_pass((int)j);
+        if (rs && in->fifo_table && in->fifo_rout == audio_service.rate)
+        {
+                held = rs->have - rs->table->taps;
+                aim = (long)((frames + AUDIO_CAPTURE_SLACK) * in->fifo_rin / in->fifo_rout);
+                in->fifo_aim = aim;
+                if (held > aim + 4 * AUDIO_BLOCK)
+                {
+                        long drop = held - aim;
+
+                        for (int c = 0; c < 2; c++)
+                                memory_copy(rs->buf[c], rs->buf[c] + drop, (positive)(rs->have - drop) * sizeof(float));
+                        rs->have -= drop, rs->pos = rs->pos > ((unsigned long)drop << 32) ? rs->pos - ((unsigned long)drop << 32) : 0;
+                        held = aim, in->fifo_error = 0;
+                }
+                in->fifo_error += ((float)(held - aim) - in->fifo_error) / 32.0f;
+                ppm = (long)(in->fifo_error * 1000000.0f / (float)(in->fifo_rin * AUDIO_MIRROR_SETTLE));
+                ppm = ppm > AUDIO_MIRROR_PPM ? AUDIO_MIRROR_PPM : ppm < -AUDIO_MIRROR_PPM ? -AUDIO_MIRROR_PPM : ppm;
+                rs->step = (unsigned long)((long long)in->fifo_step + (long long)in->fifo_step / 1000000 * ppm);
+                if (audio_rs_ready(rs) >= frames)
+                        made = audio_rs_run(rs, left, right, frames);
+        }
+        if (made < frames)
+        {
+                in->fifo_short += rs != 0;
+                memory_fill(left + made, 0, (positive)(frames - made) * sizeof(float));
+                memory_fill(right + made, 0, (positive)(frames - made) * sizeof(float));
+        }
+}
+
+// The engine's host: a stream the graph routes has its block given along its program's edges.
+static void audio_host_routed(void *context, long stream, const float *left, const float *right, long frames)
+{
+        (void)context;
+        if (stream >= 0 && stream < audio_service.stream_node_room && audio_service.stream_node[stream] >= 0)
+                audio_graph_spread(&audio_service.graph, audio_service.stream_node[stream], left, right, frames, 1.0f);
+}
+
+/*
+        What the wires ask of the server, after a build: an output wired to that is not the one that plays is a mirror (its own card on its
+        own clock, audio_mirrors_pass opens it), the loopback microphone is made while something is wired into it, each combiner of the
+        person's is offered as a microphone (a loopback source of the engine by its name; one let go has its source let go), and a capture
+        device wired out is kept open with a resampler of its own.
+*/
+static void audio_graph_apply(void)
+{
+        struct audio_graph *g = &audio_service.graph;
+        struct pulse *p = &audio_service.pulse;
+
+        for (long m = 0; m < audio_service.mirror_room; m++)
+                audio_service.mirror[m].wanted = 0, audio_service.mirror[m].node = -1;
+        for (long k = 0; k < g->nodes; k++)
+        {
+                long m, free = -1;
+
+                if (g->kind[k] != AUDIO_NODE_OUTPUT || !g->ins[k] || k == audio_service.node_clock)
+                        continue;
+                for (m = 0; m < audio_service.mirror_room && !audio_text_equal(audio_service.mirror[m].name, g->name[k]); m++)
+                        if (free < 0 && !audio_service.mirror[m].open && !audio_service.mirror[m].opening && !audio_service.mirror[m].name[0])
+                                free = m;
+                if (m == audio_service.mirror_room)
+                {
+                        if (free < 0)
+                        {
+                                free = audio_service.mirror_room;
+                                audio_rows_fit((void **)&audio_service.mirror, &audio_service.mirror_room, free + 1, (long)sizeof(audio_service.mirror[0]));
+                        }
+                        m = free;
+                        pulse_copy(audio_service.mirror[m].name, sizeof(audio_service.mirror[m].name), g->name[k]);
+                        audio_service.mirror[m].failed = 0, audio_service.mirror[m].retry_at = 0;
+                }
+                audio_service.mirror[m].wanted = 1, audio_service.mirror[m].node = k;
+        }
+        // A mirror slot no output wants and that holds no card is free again.
+        for (long m = 0; m < audio_service.mirror_room; m++)
+                if (!audio_service.mirror[m].wanted && !audio_service.mirror[m].open && !audio_service.mirror[m].opening)
+                        audio_service.mirror[m].name[0] = 0;
+        audio_service.loopback_wanted = audio_service.node_loopback >= 0 && g->ins[audio_service.node_loopback] > 0;
+        // The combiners' microphones.
+        for (long c = 0; c < audio_service.mics; c++)
+                audio_service.mic[c].keep = 0;
+        for (long k = 0; k < g->nodes; k++)
+        {
+                long c;
+
+                if (g->kind[k] != AUDIO_NODE_COMBINER || k == audio_service.node_main)
+                        continue;
+                for (c = 0; c < audio_service.mics && !audio_text_equal(audio_service.mic[c].name, g->name[k]); c++)
+                        ;
+                if (c == audio_service.mics)
+                {
+                        char name[PULSE_NAME];
+                        long slot;
+
+                        audio_mic_name(name, sizeof(name), g->name[k]);
+                        audio_service.input_internal++;
+                        slot = pulse_loopback_add(p, name, g->name[k]);
+                        audio_service.input_internal--;
+                        if (slot < 0)
+                                continue;
+                        audio_rows_fit((void **)&audio_service.mic, &audio_service.mic_room, c + 1, (long)sizeof(audio_service.mic[0]));
+                        pulse_copy(audio_service.mic[c].name, sizeof(audio_service.mic[c].name), g->name[k]);
+                        audio_service.mic[c].source = slot;
+                        audio_service.mics++;
+                        audio_say_text("a combiner is a microphone:", g->name[k]);
+                }
+                audio_service.mic[c].keep = 1;
+                g->slot[k] = audio_service.mic[c].source;
+        }
+        for (long c = audio_service.mics - 1; c >= 0; c--)
+                if (!audio_service.mic[c].keep)
+                {
+                        audio_service.input_internal++;
+                        pulse_source_remove(p, audio_service.mic[c].source);
+                        audio_service.input_internal--;
+                        audio_service.mic[c] = audio_service.mic[--audio_service.mics];
+                }
+        // What keeps the output from being released while nothing of the engine's plays: a microphone wired out, a machine's sound wired
+        // in from it or out to it (sound across machines goes on with no program playing here).
+        audio_service.graph_keeps = 0;
+        for (long k = 0; k < g->nodes; k++)
+                if (((g->kind[k] == AUDIO_NODE_CAPTURE || g->kind[k] == AUDIO_NODE_REMOTE_SOURCE) && g->first[k + 1] > g->first[k]) ||
+                    (g->kind[k] == AUDIO_NODE_REMOTE_OUTPUT && g->ins[k]))
+                        audio_service.graph_keeps |= !(g->flags[k] & (AUDIO_NODE_DENIED | AUDIO_NODE_AWAY));
+        // The capture devices wired out.
+        for (long j = 0; j < audio_service.input_room; j++)
+                audio_service.input[j].wired = 0;
+        for (long k = 0; k < g->nodes; k++)
+                if (g->kind[k] == AUDIO_NODE_CAPTURE && g->first[k + 1] > g->first[k] && g->slot[k] >= 0 && g->slot[k] < audio_service.input_room)
+                        audio_service.input[g->slot[k]].wired = 1;
+        for (long j = 0; j < audio_service.input_room; j++)
+                audio_input_fifo(j);
+}
+
+/*
+        The graph built again from what there is: Main and the person's combiners, a node for each program that has a stream (its streams
+        are its node's), each capture device, each output and the loopback microphone, and each of Waterlink's devices; then the server's
+        own wires (each program into Main, Main to the output that plays, a machine that plays here into Main, Main and the default
+        microphone to a machine that listens here) less the ones the file cuts, and the file's wires over them.
+*/
+static void audio_graph_build(void)
+{
+        struct audio_graph *g = &audio_service.graph;
+        struct pulse *p = &audio_service.pulse;
+        const struct audio_remote_row *rows = 0;
+        long remotes = audio_remote_rows(&rows), main, capture_default = -1, programs_at;
+        char key[AUDIO_GRAPH_KEY], shown[96];
+
+        audio_service.graph_dirty = 0;
+        audio_service.streams_seen = p->streams_freed;
+        g->grow = audio_graph_memory;
+        audio_graph_begin(g);
+        audio_service.node_clock = audio_service.node_loopback = -1;
+        main = audio_service.node_main = audio_graph_add(g, AUDIO_NODE_COMBINER, AUDIO_GRAPH_MAIN, AUDIO_GRAPH_MAIN);
+        for (long c = 0; c < audio_service.plan.combiners; c++)
+        {
+                long k = audio_graph_add(g, AUDIO_NODE_COMBINER, audio_service.plan.combiner[c], audio_service.plan.combiner[c]);
+
+                if (k >= 0)
+                        g->flags[k] |= AUDIO_NODE_MIC;
+        }
+        // The programs: a node a program, its streams its node's. A stream that is fading out has no program any more: it is its node's
+        // still while the node is there (by what the node is, kept from the build it was made in).
+        {
+                long room = audio_service.stream_node_room;
+
+                audio_rows_fit((void **)&audio_service.stream_node, &audio_service.stream_node_room, p->stream_slots + 1, (long)sizeof(long));
+                audio_rows_fit((void **)&audio_service.stream_id, &room, audio_service.stream_node_room, 8);
+        }
+        programs_at = g->nodes;
+        for (long i = 0; i < p->stream_slots; i++)
+        {
+                struct pulse_stream *s = p->stream + i;
+                long k = -1;
+
+                audio_service.stream_node[i] = -1;
+                if (!s->used)
+                        audio_service.stream_id[i] = 0;
+                if (!s->used || s->dying || !audio_stream_program(s, key, sizeof(key), shown, sizeof(shown)))
+                        continue;
+                for (long j = programs_at; j < g->nodes && k < 0; j++)
+                        if (audio_text_equal(g->name[j], key))
+                                k = j;
+                if (k < 0)
+                        k = audio_graph_add(g, AUDIO_NODE_PROGRAM, key, shown);
+                audio_service.stream_node[i] = k;
+                audio_service.stream_id[i] = k >= 0 ? g->id[k] : 0;
+        }
+        for (long i = 0; i < p->stream_slots; i++)
+                if (p->stream[i].used && p->stream[i].dying && audio_service.stream_id[i])
+                        for (long j = programs_at; j < g->nodes && audio_service.stream_node[i] < 0; j++)
+                                if (g->id[j] == audio_service.stream_id[i])
+                                        audio_service.stream_node[i] = j;
+        // The capture devices (a node's slot is its place in the inputs).
+        for (long j = 0; j < audio_service.input_room; j++)
+                if (audio_service.input[j].used)
+                {
+                        long k = audio_graph_add(g, AUDIO_NODE_CAPTURE, audio_service.input[j].name, audio_service.input[j].description);
+
+                        if (k < 0)
+                                continue;
+                        g->slot[k] = j;
+                        if (audio_service.input[j].slot == p->default_source)
+                                capture_default = k;
+                }
+        // The outputs (a node's slot is its place in the list of devices), the one that plays marked, and the loopback microphone.
+        for (long d = 0; d < audio_service.device_count; d++)
+        {
+                const struct audio_state_device *device = &audio_service.devices[d];
+                int loop = (device->flags & AUDIO_STATE_DEVICE_VIRTUAL) != 0;
+                long k = audio_graph_add(g, loop ? AUDIO_NODE_LOOPBACK : AUDIO_NODE_OUTPUT, device->name, device->description);
+
+                if (k < 0)
+                        continue;
+                g->slot[k] = d;
+                if (loop)
+                        audio_service.node_loopback = k;
+                else
+                {
+                        g->flags[k] |= device->flags & AUDIO_STATE_DEVICE_UNPLUGGED ? AUDIO_NODE_UNPLUGGED : 0;
+                        if (audio_service.pcm.fd >= 0 && audio_text_equal(device->name, audio_service.active_name))
+                                g->flags[k] |= AUDIO_NODE_CLOCK, audio_service.node_clock = k;
+                }
+        }
+        // Waterlink's devices.
+        for (long r = 0; r < remotes && rows; r++)
+        {
+                long k = audio_graph_add(g, rows[r].way == AUDIO_NODE_REMOTE_OUTPUT ? AUDIO_NODE_REMOTE_OUTPUT : AUDIO_NODE_REMOTE_SOURCE, rows[r].name, rows[r].description);
+
+                if (k < 0)
+                        continue;
+                audio_graph_copy(g->machine[k], 32, rows[r].machine);
+                audio_graph_copy(g->allow[k], 64, rows[r].allow);
+                g->flags[k] |= rows[r].flags & (AUDIO_NODE_DENIED | AUDIO_NODE_AWAY | AUDIO_NODE_LIVE | AUDIO_NODE_HEARD | AUDIO_NODE_MONITOR);
+                g->slot[k] = rows[r].dev, g->latency_us[k] = rows[r].latency_us, g->lost[k] = rows[r].lost;
+        }
+        // The server's own wires.
+        for (long k = programs_at; k < g->nodes; k++)
+                if (g->kind[k] == AUDIO_NODE_PROGRAM)
+                        audio_graph_wire(g, k, main, 100, AUDIO_EDGE_DEFAULT);
+        if (audio_service.node_clock >= 0)
+                audio_graph_wire(g, main, audio_service.node_clock, 100, AUDIO_EDGE_DEFAULT | AUDIO_EDGE_PLAYING);
+        for (long k = 0; k < g->nodes; k++)
+                if (g->flags[k] & AUDIO_NODE_HEARD)
+                {
+                        if (g->kind[k] == AUDIO_NODE_REMOTE_SOURCE)
+                                audio_graph_wire(g, k, main, 100, AUDIO_EDGE_DEFAULT);
+                        else if (g->flags[k] & AUDIO_NODE_MONITOR)
+                                audio_graph_wire(g, main, k, 100, AUDIO_EDGE_DEFAULT);
+                        else
+                                audio_graph_wire(g, capture_default, k, 100, AUDIO_EDGE_DEFAULT);
+                }
+        // The person's: a cut takes a wire of the server's off, a wire is made (or its level and mute set).
+        for (long w = 0; w < audio_service.plan.wires; w++)
+        {
+                long from = audio_graph_key_node(audio_service.plan.from[w]), to = audio_graph_key_node(audio_service.plan.to[w]);
+
+                if (from < 0 || to < 0)
+                        continue;
+                if (audio_service.plan.flags[w] & AUDIO_EDGE_CUT)
+                        audio_graph_unwire(g, from, to);
+                else
+                        audio_graph_wire(g, from, to, audio_service.plan.level[w],
+                                         (audio_service.plan.flags[w] & AUDIO_EDGE_MUTED) |
+                                             (from == main && to == audio_service.node_clock && audio_text_equal(audio_service.plan.to[w], AUDIO_GRAPH_DEFAULT_OUTPUT) ? AUDIO_EDGE_PLAYING : 0));
+        }
+        if (!audio_graph_end(g))
+        {
+                audio_say_text("no memory for the sound graph's buses; it is built again at the next change", "");
+                return;
+        }
+        if (main >= 0 && audio_service.sink >= 0)
+                audio_graph_own(g, main, p->sink[audio_service.sink].mix.bus[0], p->sink[audio_service.sink].mix.bus[1]);
+        audio_graph_apply();
+}
+
+// Waterlink's rows, summed: a sum that is not the last build's is a build (a device came, went, or was allowed).
+static unsigned long long audio_remote_sum(void)
+{
+        const struct audio_remote_row *rows = 0;
+        long count = audio_remote_rows(&rows);
+        unsigned long long sum = (unsigned long long)count;
+
+        for (long r = 0; r < count && rows; r++)
+        {
+                sum = (sum ^ audio_graph_hash((int)rows[r].way, rows[r].name)) * 1099511628211ull;
+                sum = (sum ^ (rows[r].flags & (AUDIO_NODE_DENIED | AUDIO_NODE_AWAY | AUDIO_NODE_HEARD | AUDIO_NODE_MONITOR))) * 1099511628211ull;
+                sum = (sum ^ (unsigned long long)rows[r].dev) * 1099511628211ull;
+        }
+        return sum;
+}
+
+/*
+        One block of the graph: the buses silenced, the programs' streams mixed (each into Main's bus where its program goes only there
+        at a whole, along its program's edges where it does not), then in the graph's order each microphone and machine that is wired out
+        and each combiner given along its edges (Main at the master volume, its monitor fed; a person's combiner's microphone fed with
+        what it is). The block the output that plays is given is in *left and *right: its bus, Main's own mix when there is no card, or
+        silence when nothing is wired to it. The sinks that are not it are fed after the card has its frames (audio_graph_after).
+*/
+static void audio_graph_mix(long frames, float **left, float **right)
+{
+        struct audio_graph *g = &audio_service.graph;
+        struct pulse *p = &audio_service.pulse;
+        long sink = audio_service.sink, main = audio_service.node_main;
+        float *scratch0 = audio_service.graph_scratch[0], *scratch1 = audio_service.graph_scratch[1];
+
+        *left = *right = audio_service.silence;
+        if (sink < 0 || frames < 1)
+                return;
+        if (!g->gen)
+                audio_graph_build();
+        audio_graph_clear(g, frames);
+        for (long k = 0; k < g->nodes; k++)
+                g->mark[k] = g->kind[k] == AUDIO_NODE_PROGRAM && audio_graph_straight(g, k, main);
+        for (long i = 0; i < p->stream_slots; i++)
+                if (p->stream[i].used)
+                {
+                        long k = i < audio_service.stream_node_room ? audio_service.stream_node[i] : -1;
+
+                        p->stream[i].routed = k >= 0 && k < g->nodes && !g->mark[k];
+                }
+        pulse_sink_streams(p, sink, frames);
+        for (long o = 0; o < g->ordered; o++)
+        {
+                long k = g->order[o];
+
+                if (g->kind[k] == AUDIO_NODE_CAPTURE)
+                {
+                        const struct pulse_source *source = audio_service.input[g->slot[k]].used ? &p->source[audio_service.input[g->slot[k]].slot] : 0;
+
+                        audio_input_pull(g->slot[k], scratch0, scratch1, frames);
+                        audio_graph_spread(g, k, scratch0, scratch1, frames, !source || source->muted ? 0.0f : pulse_mean_gain(source->volume, 2));
+                }
+                else if (g->kind[k] == AUDIO_NODE_REMOTE_SOURCE)
+                {
+                        if (g->flags[k] & (AUDIO_NODE_DENIED | AUDIO_NODE_AWAY))
+                                continue;
+                        remote_pull(g->slot[k], scratch0, scratch1, frames, audio_service.rate);
+                        audio_graph_spread(g, k, scratch0, scratch1, frames, 1.0f);
+                }
+                else if (k == main)
+                {
+                        pulse_sink_master(p, sink, frames);
+                        audio_graph_spread(g, k, p->sink[sink].mix.mix[0], p->sink[sink].mix.mix[1], frames, 1.0f);
+                }
+                else if (g->kind[k] == AUDIO_NODE_COMBINER && g->bus[2 * k])
+                {
+                        audio_graph_spread(g, k, g->bus[2 * k], g->bus[2 * k + 1], frames, 1.0f);
+                        if (g->slot[k] > 0 && g->slot[k] < p->source_slots && p->source[g->slot[k]].used)
+                        {
+                                if (p->source[g->slot[k]].rate != audio_service.rate)
+                                        p->source[g->slot[k]].rate = audio_service.rate, pulse_source_retable(p, g->slot[k]);
+                                pulse_source_feed(p, g->slot[k], g->bus[2 * k], g->bus[2 * k + 1], frames);
+                        }
+                }
+        }
+        // Main not in the order (a build that could not end): its mix is made all the same, for the card and the monitor.
+        if (main < 0 || main >= g->nodes || !g->ordered)
+                pulse_sink_master(p, sink, frames);
+        pulse_sink_finish(p, sink, frames);
+        if (audio_service.node_clock >= 0 && audio_service.node_clock < g->nodes && g->bus[2 * audio_service.node_clock])
+                *left = g->bus[2 * audio_service.node_clock], *right = g->bus[2 * audio_service.node_clock + 1];
+        else if (audio_service.node_clock < 0)
+                *left = p->sink[sink].mix.mix[0], *right = p->sink[sink].mix.mix[1];
+}
+
+// After the card has the block: the mirrors, the loopback microphone and Waterlink's outputs are given what is wired into them.
+static void audio_graph_after(long frames)
+{
+        struct audio_graph *g = &audio_service.graph;
+        struct pulse *p = &audio_service.pulse;
+
+        if (frames < 1 || frames > AUDIO_BLOCK)
+                return;
+        audio_mirrors_feed(frames);
+        if (audio_service.loopback > 0 && audio_service.node_loopback >= 0 && audio_service.node_loopback < g->nodes && g->bus[2 * audio_service.node_loopback])
+        {
+                if (p->source[audio_service.loopback].rate != audio_service.rate)
+                        p->source[audio_service.loopback].rate = audio_service.rate, pulse_source_retable(p, audio_service.loopback);
+                pulse_source_feed(p, audio_service.loopback, g->bus[2 * audio_service.node_loopback], g->bus[2 * audio_service.node_loopback + 1], frames);
+        }
+        for (long k = 0; k < g->nodes; k++)
+                if (g->kind[k] == AUDIO_NODE_REMOTE_OUTPUT && g->bus[2 * k] && !(g->flags[k] & (AUDIO_NODE_DENIED | AUDIO_NODE_AWAY)))
+                        remote_push(g->slot[k], g->bus[2 * k], g->bus[2 * k + 1], frames, audio_service.rate);
+}
+
+/*
+        The person's wiring read (audio.graph, whole, whatever its size): the graph is built again. With no file the old list of mirrors
+        (audio.mirror) is taken in once, at the start, and written as the graph's file: what was mirrored is wired from Main.
+*/
+static void audio_graph_read(int first)
+{
+        char path[160];
+        unsigned char st[144];
+        long size = 0, got = 0, fd;
+
+        audio_service.plan.grow = audio_graph_memory;
+        audio_path(path, sizeof(path), AUDIO_GRAPH_FILE);
+        if (audio_call(syscall(newfstatat), (positive)AT_FDCWD, (positive)path, (positive)st, 0x100, 0, 0) == 0)
+                memory_copy(&size, st + 48, 8);
+        if (size < 0)
+                size = 0;
+        audio_rows_fit((void **)&audio_service.graph_text, &audio_service.graph_text_room, size + 2, 1);
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0, 0, 0);
+        if (fd >= 0)
+        {
+                for (long n; got < audio_service.graph_text_room - 1; got += n)
+                        if ((n = audio_call(syscall(read), (positive)fd, (positive)(audio_service.graph_text + got), (positive)(audio_service.graph_text_room - 1 - got), 0, 0, 0)) <= 0)
+                                break;
+                audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        }
+        audio_service.graph_text[got] = 0;
+        if (fd < 0 && first && !audio_service.graph_absorbed)
+        {
+                char list[4096];
+                long length = audio_file_read("audio.mirror", list, sizeof(list));
+
+                audio_service.graph_absorbed = 1;
+                audio_plan_clear(&audio_service.plan);
+                if (length > 0 && audio_plan_mirrors(&audio_service.plan, list, length) > 0)
+                {
+                        long need = audio_plan_format(&audio_service.plan, 0, 0);
+
+                        audio_rows_fit((void **)&audio_service.graph_text, &audio_service.graph_text_room, need + 2, 1);
+                        audio_plan_format(&audio_service.plan, audio_service.graph_text, audio_service.graph_text_room);
+                        audio_file_write_sync(AUDIO_GRAPH_FILE, audio_service.graph_text, need);
+                        audio_say_text("the mirrors are wires of the sound graph now:", AUDIO_GRAPH_FILE);
+                }
+                audio_service.graph_dirty = 1;
+                return;
+        }
+        if (audio_plan_parse(&audio_service.plan, audio_service.graph_text, got) < 0)
+                audio_say_text("no memory for all of the sound graph's file; what fitted is used", "");
+        audio_service.graph_read = 1;
+        audio_service.graph_dirty = 1;
 }
 
 /* ---- a tone, to hear ---- */
@@ -3108,6 +3855,7 @@ static void audio_start(void)
         host.recall = audio_host_recall;
         host.remember = audio_host_remember;
         host.changed = audio_host_changed;
+        host.routed = audio_host_routed;
         pulse_open(&audio_service.pulse, &host);
         audio_slots_fit();
         audio_service.sink = -1;
@@ -3232,7 +3980,7 @@ static int audio_playing_now(void)
 {
         struct pulse *p = &audio_service.pulse;
 
-        if (p->records_made != p->records_freed)
+        if (p->records_made != p->records_freed || audio_service.graph_keeps)
                 return 1;
         if (p->streams_made == p->streams_freed)
                 return 0;
@@ -3315,12 +4063,10 @@ static b32 audio_main()
 
         claim_standard_descriptors();
         audio_service.listen = audio_service.signals = audio_service.timer = audio_service.file = -1;
-        audio_service.notify = -1;
+        audio_service.notify = audio_service.page_fd = -1;
         audio_service.card = audio_service.device = -1;
         audio_service.applied_in_volume = AUDIO_VOLUME_NORM;
         audio_service.applied_capture = 1;
-        for (int k = 0; k < AUDIO_INPUTS; k++)
-                audio_service.input[k].pcm.fd = -1;
         audio_service.socket_path = AUDIO_SOCKET;
         audio_service.settings = AUDIO_SETTINGS;
         audio_service.page_path = AUDIO_STATE_PATH;
@@ -3419,9 +4165,11 @@ static b32 audio_main()
                 struct audio_poll *wanted;
                 long *owner;
                 unsigned int count = 0;
+                int remote_count, remote_at;
                 if (audio_service.live_dirty) // a client that came in the last pass is polled from here on (as the slots were: a newer one waits for the next pass)
                         audio_live_relist();
-                audio_poll_fit(5 + AUDIO_INPUTS + audio_service.live_count);
+                remote_count = audio_remote_poll(0, 0);
+                audio_poll_fit(6 + audio_service.input_room + remote_count + audio_service.live_count);
                 wanted = audio_service.wanted;
                 owner = audio_service.owner;
                 positive now;
@@ -3454,7 +4202,7 @@ static b32 audio_main()
                         owner[count++] = -4;
                 }
                 // A microphone that is listened to is next: what it has is as late as it is made to wait.
-                for (int k = 0; k < AUDIO_INPUTS; k++)
+                for (long k = 0; k < audio_service.input_room; k++)
                         if (audio_service.input[k].used && audio_service.input[k].pcm.fd >= 0)
                         {
                                 wanted[count] = (struct audio_poll){audio_service.input[k].pcm.fd, AUDIO_POLLIN, 0};
@@ -3472,6 +4220,12 @@ static b32 audio_main()
                         wanted[count] = (struct audio_poll){audio_service.notify, AUDIO_POLLIN, 0};
                         owner[count++] = -7;
                 }
+                // Waterlink's descriptors (remote.c), together, as many as it said it has.
+                remote_at = (int)count;
+                remote_count = audio_remote_poll(wanted + count, remote_count);
+                remote_count = remote_count < 0 ? 0 : remote_count;
+                for (int k = 0; k < remote_count; k++)
+                        owner[count++] = -6;
                 wanted[count] = (struct audio_poll){audio_service.listen, AUDIO_POLLIN, 0};
                 owner[count++] = -2;
                 for (int k = 0; k < audio_service.live_count; k++)
@@ -3517,6 +4271,8 @@ static b32 audio_main()
                                         audio_service.settings_due |= (hit & 1) != 0;
                                         audio_service.devices_due |= (hit & 2) != 0;
                                 }
+                                else if (owner[at] == -6)
+                                        continue; // Waterlink's, given to it together below
                                 else if (owner[at] <= -10)
                                         audio_capture_pass((int)(-10 - owner[at]));
                                 else if (audio_service.fd[owner[at]] >= 0)
@@ -3528,6 +4284,8 @@ static b32 audio_main()
                                                 audio_client_drop(slot);
                                 }
                         }
+                if (awaited >= 0 && remote_count)
+                        audio_remote_ready(wanted + remote_at, remote_count, now);
                 // A stream that begins while nothing plays picks the output's rate (passed through when the card takes it) and its
                 // periods (low-latency for a short buffer); then the output follows the streams: one that plays resumes it, and none
                 // for five seconds suspends it.
@@ -3549,6 +4307,16 @@ static b32 audio_main()
                 audio_resume_said();
                 // Whatever the pass queued is sent, the drains are answered, and a client that never says who it is, or never reads, is dropped.
                 pulse_tick(&audio_service.pulse);
+                // The graph built again when a node came or went: a stream (one that faded out too), a device of Waterlink's, the file.
+                audio_remote_pass(now);
+                {
+                        unsigned long long sum = audio_remote_sum();
+
+                        if (sum != audio_service.remote_sum)
+                                audio_service.remote_sum = sum, audio_service.graph_dirty = 1;
+                }
+                if (audio_service.pulse.streams_freed != audio_service.streams_seen || audio_service.graph_dirty)
+                        audio_graph_build();
                 audio_inputs_run(now);
                 audio_mirrors_pass(now);
                 if (audio_service.live_dirty)
@@ -3624,14 +4392,16 @@ static b32 audio_main()
                 if (audio_service.job.kind == AUDIO_JOB_OPEN && audio_service.job.result == 0)
                         audio_pcm_close(&audio_service.job.pcm);
         }
-        for (int k = 0; k < AUDIO_INPUTS; k++)
-                audio_input_close(k);
+        for (long k = 0; k < audio_service.input_room; k++)
+                audio_input_close((int)k);
         if (audio_service.page)
-                audio_call(syscall(munmap), (positive)audio_service.page, AUDIO_STATE_BYTES, 0, 0, 0, 0);
+                audio_call(syscall(munmap), (positive)audio_service.page, (positive)audio_service.page_bytes, 0, 0, 0, 0);
+        if (audio_service.page_fd >= 0)
+                system_close(audio_service.page_fd);
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0, 0, 0, 0);
         audio_pcm_close(&audio_service.pcm);
         audio_set_card_bits(0);
-        for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
+        for (long k = 0; k < audio_service.mirror_room; k++)
                 if (audio_service.mirror[k].open)
                         audio_pcm_close(&audio_service.mirror[k].pcm);
         if (audio_service.file >= 0)

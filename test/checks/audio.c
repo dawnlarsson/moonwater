@@ -3955,13 +3955,13 @@ static struct pulse pt_engine;
    block and its bytes, held while it has slots, and every other block must be given back. */
 static long pt_table_blocks(void)
 {
-        return (pt_engine.client_slots > 0) + (pt_engine.stream_slots > 0) + (pt_engine.record_slots > 0);
+        return (pt_engine.client_slots > 0) + (pt_engine.stream_slots > 0) + (pt_engine.record_slots > 0) + (pt_engine.source_slots > 0);
 }
 
 static long pt_table_bytes(void)
 {
         return (long)(pt_engine.client_slots * sizeof(struct pulse_client *) + pt_engine.stream_slots * sizeof(struct pulse_stream) +
-               pt_engine.record_slots * sizeof(struct pulse_record));
+               pt_engine.record_slots * sizeof(struct pulse_record) + pt_engine.source_slots * sizeof(struct pulse_source));
 }
 
 static void pt_reset(void)
@@ -10494,15 +10494,17 @@ static void sv_start(void)
         host.recall = audio_host_recall;
         host.remember = audio_host_remember;
         host.changed = audio_host_changed;
+        host.routed = audio_host_routed;
         pulse_open(&audio_service.pulse, &host);
         audio_slots_fit();
+        audio_service.page_fd = -1;
         audio_service.listen = audio_service.signals = audio_service.timer = audio_service.file = -1;
         audio_service.card = audio_service.device = -1;
         audio_service.sink = -1;
         audio_service.applied_in_volume = AUDIO_VOLUME_NORM;
         audio_service.applied_capture = 1;
         audio_service.wake[0] = audio_service.wake[1] = -1;
-        for (int k = 0; k < AUDIO_INPUTS; k++)
+        for (long k = 0; k < audio_service.input_room; k++)
                 audio_service.input[k].pcm.fd = -1;
         audio_service.pcm.fd = -1;
         audio_service.no_card = 1;
@@ -11727,6 +11729,357 @@ static void sv_test_remote_push(void)
         audio_remote_lost();
 }
 
+/*
+        The sound graph (src/audio/graph.c, and service.c's build and mix): the file read and written back the same (and what it does not
+        know passed over), the old list of mirrors taken in once as wires from Main, a wire that would close a loop of combiners refused
+        (and a node to itself, an out to an out), any out to any in, a block given along every edge at its gain with the build's order
+        (a combiner after what feeds it), a gain that stays across a build, and through the server: a program wired past Main to a combiner
+        and to an output, that combiner offered to programs as a microphone (its source has the block), and a microphone wired to an
+        output, its frames arriving the block and the filter's half later (the latency printed).
+*/
+static void *sv_graph_memory(void *context, void *old, long old_bytes, long bytes)
+{
+        (void)context, (void)old_bytes;
+        free(old);
+        return bytes > 0 ? calloc(1, (size_t)bytes) : 0;
+}
+
+static void sv_test_graph_plan(void)
+{
+        static const char text[] = "# a comment\n"
+                                   "combiner\tStream mix\n"
+                                   "combiner\tMain\n"
+                                   "wire\tprogram:0/firefox\tcombiner:Stream mix\t80\n"
+                                   "cut\tprogram:0/firefox\tcombiner:Main\n"
+                                   "wire\tcapture:alsa_input.usb.00\toutput:alsa_output.pci.00\t300\tmuted\n"
+                                   "wire\tno colon\toutput:x\t50\n"
+                                   "mystery\tline\n"
+                                   "wire\tcombiner:Stream mix\tremote:link.desk.speakers\n";
+        struct audio_plan plan = {sv_graph_memory, 0}, again = {sv_graph_memory, 0};
+        char out[2048], twice[2048];
+        long taken = audio_plan_parse(&plan, text, (long)strlen(text)), n, m;
+
+        SVCHECK(taken == 5 && plan.combiners == 1 && plan.wires == 4, "the file's known lines are taken (%ld: %ld combiners, %ld wires), Main and the rest passed over", taken, plan.combiners, plan.wires);
+        SVCHECK(plan.wires == 4 && plan.level[0] == 80 && (plan.flags[1] & AUDIO_EDGE_CUT) && plan.level[2] == 200 && (plan.flags[2] & AUDIO_EDGE_MUTED) && plan.level[3] == 100,
+                "levels are kept (80), held to 200, a cut is a cut, a muted wire muted, a wire with no level at the whole");
+        n = audio_plan_format(&plan, out, sizeof(out));
+        SVCHECK(n > 0 && n < (long)sizeof(out) && audio_plan_format(&plan, 0, 0) == n, "the plan as text: %ld bytes, and the same length asked with no room", n);
+        audio_plan_parse(&again, out, n);
+        m = audio_plan_format(&again, twice, sizeof(twice));
+        SVCHECK(m == n && !memcmp(out, twice, (size_t)n), "read back, the text is the same");
+        // The UI's edits: a wire of the server's put back at a whole goes from the file; taken off, it is cut; the person's own goes.
+        audio_plan_wired(&plan, "program:0/firefox", "combiner:Main", 100, 0, 1);
+        SVCHECK(audio_plan_find(&plan, "program:0/firefox", "combiner:Main") < 0, "a server's wire drawn again at a whole is the server's (no line)");
+        audio_plan_unwired(&plan, "program:0/firefox", "combiner:Main", 1);
+        n = audio_plan_find(&plan, "program:0/firefox", "combiner:Main");
+        SVCHECK(n >= 0 && (plan.flags[n] & AUDIO_EDGE_CUT), "taken off, it is cut");
+        audio_plan_unwired(&plan, "capture:alsa_input.usb.00", "output:alsa_output.pci.00", 0);
+        SVCHECK(audio_plan_find(&plan, "capture:alsa_input.usb.00", "output:alsa_output.pci.00") < 0, "the person's own wire taken off is gone");
+        // Combiners: Main is not the person's to make, a name twice is one, a rename carries the wires, a removal takes them.
+        SVCHECK(audio_plan_combiner_add(&plan, "Main") < 0 && audio_plan_combiner_add(&plan, "Stream mix") < 0 && audio_plan_combiner_add(&plan, "Call\tmix\n") >= 0 &&
+                    audio_plan_combiner_of(&plan, "Call") >= 0,
+                "Main and a name that is there are refused; a name is cut at a tab");
+        SVCHECK(audio_plan_combiner_rename(&plan, "Stream mix", "Show") == 0 && audio_plan_find(&plan, "program:0/firefox", "combiner:Show") >= 0 &&
+                    audio_plan_find(&plan, "combiner:Show", "remote:link.desk.speakers") >= 0,
+                "a combiner named again keeps its wires in and out");
+        audio_plan_combiner_remove(&plan, "Show");
+        SVCHECK(audio_plan_combiner_of(&plan, "Show") < 0 && audio_plan_find(&plan, "combiner:Show", "remote:link.desk.speakers") < 0 && audio_plan_find(&plan, "program:0/firefox", "combiner:Show") < 0,
+                "a combiner removed takes its wires with it");
+        // A field with a control byte is a question mark; a long one is cut at a whole character.
+        {
+                char field[8];
+                static const char tricky[] = "ab\001\xc3\xa9\xc3\xa9\xc3\xa9";
+
+                audio_graph_field(field, sizeof(field), tricky, tricky + sizeof(tricky) - 1);
+                SVCHECK(!strcmp(field, "ab?\xc3\xa9\xc3\xa9"), "a control byte is a question mark, and a character is not cut in its middle (%s)", field);
+        }
+        audio_plan_free(&plan);
+        audio_plan_free(&again);
+}
+
+static void sv_test_graph_live(void)
+{
+        struct audio_graph g;
+        long a, b, c, prog, mic, out1, out2, loop;
+        float one[256], two[256];
+        int ok = 1;
+
+        memset(&g, 0, sizeof(g));
+        g.grow = sv_graph_memory;
+        audio_graph_begin(&g);
+        a = audio_graph_add(&g, AUDIO_NODE_COMBINER, "A", 0);
+        b = audio_graph_add(&g, AUDIO_NODE_COMBINER, "B", 0);
+        c = audio_graph_add(&g, AUDIO_NODE_COMBINER, "C", 0);
+        prog = audio_graph_add(&g, AUDIO_NODE_PROGRAM, "0/player", "Player");
+        mic = audio_graph_add(&g, AUDIO_NODE_CAPTURE, "alsa_input.x.00", "Mic");
+        out1 = audio_graph_add(&g, AUDIO_NODE_OUTPUT, "alsa_output.x.00", "Speakers");
+        out2 = audio_graph_add(&g, AUDIO_NODE_REMOTE_OUTPUT, "link.desk.speakers", "Speakers");
+        loop = audio_graph_add(&g, AUDIO_NODE_LOOPBACK, "moonwater.loopback", "Loopback");
+        // Loops: C to B and B to A are fine, A to C closes one; a node to itself, an output's out, a program's in are none.
+        SVCHECK(audio_graph_wire(&g, c, b, 100, 0) == 1 && audio_graph_wire(&g, b, a, 100, 0) == 1, "a combiner wired into a combiner, twice");
+        SVCHECK(audio_graph_wire(&g, a, c, 100, 0) == 0 && g.refused == 1, "a wire that closes a loop of combiners is refused (and counted)");
+        SVCHECK(audio_graph_wire(&g, a, a, 100, 0) == 0 && audio_graph_wire(&g, out1, a, 100, 0) == 0 && audio_graph_wire(&g, a, prog, 100, 0) == 0 &&
+                    audio_graph_wire(&g, loop, out1, 100, 0) == 0,
+                "a node to itself, an output's out, a program's in, the loopback's out: refused");
+        // Any out to any in: the program to a combiner and straight to two outputs, the microphone to an output and the loopback.
+        SVCHECK(audio_graph_wire(&g, prog, c, 100, 0) == 1 && audio_graph_wire(&g, prog, out1, 50, 0) == 1 && audio_graph_wire(&g, prog, out2, 100, AUDIO_EDGE_MUTED) == 1 &&
+                    audio_graph_wire(&g, mic, out1, 100, 0) == 1 && audio_graph_wire(&g, mic, loop, 100, 0) == 1 && audio_graph_wire(&g, a, out2, 100, 0) == 1,
+                "any out to any in: a program to a combiner and to outputs, a microphone to an output and the loopback, a combiner to a machine's speakers");
+        SVCHECK(audio_graph_wire(&g, prog, out1, 25, 0) == 1 && g.edges == 8, "the same two wired again is the one edge at the new level (%ld edges)", g.edges);
+        SVCHECK(audio_graph_end(&g), "the build ends");
+        // The order: the microphone first, then C before B before A (each after what feeds it).
+        {
+                long at_a = -1, at_b = -1, at_c = -1, at_mic = -1;
+
+                for (long o = 0; o < g.ordered; o++)
+                        at_a = g.order[o] == (unsigned)a ? o : at_a, at_b = g.order[o] == (unsigned)b ? o : at_b, at_c = g.order[o] == (unsigned)c ? o : at_c,
+                        at_mic = g.order[o] == (unsigned)mic ? o : at_mic;
+                SVCHECK(at_mic == 0 && at_c >= 0 && at_c < at_b && at_b < at_a && g.ordered == 4, "the order: the microphone, then C, B, A (%ld %ld %ld %ld)", at_mic, at_c, at_b, at_a);
+        }
+        for (long k = 0; k < g.nodes; k++)
+                for (long e = g.first[k]; e < g.first[k + 1]; e++)
+                        ok = ok && g.from[e] == (unsigned)k;
+        SVCHECK(ok && g.first[g.nodes] == g.edges && g.ins[out1] == 2 && g.ins[a] == 1 && g.bus[2 * out1] && g.bus[2 * c] && !g.bus[2 * prog], "each node's edges are its own, in a run; the buses are the ins'");
+        // A block along the edges: the program's 1.0 and the microphone's 2.0, at the edges' gains, ramped from nothing to their targets.
+        for (int i = 0; i < 256; i++)
+                one[i] = 1.0f, two[i] = 2.0f;
+        for (int pass = 0; pass < 2; pass++)
+        {
+                audio_graph_clear(&g, 256);
+                audio_graph_spread(&g, prog, one, one, 256, 1.0f);
+                audio_graph_spread(&g, mic, two, two, 256, 0.5f);
+                for (long o = 0; o < g.ordered; o++)
+                        if (g.kind[g.order[o]] == AUDIO_NODE_COMBINER)
+                                audio_graph_spread(&g, g.order[o], g.bus[2 * g.order[o]], g.bus[2 * g.order[o] + 1], 256, 1.0f);
+        }
+        {
+                float quarter = audio_volume_gain(AUDIO_VOLUME_NORM / 4);
+
+                SVCHECK(fabsf(g.bus[2 * out1][255] - (quarter + 1.0f)) < 1e-6f && fabsf(g.bus[2 * out1 + 1][255] - (quarter + 1.0f)) < 1e-6f,
+                        "an output's bus is the program at its wire's 25%% and the microphone at its level's half of 2: %f", g.bus[2 * out1][255]);
+                SVCHECK(fabsf(g.bus[2 * out2][255] - 1.0f) < 1e-6f && fabsf(g.bus[2 * loop][255] - 1.0f) < 1e-6f && fabsf(g.bus[2 * a][255] - 1.0f) < 1e-6f,
+                        "the muted wire carries nothing, the program reaches the machine's speakers through C, B and A, the loopback has the microphone");
+        }
+        // Built again with the same wires: the gains are where they were (no ramp from nothing), a wire taken off is gone.
+        audio_graph_begin(&g);
+        a = audio_graph_add(&g, AUDIO_NODE_COMBINER, "A", 0);
+        prog = audio_graph_add(&g, AUDIO_NODE_PROGRAM, "0/player", "Player");
+        out2 = audio_graph_add(&g, AUDIO_NODE_REMOTE_OUTPUT, "link.desk.speakers", "Speakers");
+        audio_graph_wire(&g, prog, a, 100, 0);
+        audio_graph_wire(&g, a, out2, 100, 0);
+        audio_graph_unwire(&g, prog, a);
+        audio_graph_wire(&g, prog, out2, 100, 0);
+        audio_graph_end(&g);
+        SVCHECK(g.edges == 2 && g.now[g.first[a]] == 1.0f && g.now[g.first[prog]] == 0.0f, "a build keeps the gain of a wire that stays (%f) and a new wire ramps (%f)", g.now[g.first[a]],
+                g.now[g.first[prog]]);
+        SVCHECK(audio_graph_straight(&g, a, out2) && !audio_graph_straight(&g, prog, out2), "a wire at a whole and steady goes straight; one that ramps does not");
+}
+
+// A playback stream of the engine's by hand: a root program named name, float stereo, its ring filled with value, playing.
+static long sv_graph_stream(const char *name, float value)
+{
+        struct pulse *p = &audio_service.pulse;
+        long client = pulse_client_open(p, 0, 4321);
+        static const signed char map[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
+        float data[2048];
+        struct pulse_stream *s;
+        int error = 0;
+
+        if (client < 0)
+                return -1;
+        p->client[client]->authorized = 1, p->client[client]->root = 1;
+        pulse_props_set(&p->client[client]->props, "application.name", (const unsigned char *)name, (long)strlen(name) + 1);
+        s = pulse_stream_make(p, client, AUDIO_FORMAT_F32LE, 2, 48000, map, 2, audio_service.sink, PULSE_INVALID, PULSE_INVALID, PULSE_INVALID, PULSE_INVALID, 0, 0, &error);
+        if (!s)
+                return -1;
+        for (int i = 0; i < 2048; i++)
+                data[i] = value;
+        for (int i = 0; i < 16; i++)
+                audio_ring_write(&s->voice.ring, (const unsigned char *)data, sizeof(data), 0);
+        s->trigger = 1, s->underrun = 1;
+        pulse_stream_apply(s);
+        return s - p->stream;
+}
+
+// A record stream of the engine's by hand on a source, for the program of stream (its connection): float stereo at the source's rate.
+static long sv_graph_record(long stream, long source)
+{
+        struct pulse *p = &audio_service.pulse;
+        struct pulse_record *rec = pulse_record_free_slot(p);
+
+        if (!rec || stream < 0)
+                return -1;
+        memset(rec, 0, offset_of(struct pulse_record, rs));
+        rec->used = 1, rec->client = p->stream[stream].client, rec->source = source, rec->format = AUDIO_FORMAT_F32LE, rec->channels = 2, rec->rate = p->source[source].rate;
+        rec->map_channels = 2, rec->map[0] = AUDIO_POSITION_FRONT_LEFT, rec->map[1] = AUDIO_POSITION_FRONT_RIGHT, rec->uid = 0;
+        for (long i = 0; i < PULSE_CHANNEL_MAX; i++)
+                rec->volume[i] = AUDIO_VOLUME_NORM;
+        pulse_record_attributes(rec, PULSE_INVALID, PULSE_INVALID);
+        pulse_record_apply(rec);
+        rec->now[0] = rec->now[1] = rec->target;
+        p->records_made++;
+        return rec - p->record;
+}
+
+static void sv_test_graph_service(void)
+{
+        struct pulse *p = &audio_service.pulse;
+        struct audio_graph *g = &audio_service.graph;
+        float *left, *right;
+        long stream, mic_source, combiner, output, slot, capture, k;
+        char path[300];
+        FILE *f;
+
+        sv_start();
+        // The old list of mirrors, with no graph's file: taken in as wires from Main, once, and written as the graph's file.
+        sv_write_file("audio.mirror", "alsa_output.test.00\t40\nmoonwater.loopback\n");
+        sv_path(path, sizeof path, AUDIO_GRAPH_FILE);
+        unlink(path);
+        audio_service.graph_absorbed = 0;
+        audio_graph_read(1);
+        SVCHECK(audio_service.plan.wires == 2 && audio_plan_find(&audio_service.plan, "combiner:Main", "output:alsa_output.test.00") >= 0 &&
+                    audio_service.plan.level[audio_plan_find(&audio_service.plan, "combiner:Main", "output:alsa_output.test.00")] == 40 &&
+                    audio_plan_find(&audio_service.plan, "combiner:Main", "loopback:moonwater.loopback") >= 0,
+                "the old mirrors are wires from Main, their levels kept (%ld wires)", audio_service.plan.wires);
+        f = fopen(path, "r");
+        if (f)
+        {
+                char text[512] = {0};
+
+                fread(text, 1, sizeof(text) - 1, f);
+                fclose(f);
+                SVCHECK(strstr(text, "wire\tcombiner:Main\toutput:alsa_output.test.00\t40\n") && strstr(text, "wire\tcombiner:Main\tloopback:moonwater.loopback\t100\n"),
+                        "and the graph's file says so: %s", text);
+        }
+        else
+                SVCHECK(0, "the graph's file was written");
+        // The person's graph: a combiner, a program wired past Main to it and straight to an output, a microphone to the output.
+        sv_write_file(AUDIO_GRAPH_FILE, "combiner\tShow\n"
+                                        "wire\tprogram:0/Tester\tcombiner:Show\t100\n"
+                                        "cut\tprogram:0/Tester\tcombiner:Main\n"
+                                        "wire\tprogram:0/Tester\toutput:alsa_output.test.00\t100\n"
+                                        "wire\tcapture:alsa_input.test.00\toutput:alsa_output.test.00\t100\n");
+        audio_graph_read(0);
+        audio_rows_fit((void **)&audio_service.devices, &audio_service.device_room, 2, (long)sizeof(audio_service.devices[0]));
+        memset(audio_service.devices, 0, 2 * sizeof(audio_service.devices[0]));
+        strcpy(audio_service.devices[0].name, "alsa_output.test.00"), strcpy(audio_service.devices[0].description, "Test output");
+        strcpy(audio_service.devices[1].name, AUDIO_LOOPBACK_NAME), audio_service.devices[1].flags = AUDIO_STATE_DEVICE_VIRTUAL;
+        audio_service.device_count = 2;
+        audio_rows_fit((void **)&audio_service.input, &audio_service.input_room, 1, (long)sizeof(audio_service.input[0]));
+        memset(&audio_service.input[0], 0, sizeof(audio_service.input[0]));
+        audio_service.input[0].used = 1, audio_service.input[0].pcm.fd = -1;
+        strcpy(audio_service.input[0].name, "alsa_input.test.00"), strcpy(audio_service.input[0].description, "Test mic");
+        audio_service.input[0].slot = pulse_source_add(p, "alsa_input.test.00", "Test mic", 48000);
+        stream = sv_graph_stream("Tester", 0.25f);
+        audio_graph_build();
+        combiner = audio_graph_named(g, "combiner:Show");
+        output = audio_graph_named(g, "output:alsa_output.test.00");
+        capture = audio_graph_named(g, "capture:alsa_input.test.00");
+        k = stream >= 0 && stream < audio_service.stream_node_room ? audio_service.stream_node[stream] : -1;
+        mic_source = pulse_source_named(p, "moonwater.combiner.Show");
+        SVCHECK(stream >= 0 && k >= 0 && g->kind[k] == AUDIO_NODE_PROGRAM && !strcmp(g->name[k], "0/Tester") && !strcmp(g->description[k], "Tester"),
+                "a program is a node by its user and name (%ld)", k);
+        SVCHECK(combiner >= 0 && output >= 0 && capture >= 0 && g->first[k + 1] - g->first[k] == 2 && g->ins[output] == 2,
+                "the program goes to the combiner and the output, not Main; the microphone to the output");
+        SVCHECK(mic_source >= PULSE_SINKS && p->source[mic_source].loop && p->source[mic_source].capture && !strcmp(p->source[mic_source].description, "Show") &&
+                    g->slot[combiner] == mic_source,
+                "the combiner is offered to programs as a microphone named for it (source %ld)", mic_source);
+        SVCHECK(audio_service.input[0].wired && audio_service.input[0].fifo && audio_service.input[0].fifo_table, "the microphone wired out has its resampler");
+        {
+                long before, record = sv_graph_record(stream, mic_source);
+
+                before = record >= 0 ? pulse_client_pending(p, p->stream[stream].client) : 0;
+                for (int block = 0; block < 4; block++)
+                        audio_graph_mix(256, &left, &right);
+                SVCHECK(record >= 0 && pulse_client_pending(p, p->stream[stream].client) > before, "the program recording the combiner is sent what it hears");
+        }
+        SVCHECK(fabsf(p->source[mic_source].bus[0][255] - 0.25f) < 1e-6f && fabsf(p->source[mic_source].bus[1][255] - 0.25f) < 1e-6f,
+                "a program that records the combiner hears the program wired into it: %f", p->source[mic_source].bus[0][255]);
+        SVCHECK(fabsf(g->bus[2 * output][255] - 0.25f) < 1e-6f && p->stream[stream].routed, "the program plays on the output straight, not through Main: %f", g->bus[2 * output][255]);
+        SVCHECK(fabsf(p->sink[audio_service.sink].mix.mix[0][255]) < 1e-9f, "and Main, which it is cut from, has nothing of it");
+        // The microphone to the output: an impulse put on its resampler comes out a block and the filter's half later.
+        {
+                float in[2][AUDIO_BLOCK], out[2][256];
+                long put_at = 100, found = -1, pulled = 0, held = 0;
+
+                slot = g->slot[capture];
+                memset(in, 0, sizeof(in));
+                in[0][put_at] = in[1][put_at] = 1.0f;
+                audio_input_put(slot, in[0], in[1], 256);
+                for (int block = 0; block < 12 && found < 0; block++)
+                {
+                        memset(in, 0, sizeof(in));
+                        if (block)
+                                audio_input_put(slot, in[0], in[1], 256);
+                        held = audio_service.input[slot].fifo->have - audio_service.input[slot].fifo->table->taps;
+                        audio_input_pull(slot, out[0], out[1], 256);
+                        for (int i = 0; i < 256 && found < 0; i++)
+                                if (fabsf(out[0][i]) > 0.5f)
+                                        found = pulled + i;
+                        pulled += 256;
+                }
+                printf("  graph: a microphone wired to an output: an impulse put at frame %ld comes out at frame %ld (the resampler held %ld frames beyond its %ld taps when it was pulled)\n",
+                       put_at, found, held, audio_service.input[slot].fifo_table->taps);
+                SVCHECK(found >= 0 && found - put_at <= 256 + AUDIO_CAPTURE_SLACK + audio_service.input[slot].fifo_table->taps / 2 + 2,
+                        "a microphone's frames reach the output within the block, the slack and the filter's half: %ld frames late", found - put_at);
+        }
+        (void)right;
+}
+
+// The cost of an edge: a block of 512 frames given along N edges into N buses, in nanoseconds an edge and a block (the median of passes,
+// each of 64 blocks).
+static void sv_bench_graph(int cpu)
+{
+        enum { PASSES = 201, REPS = 64 };
+        static double samples[PASSES];
+        static float block[AUDIO_BLOCK];
+        cpu_set_t set;
+        struct audio_graph g;
+        long source;
+
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        sched_setaffinity(0, sizeof(set), &set);
+        for (int i = 0; i < AUDIO_BLOCK; i++)
+                block[i] = 0.001f * (float)(i % 97);
+        for (int edges = 1; edges <= 256; edges *= 4)
+        {
+                memset(&g, 0, sizeof(g));
+                g.grow = sv_graph_memory;
+                audio_graph_begin(&g);
+                source = audio_graph_add(&g, AUDIO_NODE_CAPTURE, "mic", 0);
+                for (int e = 0; e < edges; e++)
+                {
+                        char name[16];
+
+                        snprintf(name, sizeof(name), "out%d", e);
+                        audio_graph_wire(&g, source, audio_graph_add(&g, AUDIO_NODE_OUTPUT, name, 0), 50, 0);
+                }
+                audio_graph_end(&g);
+                for (int r = 0; r < 4; r++)
+                        audio_graph_spread(&g, source, block, block, AUDIO_BLOCK, 1.0f); // the ramps done
+                for (int pass = 0; pass < PASSES; pass++)
+                {
+                        struct timespec t0, t1;
+
+                        clock_gettime(CLOCK_MONOTONIC, &t0);
+                        for (int r = 0; r < REPS; r++)
+                                audio_graph_spread(&g, source, block, block, AUDIO_BLOCK, 1.0f);
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        samples[pass] = ((double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec)) / REPS;
+                }
+                for (int i = 1; i < PASSES; i++)
+                        for (int j = i; j > 0 && samples[j - 1] > samples[j]; j--)
+                        {
+                                double t = samples[j];
+
+                                samples[j] = samples[j - 1], samples[j - 1] = t;
+                        }
+                printf("graph: %3d edges, a block of %d frames along them: %8.0f ns, %6.1f ns an edge, %.3f ns an edge a frame\n", edges, AUDIO_BLOCK, samples[PASSES / 2],
+                       samples[PASSES / 2] / edges, samples[PASSES / 2] / edges / AUDIO_BLOCK);
+        }
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -11753,6 +12106,9 @@ static int sv_main_checks(void)
         sv_test_remote_socket();
         sv_test_remote_pull();
         sv_test_remote_push();
+        sv_test_graph_plan();
+        sv_test_graph_live();
+        sv_test_graph_service();
         printf("CHECK_audio_service: %u checks, %u failures\n", sv_checks, sv_failures);
         return sv_failures != 0;
 }
@@ -11817,6 +12173,7 @@ static void sv_bench_open(long card, long device)
 
 int main(int argc, char **argv)
 {
+        setvbuf(stdout, 0, _IONBF, 0); // a row that never ends shows where it is
         if (argc > 2 && strcmp(argv[1], "open") == 0)
         {
                 sv_bench_open(atol(argv[2]), argc > 3 ? atol(argv[3]) : 0);
@@ -11835,6 +12192,11 @@ int main(int argc, char **argv)
         if (argc > 1 && strcmp(argv[1], "bench") == 0)
         {
                 sv_bench(argc > 2 ? atoi(argv[2]) : 8);
+                return 0;
+        }
+        if (argc > 1 && strcmp(argv[1], "graph") == 0)
+        {
+                sv_bench_graph(argc > 2 ? atoi(argv[2]) : 8);
                 return 0;
         }
         return sv_main_checks();

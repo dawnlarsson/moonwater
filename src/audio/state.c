@@ -20,6 +20,13 @@
         stream is listed as a playback stream is, with the flag AUDIO_STATE_MONITOR when what it records is what the
         machine plays and not a microphone).
 
+        The sound graph (version 5): every node there is (each program, microphone, combiner, output, the loopback microphone and
+        each device of another machine over Waterlink, struct audio_state_node) and every wire between them (struct
+        audio_state_edge), in a table after the page's fixed part, at graph_at bytes from its start: as many as there are, so the
+        file grows when they do (it never shrinks while the server runs) and total says how big it is. A reader that wants the
+        graph maps total bytes, and maps again when total grows (audio_state_graph_read). An edge's from and to are rows of the
+        node table. What the person wired is kept in /root/audio.graph (src/audio/graph.c); the page shows what is.
+
         Control goes the other way, over the PulseAudio socket (src/audio/pulse.c) or the settings files (/root/audio.*):
         a mixer is a client of the server like any other.
 */
@@ -28,12 +35,12 @@
 
 #define AUDIO_STATE_PATH "/run/moonwater/pulse/state"
 #define AUDIO_STATE_MAGIC 0x5341574du // "MWAS"
-#define AUDIO_STATE_VERSION 4u
+#define AUDIO_STATE_VERSION 5u
 #define AUDIO_STATE_STREAMS 32
 #define AUDIO_STATE_DEVICES 16 // a desktop with four HDMI pins and a board's USB codec of four outputs has eight already
 #define AUDIO_STATE_INPUTS 8
 #define AUDIO_STATE_RECORDS 16
-#define AUDIO_STATE_BYTES 16384
+#define AUDIO_STATE_BYTES 16384 // the fixed part; the graph's rows follow it (graph_at)
 
 #define AUDIO_STATE_MUTED 1u
 #define AUDIO_STATE_CORKED 2u
@@ -117,6 +124,30 @@ struct audio_state
         unsigned int hw_off;           // and found still off after (the card would not take them)
         char hw_note[48];              // the first of those, as the card names it
         unsigned int output_why;       // AUDIO_STATE_WHY_*: why this output plays
+        // The sound graph's rows (version 5), after the fixed part: graph_nodes rows of struct audio_state_node from graph_at, then
+        // graph_edges of struct audio_state_edge. total is the bytes of the whole file; graph_gen counts the graph's builds.
+        unsigned int total, graph_at, graph_nodes, graph_edges, graph_gen;
+        unsigned int refused;          // wires the server refused since it started (each would have closed a loop of combiners)
+};
+
+// A node of the graph: its kind and flags are graph.c's (AUDIO_NODE_*); name is its key's name ("uid/name" for a program, the device's
+// name for a card's, a combiner's own), what the person is shown is description, and a device of another machine says the machine and,
+// when it has not allowed sound, the line that allows it (run on that machine).
+struct audio_state_node
+{
+        char name[128];
+        char description[96];
+        char machine[32];
+        char allow[64];
+        unsigned int kind, flags;
+        unsigned int latency_us, lost; // a device of another machine's: its delay end to end and the blocks it lost
+};
+
+// A wire: the rows of its two nodes, its level in percent (the master volume's for the wire from Main to the output that plays), its
+// flags (graph.c's AUDIO_EDGE_*: muted, the server's own, to the output that plays, carrying sound now).
+struct audio_state_edge
+{
+        unsigned int from, to, level, flags;
 };
 
 _Static_assert(sizeof(struct audio_state) <= AUDIO_STATE_BYTES, "the state page fits its file");
@@ -172,6 +203,63 @@ static void audio_state_trust(struct audio_state *copy)
         }
         if (copy->output_why > AUDIO_STATE_WHY_NOTHING)
                 copy->output_why = 0;
+}
+
+/*
+        A copy of the page and its graph from a map of mapped bytes of it: the fixed part into *copy (as audio_state_read checks it) and
+        the graph's rows into nodes and edges, room for nodes_room and edges_room of them, under the one sequence number. Answers 1 when
+        the copy is whole, with copy->graph_nodes and copy->graph_edges held to the rows copied: a caller whose rooms or map are short
+        sees the counts the page says in *wanted_nodes and *wanted_edges, and copy->total for the map, and grows them. Every row is
+        trusted as audio_state_trust trusts the page: its strings end inside it, and an edge whose ends are not rows copied is dropped.
+*/
+static int audio_state_graph_read(const volatile struct audio_state *page, unsigned long mapped, struct audio_state *copy, struct audio_state_node *nodes, long nodes_room,
+                                  struct audio_state_edge *edges, long edges_room, long *wanted_nodes, long *wanted_edges)
+{
+        *wanted_nodes = *wanted_edges = 0;
+        if (mapped < sizeof(struct audio_state))
+                return 0;
+        for (int tries = 0; tries < 8; tries++)
+        {
+                unsigned int before = __atomic_load_n(&page->seq, __ATOMIC_ACQUIRE), after, at, n, e, kept = 0;
+
+                if (before & 1u)
+                        continue;
+                memory_copy_apart(copy, (const void *)page, sizeof(*copy));
+                at = copy->graph_at, n = copy->graph_nodes, e = copy->graph_edges;
+                *wanted_nodes = n, *wanted_edges = e;
+                // The rows the map holds and the rooms take.
+                if (at < sizeof(struct audio_state) || at > mapped)
+                        n = e = 0;
+                n = n > (mapped - at) / sizeof(struct audio_state_node) ? (unsigned int)((mapped - at) / sizeof(struct audio_state_node)) : n;
+                n = (long)n > nodes_room ? (unsigned int)nodes_room : n;
+                e = (long)e > edges_room ? (unsigned int)edges_room : e;
+                if ((unsigned long)at + (unsigned long)copy->graph_nodes * sizeof(struct audio_state_node) + (unsigned long)e * sizeof(struct audio_state_edge) > mapped)
+                        e = 0;
+                if (n)
+                        memory_copy_apart(nodes, (const char *)page + at, n * sizeof(struct audio_state_node));
+                if (e)
+                        memory_copy_apart(edges, (const char *)page + at + copy->graph_nodes * sizeof(struct audio_state_node), e * sizeof(struct audio_state_edge));
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                after = __atomic_load_n(&page->seq, __ATOMIC_ACQUIRE);
+                if (before != after)
+                        continue;
+                audio_state_trust(copy);
+                if (copy->magic != AUDIO_STATE_MAGIC || copy->version != AUDIO_STATE_VERSION || copy->bytes != sizeof(*copy))
+                        return 0;
+                for (unsigned int k = 0; k < n; k++)
+                {
+                        audio_state_end(nodes[k].name, sizeof(nodes[k].name));
+                        audio_state_end(nodes[k].description, sizeof(nodes[k].description));
+                        audio_state_end(nodes[k].machine, sizeof(nodes[k].machine));
+                        audio_state_end(nodes[k].allow, sizeof(nodes[k].allow));
+                }
+                for (unsigned int k = 0; k < e; k++)
+                        if (edges[k].from < n && edges[k].to < n && edges[k].from != edges[k].to)
+                                edges[kept++] = edges[k];
+                copy->graph_nodes = n, copy->graph_edges = kept;
+                return 1;
+        }
+        return 0;
 }
 
 static int audio_state_read(const volatile struct audio_state *page, struct audio_state *copy)

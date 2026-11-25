@@ -1800,9 +1800,77 @@ static void al_polyphase_tier(string_address tier, int bits)
         check("mix.c: 32 kHz into 48 kHz, two tones within 2e-5 rms of the tones", al_engine(32000, 48000) < 2e-5);
 }
 
+/*
+        The sound graph's cost an edge with the library's loop (src/audio/graph.c, audio_graph_spread, as the server runs it): a block of
+        512 frames given along 1, 16 and 64 edges, the median of 101 passes of 64 blocks each, on this machine's own body. Said, not judged.
+*/
+#include "../../src/audio/graph.c"
+static unsigned char al_graph_arena[1 << 21] __attribute__((aligned(64)));
+static long al_graph_used;
+static void *al_graph_memory(void *context, void *old, long old_bytes, long bytes)
+{
+        void *at;
+
+        (void)context, (void)old, (void)old_bytes;
+        bytes = (bytes + 63) & ~63l;
+        if (bytes <= 0 || al_graph_used + bytes > (long)sizeof(al_graph_arena))
+                return 0;
+        at = al_graph_arena + al_graph_used;
+        al_graph_used += bytes;
+        memory_fill(at, 0, (positive)bytes);
+        return at;
+}
+
+static fn al_graph_bench(void)
+{
+        static float block[AUDIO_BLOCK];
+        static positive samples[101];
+        struct audio_graph g;
+
+        for (int i = 0; i < AUDIO_BLOCK; i++)
+                block[i] = 0.001f * (float)(i % 97);
+        for (int edges = 1; edges <= 64; edges *= edges == 1 ? 16 : 4)
+        {
+                long source;
+
+                memory_fill(&g, 0, sizeof(g));
+                al_graph_used = 0;
+                g.grow = al_graph_memory;
+                audio_graph_begin(&g);
+                source = audio_graph_add(&g, AUDIO_NODE_CAPTURE, "mic", 0);
+                for (int e = 0; e < edges; e++)
+                {
+                        char name[8] = {'o', 'u', 't', (char)('0' + e / 10), (char)('0' + e % 10), 0};
+
+                        audio_graph_wire(&g, source, audio_graph_add(&g, AUDIO_NODE_OUTPUT, name, 0), 50, 0);
+                }
+                if (!audio_graph_end(&g))
+                        return;
+                for (int r = 0; r < 4; r++)
+                        audio_graph_spread(&g, source, block, block, AUDIO_BLOCK, 1.0f);
+                for (int pass = 0; pass < 101; pass++)
+                {
+                        positive t0 = clock_monotonic_nanoseconds();
+
+                        for (int r = 0; r < 64; r++)
+                                audio_graph_spread(&g, source, block, block, AUDIO_BLOCK, 1.0f);
+                        samples[pass] = (clock_monotonic_nanoseconds() - t0) / 64;
+                }
+                for (int i = 1; i < 101; i++)
+                        for (int j = i; j > 0 && samples[j - 1] > samples[j]; j--)
+                        {
+                                positive t = samples[j];
+
+                                samples[j] = samples[j - 1], samples[j - 1] = t;
+                        }
+                string_format(log, "  graph: a block of 512 frames along %p edges: %p ns, %p ns an edge\n", (positive)edges, samples[50], samples[50] / (positive)edges);
+        }
+}
+
 b32 main(void)
 {
         check("audiolib: guard pages", al_guard());
+        al_graph_bench();
         if (!al_high[AL_REGIONS - 1])
                 return test_report(null);
 #if X64
