@@ -40,6 +40,7 @@
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 # machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
+# machine-made 2026-11-25 (a curated wallpaper's fetch on its card), not yet read by a person: wallpaper_got wallpaper_lost wallpaper_lost_busy wallpaper_lost_digest wallpaper_retry wallpaper_unsynced
 @language de
 @name Deutsch
 @translated machine
@@ -653,6 +654,12 @@ ui_confirm_again	b3ff	zur Bestätigung erneut drücken:
 ui_field_digits	f52b	eine Zahl besteht aus Ziffern
 ui_field_full	fe02	mehr passt nicht hinein
 wallpaper_change	ea8f	Hintergrundbild ändern
+wallpaper_got	d24f	%1$s von %2$s
+wallpaper_lost	feac	Konnte nicht geladen werden
+wallpaper_lost_busy	e412	Der Server ist ausgelastet
+wallpaper_lost_digest	4620	Nicht das Bild, das der Feed nennt
+wallpaper_retry	af59	Erneut versuchen
+wallpaper_unsynced	da83	Die ausgewählten Hintergründe konnten nicht geladen werden
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Ein Kreis unter jedem Finger auf einem Touchscreen

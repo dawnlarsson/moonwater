@@ -40,6 +40,7 @@
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 # machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
+# machine-made 2026-11-25 (a curated wallpaper's fetch on its card), not yet read by a person: wallpaper_got wallpaper_lost wallpaper_lost_busy wallpaper_lost_digest wallpaper_retry wallpaper_unsynced
 @language tr
 @name Türkçe
 @translated machine
@@ -653,6 +654,12 @@ ui_confirm_again	b3ff	onaylamak için tekrar basın:
 ui_field_digits	f52b	bir sayı rakamlardan oluşur
 ui_field_full	fe02	daha fazlası sığmaz
 wallpaper_change	ea8f	Duvar kâğıdını değiştir
+wallpaper_got	d24f	%1$s / %2$s
+wallpaper_lost	feac	İndirilemedi
+wallpaper_lost_busy	e412	Sunucu meşgul
+wallpaper_lost_digest	4620	Akışın belirttiği resim değil
+wallpaper_retry	af59	Yeniden dene
+wallpaper_unsynced	da83	Seçilmiş duvar kağıtları indirilemedi
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Dokunmatik ekranda her parmağın altında bir daire

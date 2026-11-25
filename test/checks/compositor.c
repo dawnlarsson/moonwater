@@ -3797,6 +3797,21 @@ static void check_wallpaper_ground(void)
     check("wallpaper: a Scene taken away takes its word, and the Scenes after it are a number less", removed);
 }
 
+// A curated picture's miniature put in place (its bytes need be none: the card is no ghost while it is there), or taken away.
+static void wall_mini_put(const char *hex, b32 here)
+{
+    char path[sizeof(SETTING_WALLPAPER_DIR "/curated/") + 64 + 8];
+
+    (void)system_make_directory_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_DIR, 0755);
+    (void)system_make_directory_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_DIR "/curated", 0755);
+    string_join((p8 address_to)path, sizeof(path), (string_address)SETTING_WALLPAPER_DIR "/curated/", (string_address)hex);
+    string_append_bounded((p8 address_to)path, (string_address) ".mini", sizeof(path));
+    if (here)
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)path, "x", 1, 0644);
+    else
+        system_remove_at(AT_FDCWD, (string_address)path, 0);
+}
+
 /*
         The wallpaper's editor over a Scene (wallpaper.c): opened, its cards are Solid colour, the moon's three words and the folder, the Scene's own ringed in
         the accent; all the way open the veil over the screen is the wallpaper at 245 of 255, premultiplied, a blended frame before the cards;
@@ -3872,11 +3887,13 @@ static void check_wallpaper_editor(void)
         static const char list[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef dusk\nnot a line\n";
 
         (void)file_write_atomic_at(AT_FDCWD, (string_address)curated_path, list, sizeof(list) - 1, 0644);
+        wall_mini_put("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1);
         compositor_walls_read();
         compositor_wall_edit(0, 1);
         curated = compositor_wall_editor.cards == 4 && !compositor_wall_editor.word[3][0] &&
                   string_equals((string_address)compositor_wall_editor.word[2], "curated:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         compositor_wall_edit(0, 0);
+        wall_mini_put("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0);
     }
     compositor_wall_edit(0, 1);
     compositor_scenes_open(0);
@@ -4115,6 +4132,9 @@ static void check_wallpaper_source(void)
     compositor.table = table_at, compositor.width = 1280, compositor.height = 800, compositor.scale = 100, compositor.direct_row = -1;
     compositor_wall_rows.ready = 1;
     (void)file_write_atomic_at(AT_FDCWD, (string_address)curated_path, list, sizeof(list) - 1, 0644);
+    wall_mini_put("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1);
+    wall_mini_put("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", 1);
+    compositor_walls.sync = COMPOSITOR_WALL_SYNCED;
     compositor_walls_read();
     read = compositor_walls.curateds == 2 && string_equals((string_address)compositor_walls.credit[0].author, "A. Painter ") &&
            string_equals((string_address)compositor_walls.credit[0].licence, "CC BY-SA 4.0") &&
@@ -4137,7 +4157,7 @@ static void check_wallpaper_source(void)
         positive lit = 0, unlit = 0;
         int frame = -1;
 
-        band = &compositor_wall_editor.band[card - 2 - (int)compositor_walls.names];
+        band = &compositor_wall_editor.band[compositor_wall_editor_which(card)];
         for (unsigned int at = 0; at < 24; at++)
             if (frames[at].pixels == band->pixels && band->pixels)
                 frame = (int)at;
@@ -4229,6 +4249,177 @@ static void check_wallpaper_source(void)
     compositor_walls.lines = compositor_walls.names = compositor_walls.curateds = 0;
     compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
     compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH, compositor_wall_starts = 1, compositor_wall_opened = 0;
+    wall_mini_put("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0);
+    wall_mini_put("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", 0);
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    system_remove_at(AT_FDCWD, (string_address)curated_path, 0);
+    compositor_wall_drop();
+    compositor_wall_rows.ready = 0;
+    compositor_zero();
+}
+
+/*
+        The feed's cards as they come (wallpaper.c, the kit's ui_ghost and ui_fetch_card_draw): while the thumbnails are fetched and no list is
+        had yet, a row of ghosts stands between the pictures and the folder, card-sized fills of the surface that breathe (and are still with
+        reduced motion), and take no press; the list had, each picture whose thumbnail is not here is a ghost in its own place, and becomes
+        its card there when its thumbnail comes; the sync ended with one never come, or the list not had, the ghosts are one card to try
+        again, which fetches again. A picture pressed that is not here has its fetch across its card's foot, its bytes of the feed's count as
+        its part grows, and when it is lost, why and a Retry, a press on it fetching again.
+*/
+static void check_wallpaper_loading(void)
+{
+    static struct windows *table_scratch;
+    static char scenes_path[64], pictures_path[64], curated_path[64];
+    static struct compositor_frame frames[48];
+    static unsigned int rows[48];
+    static const char hex_a[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      hex_b[] = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    static const char list[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef dusk\tA\tCC BY 4.0\t\t2000\n"
+                               "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 dawn\tB\tCC BY 4.0\t\t4000\n";
+    static const char part_b[] = SETTING_WALLPAPER_DIR "/curated/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210.part";
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
+    positive length;
+    unsigned int base, ghosts = 0, made;
+    b32 rowed = 1, breathing, still, pressless, placed, replaced, retried, resynced, fetching, lost, again;
+    int place[4], dusk = -1, dawn = -1;
+    char line[96];
+
+    length = positive_into_string((p8 address_to)scenes_path + 23, (positive)system_call(syscall(getpid)));
+    memory_copy(scenes_path, "/tmp/moonwater-walls-l.", 23), scenes_path[23 + length] = 0;
+    memory_copy(pictures_path, scenes_path, 24 + length), pictures_path[21] = 'p';
+    memory_copy(curated_path, scenes_path, 24 + length), curated_path[21] = 'c';
+    system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
+    system_remove_at(AT_FDCWD, (string_address)curated_path, 0);
+    compositor_walls_path = scenes_path, compositor_walls_pictures_path = pictures_path, compositor_walls_curated_path = curated_path;
+    compositor_wall_starts = 0;
+    compositor_zero();
+    compositor.face = band_face, compositor.engine = &band_engine;
+    windows_scratch_zero(table_at);
+    table_at->themed = 1, table_at->theme = UI_THEME_DARK, table_at->accent = 0x5b7fa6u, table_at->motion = 0; // full motion: the ghosts breathe
+    compositor.table = table_at, compositor.width = 1280, compositor.height = 800, compositor.scale = 100, compositor.direct_row = -1;
+    compositor_wall_rows.ready = 1;
+    wall_mini_put(hex_a, 0), wall_mini_put(hex_b, 0);
+    compositor_walls_read();
+    compositor_spaces_ensure();
+    compositor_wall_put(0, 1, "auto");
+    compositor_wall_edit(0, 1);
+    compositor_wall_editor.shown = COMPOSITOR_SCENES_FULL, compositor_wall_editor.speed = 0; // all the way down (the motion is on: no spring run here)
+    // Syncing, no list yet: a row of ghosts.
+    compositor_walls.sync = COMPOSITOR_WALL_SYNCING, compositor_walls.sync_at = clock_monotonic_nanoseconds(), compositor_walls.laid++;
+    compositor_wall_editor_lay();
+    base = 2 + compositor_walls.names;
+    for (unsigned int at = base; at < compositor_wall_editor.cards; at++)
+        ghosts += compositor_wall_editor_which((int)at) == COMPOSITOR_WALL_GHOST;
+    {
+        unsigned int first_row = 0;
+
+        for (unsigned int at = 0; at < compositor_wall_editor.cards; at++)
+            first_row += compositor_wall_editor.card[at][1] == compositor_wall_editor.card[0][1];
+        for (unsigned int at = base; at < base + ghosts; at++)
+            rowed &= compositor_wall_editor_ghost((int)at);
+        check("feed's cards: while the thumbnails are fetched and no list is had, a row's worth of ghosts stands before the folder",
+              ghosts >= 2 && ghosts == first_row && rowed && compositor_wall_editor.cards == base + ghosts + 1 && !compositor_wall_editor.word[base + ghosts][0]);
+    }
+    made = compositor_wall_editor_frames(frames, rows, 0, 48);
+    {
+        unsigned int first = 0, second = 0;
+        int frame = -1;
+
+        for (unsigned int at = 0; at < made; at++)
+            if (frames[at].x == compositor_wall_editor.card[base][0] && frames[at].y == compositor_wall_editor.card[base][1] && frames[at].width == compositor_wall_editor.card[base][2])
+                frame = (int)at;
+        first = frame >= 0 ? frames[frame].fill : 0;
+        breathing = frame >= 0 && first && !frames[frame].pixels && frames[frame].radius > 0 && compositor_glides();
+        second = ui_ghost_card_ink(UI_THEME_DARK, 0x5b7fa6u, 200000000ull, 0);
+        breathing = breathing && second != ui_ghost_card_ink(UI_THEME_DARK, 0x5b7fa6u, 600000000ull, 0);
+        still = ui_ghost_card_ink(UI_THEME_DARK, 0x5b7fa6u, 200000000ull, 1) == ui_ghost_card_ink(UI_THEME_DARK, 0x5b7fa6u, 600000000ull, 1);
+    }
+    check("feed's cards: a ghost is the card's shape, a fill of the surface with no picture, its ground breathing over time and still with reduced motion",
+          breathing && still);
+    compositor.pointer_x = compositor_wall_editor.card[base][0] + 10, compositor.pointer_y = compositor_wall_editor.card[base][1] + 10;
+    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+    pressless = compositor_wall_editing() && string_equals((string_address)compositor_wall_word(0, 1), "auto") && !compositor_wall_pending.word[0] &&
+                !compositor_wall_editor_stop((int)base);
+    check("feed's cards: a ghost takes no press and the keys do not stop at it", pressless);
+    // The list had: the one whose thumbnail is here its card, the other a ghost in its own place; its thumbnail come, its card there.
+    wall_mini_put(hex_a, 1);
+    (void)file_write_atomic_at(AT_FDCWD, (string_address)curated_path, list, sizeof(list) - 1, 0644);
+    compositor_walls_read();
+    compositor_wall_editor_lay();
+    for (unsigned int at = 0; at < compositor_wall_editor.cards; at++)
+        if (compositor_wall_editor_credit((int)at))
+            compositor_walls.credit[compositor_wall_editor_which((int)at)].bytes == 2000 ? (dusk = (int)at) : (dawn = (int)at);
+    placed = dusk >= 0 && dawn == dusk + 1 && !compositor_wall_editor_ghost(dusk) && compositor_wall_editor_ghost(dawn);
+    check("feed's cards: the list had, a picture whose thumbnail is here is its card, one still to come a ghost in its own place", placed);
+    memory_copy(place, compositor_wall_editor.card[dawn > 0 ? dawn : 0], sizeof(place));
+    wall_mini_put(hex_b, 1);
+    string_join((p8 address_to)line, sizeof(line), (string_address) "mini ", (string_address)hex_b), compositor_wall_ask_line(line);
+    compositor_wall_editor_frames(frames, rows, 0, 48);
+    replaced = dawn > 0 && !compositor_wall_editor_ghost(dawn) && !memory_compare(place, compositor_wall_editor.card[dawn], sizeof(place));
+    check("feed's cards: its thumbnail come, the ghost is its card, in the same place", replaced);
+    // The sync ended with one never come: one card to try again, which fetches again.
+    wall_mini_put(hex_b, 0);
+    compositor_walls_read();
+    memory_copy(line, "synced", 7), compositor_wall_ask_line(line);
+    compositor_wall_editor_lay();
+    retried = compositor_wall_editor_which((int)compositor_wall_editor.cards - 2) == COMPOSITOR_WALL_RETRY && compositor_wall_editor_stop((int)compositor_wall_editor.cards - 2);
+    memory_copy(line, "unsynced feed", 14), compositor_wall_ask_line(line);
+    compositor_wall_editor_lay();
+    retried = retried && compositor_walls.sync == COMPOSITOR_WALL_UNSYNCED && compositor_wall_editor_which((int)compositor_wall_editor.cards - 2) == COMPOSITOR_WALL_RETRY;
+    compositor_wall_editor_frames(frames, rows, 0, 48);
+    compositor.pointer_x = compositor_wall_editor.card[compositor_wall_editor.cards - 2][0] + 10;
+    compositor.pointer_y = compositor_wall_editor.card[compositor_wall_editor.cards - 2][1] + 10;
+    compositor_wall_starts = 2; // as if the fetch were started (no program is run)
+    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor_wall_starts = 0;
+    resynced = compositor_wall_editing() && compositor_walls.sync == COMPOSITOR_WALL_SYNCING;
+    check("feed's cards: the sync ended with one not come, or the list not had, is one card to try again, and it fetches again", retried && resynced);
+    // A picture pressed that is not here: its fetch across its foot, its part's bytes of the feed's count; lost, why and Retry.
+    wall_mini_put(hex_b, 1);
+    compositor_walls_read();
+    memory_copy(line, "synced", 7), compositor_wall_ask_line(line);
+    compositor_wall_editor_frames(frames, rows, 0, 48);
+    for (unsigned int at = 0; at < compositor_wall_editor.cards; at++)
+        if (compositor_wall_editor_credit((int)at) && compositor_walls.credit[compositor_wall_editor_which((int)at)].bytes == 4000)
+            dawn = (int)at;
+    compositor.pointer_x = compositor_wall_editor.card[dawn][0] + compositor_wall_editor.card[dawn][2] / 2;
+    compositor.pointer_y = compositor_wall_editor.card[dawn][1] + compositor_wall_editor.card[dawn][3] / 2;
+    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+    (void)file_write_atomic_at(AT_FDCWD, (string_address)part_b, "0123456789", 10, 0600);
+    compositor_wall_editor.polled = 0;
+    compositor_wall_editor_loading(clock_monotonic_nanoseconds());
+    made = compositor_wall_editor_frames(frames, rows, 0, 48);
+    {
+        const struct compositor_wall_fetch *f = compositor_wall_editor_fetch(dawn);
+        int strip = 0;
+
+        for (unsigned int at = 0; at < made; at++)
+            strip += frames[at].blend && frames[at].pixels && frames[at].y > compositor_wall_editor.card[dawn][1] + compositor_wall_editor.card[dawn][3] / 2 &&
+                     frames[at].x >= compositor_wall_editor.card[dawn][0] && frames[at].x < compositor_wall_editor.card[dawn][0] + compositor_wall_editor.card[dawn][2];
+        fetching = f && f->what == UI_FETCH_GOING && f->total == 4000 && f->got == 10 && strip == 1 && string_equals((string_address)compositor_wall_word(0, 1), "auto");
+    }
+    check("feed's cards: a picture pressed and not here has its fetch across its foot, its bytes of the feed's count as its part grows", fetching);
+    string_join((p8 address_to)line, sizeof(line), (string_address) "lost ", (string_address)hex_b);
+    string_append_bounded((p8 address_to)line, (string_address) " busy", sizeof(line));
+    compositor_wall_ask_line(line);
+    lost = compositor_wall_editor_fetch(dawn) && compositor_wall_editor_fetch(dawn)->what == UI_FETCH_BUSY && compositor_wall_editor_stop(dawn) &&
+           string_equals((string_address)compositor_wall_word(0, 1), "auto");
+    compositor_wall_editor_frames(frames, rows, 0, 48);
+    lost = lost && compositor_wall_editor.strip[compositor_wall_editor_which(dawn)].what == UI_FETCH_BUSY &&
+           (font_metrics_at(&band_face, 16 << 6).cell_height <= 0 || compositor_wall_editor.strip[compositor_wall_editor_which(dawn)].button[2] > 0);
+    compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+    again = compositor_wall_editor_fetch(dawn) && compositor_wall_editor_fetch(dawn)->what == UI_FETCH_GOING &&
+            string_equals((string_address)compositor_wall_pending.word + 8, (string_address)hex_b);
+    check("feed's cards: lost, the card says why with a Retry (the keys stop at it), and the Scene is as it was; pressed, it is fetched again", lost && again);
+    compositor_wall_fetch_put(hex_b, -1, 0), compositor_wall_pending.word[0] = 0;
+    system_remove_at(AT_FDCWD, (string_address)part_b, 0);
+    compositor_wall_edit(0, 0);
+    compositor_wall_editor.shown = 0, compositor_wall_editor.open = 0;
+    compositor_wall_veil_keep();
+    compositor_walls.lines = compositor_walls.names = compositor_walls.curateds = 0, compositor_walls.sync = COMPOSITOR_WALL_SYNCED;
+    compositor_walls_path = SETTING_WALLPAPER_SCENES_PATH, compositor_walls_pictures_path = SETTING_WALLPAPER_PICTURES_PATH;
+    compositor_walls_curated_path = SETTING_WALLPAPER_CURATED_PATH, compositor_wall_starts = 1;
+    wall_mini_put(hex_a, 0), wall_mini_put(hex_b, 0);
     system_remove_at(AT_FDCWD, (string_address)scenes_path, 0), system_remove_at(AT_FDCWD, (string_address)pictures_path, 0);
     system_remove_at(AT_FDCWD, (string_address)curated_path, 0);
     compositor_wall_drop();

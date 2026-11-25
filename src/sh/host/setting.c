@@ -944,16 +944,16 @@ static positive locale_curated_credit(mwfd_slice slice, p8 address_to to)
 }
 
 /*
-        The list the compositor shows: a line a wallpaper of the feed whose miniature is made, or none. A line is the picture's digest in hex
-        and its id, then a tab and its author, a tab and its licence, and a tab and its source page (setting_wallpaper_source: Commons's
-        page of the file, or nothing where there is none), which the card says and opens.
+        The list the compositor shows: a line every wallpaper of the feed, its miniature made or still to come (the compositor shows a card
+        whose miniature is not there yet as a ghost while the feed's thumbnails are fetched, and none after). A line is the picture's digest
+        in hex and its id, then a tab and its author, a tab and its licence, a tab and its source page (setting_wallpaper_source: Commons's
+        page of the file, or nothing where there is none), which the card says and opens, and a tab and the picture's bytes, the feed's
+        count, which its card's progress is shown against while it is fetched.
 */
 static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive count)
 {
-        positive room = count * (64 + SETTING_WALLPAPER_NAME + 2 * SETTING_WALLPAPER_CREDIT + SETTING_WALLPAPER_SOURCE + 6) + 1, at = 0;
+        positive room = count * (64 + SETTING_WALLPAPER_NAME + 2 * SETTING_WALLPAPER_CREDIT + SETTING_WALLPAPER_SOURCE + 32) + 1, at = 0;
         p8 address_to text = (p8 address_to)memory_checked(room);
-        p8 path[sizeof(LOCALE_CURATED_DIR "/") + 64 + 8];
-        file_facts facts;
         bipolar failed;
 
         if (!text)
@@ -963,10 +963,6 @@ static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive c
                 if (!setting_wallpaper_name_ok((const char address_to)items[k].id.bytes, items[k].id.length))
                         continue;
                 locale_curated_hex(items[k].sha256, text + at);
-                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", text + at);
-                string_append_bounded(path, (string_address) ".mini", sizeof(path));
-                if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
-                        continue;
                 at += 64, text[at++] = ' ';
                 memory_copy(text + at, items[k].id.bytes, items[k].id.length), at += items[k].id.length;
                 text[at++] = '\t', at += locale_curated_credit(items[k].author, text + at);
@@ -975,6 +971,7 @@ static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive c
                 if (items[k].url.bytes && setting_wallpaper_source((const char address_to)items[k].url.bytes, items[k].url.length, (char address_to)text + at,
                                                                    SETTING_WALLPAPER_SOURCE))
                         at += string_length(text + at);
+                text[at++] = '\t', at += positive_into_string(text + at, (positive)items[k].bytes);
                 text[at++] = '\n';
         }
         failed = host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, text, at, 0644, true);
@@ -982,6 +979,25 @@ static b32 locale_curated_list(const mwfd_wallpaper address_to items, positive c
         return failed < 0 ? host_fail("canvas wallpaper curated", failed) : 0;
 }
 
+// A line asked of the compositor about the feed's pictures: WHAT, and HEX and WHY where they are given (locale_wallpaper_ask).
+static fn locale_curated_tell(string_address what, string_address hex, string_address why)
+{
+        p8 line[SETTING_WALLPAPER_WORD + 32];
+
+        string_copy_bounded(line, what, sizeof(line));
+        if (hex)
+                string_append_bounded(line, (string_address) " ", sizeof(line)), string_append_bounded(line, hex, sizeof(line));
+        if (why)
+                string_append_bounded(line, (string_address) " ", sizeof(line)), string_append_bounded(line, why, sizeof(line));
+        string_append_bounded(line, (string_address) "\n", sizeof(line));
+        (void)locale_wallpaper_ask(line);
+}
+
+/*
+        canvas wallpaper curated fetch, as the editor that runs it sees it: the list written as soon as the feed verifies (every wallpaper of
+        it, so its cards stand where they will be), "mini HEX" asked as each thumbnail's miniature is made, and "synced" at the end; where
+        no feed verifies or its records are not well made, "unsynced WHY" (feed, records), and the editor's ghosts are a card to try again.
+*/
 static b32 locale_curated_fetch(void)
 {
         positive used = 0, room = 0, items_room = 0, made = 0, digits;
@@ -1001,6 +1017,7 @@ static b32 locale_curated_fetch(void)
                 {
                         // Closed: no feed that verifies, no curated wallpaper.
                         (void)host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, (p8 address_to) "", 0, 0644, true);
+                        locale_curated_tell((string_address) "unsynced", (string_address) "feed", null);
                         return host_refuse("no curated wallpapers: the feed at %s %s\n", (string_address)MWFD_URL_WALLPAPERS,
                                            status == MWFD_FETCH_UNVERIFIED ? (string_address) "does not verify against the pinned key (none is pinned yet), or is old or expired"
                                                                            : (string_address) "could not be fetched");
@@ -1020,15 +1037,21 @@ static b32 locale_curated_fetch(void)
                         kept = body.bytes, used = body.used, room = body.room;
                         memory_fill(address_of body, 0, sizeof(body));
                         if (failed < 0)
-                                return memory_free(kept, room), host_fail("canvas wallpaper curated", failed);
+                                return memory_free(kept, room), locale_curated_tell((string_address) "unsynced", (string_address) "feed", null),
+                                       host_fail("canvas wallpaper curated", failed);
                 }
         }
         if (!(items = locale_curated_items(kept, &h, address_of items_room)))
         {
                 memory_free(kept, room);
                 (void)host_write_file((string_address)SETTING_WALLPAPER_CURATED_PATH, (p8 address_to) "", 0, 0644, true);
+                locale_curated_tell((string_address) "unsynced", (string_address) "records", null);
                 return host_refuse("the curated feed verified but its wallpapers are not well made: none is shown\n");
         }
+        // Every card of the feed's in its place at once; each thumbnail's comes as it is made.
+        (void)host_make_directory((string_address)SETTING_WALLPAPER_DIR, 0755, false);
+        (void)host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false);
+        (void)locale_curated_list(items, h.count);
         for (positive k = 0; k < h.count; k++)
         {
                 file_facts facts;
@@ -1047,11 +1070,12 @@ static b32 locale_curated_fetch(void)
                     mwfd_fetch_asset((string_address)url, items[k].thumb_bytes, items[k].thumb_sha256, address_of body))
                         continue;
                 if (locale_curated_mini(path, body.bytes, body.used) >= 0)
-                        made++;
+                        made++, locale_curated_tell((string_address) "mini", hex, null);
                 byte_store_release(address_of body);
         }
         failed = locale_curated_list(items, h.count);
         memory_free(items, items_room), memory_free(kept, room);
+        locale_curated_tell((string_address)(failed ? "unsynced" : "synced"), failed ? (string_address) "list" : null, null);
         if (failed)
                 return failed;
         host_say(log, host_label "%p curated wallpapers, from the feed of sequence %p\n", made, (positive)h.sequence);
@@ -1103,6 +1127,67 @@ static b32 locale_wallpaper_enhance(string_address word)
         return locale_wallpaper_ask((string_address) "made\n");
 }
 
+/*
+        A picture of the feed's fetched into part (curated/HEX.part) as it comes, so the editor shows how much of it is here by the file's size
+        against the feed's count, asked again after a pause where the server is busy (429, 503) as the feed's fetches are (MWFD_FETCH_TRIES);
+        then read back into body and held to the feed's count and digest (mwfd_verify_asset). The part is taken away whatever came of it.
+        Answers 0, MWFD_FETCH_BAD_STATUS (not 200, the last try's), MWFD_FETCH_UNVERIFIED (not the feed's bytes) or the failure.
+*/
+static bipolar locale_curated_stream(string_address url, p32 bytes, const p8 address_to sha256, string_address part, http_buffer address_to body)
+{
+        http_manners how = http_manners_wget;
+        bipolar status = MWFD_FETCH_BAD_STATUS, handle;
+        b32 code = 0;
+
+        memory_fill(body, 0, sizeof(*body));
+        if (string_length(url) < 9 || memory_compare(url, "https://", 8))
+                return MWFD_FETCH_UNVERIFIED;
+        how.agent = (string_address)MWFD_AGENT, how.body_most = (positive)bytes;
+        for (positive attempt = 0; attempt < MWFD_FETCH_TRIES; attempt++)
+        {
+                if (attempt)
+                        system_call_2(syscall(nanosleep), (positive)(positive[2]){MWFD_FETCH_PAUSE_S * attempt * attempt, 0}, 0);
+                handle = system_open_at_mode(AT_FDCWD, part, FILE_WRITE | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+                if (handle < 0)
+                        return handle;
+                code = 0;
+                status = http_run_apart(url, address_of how, true, handle, null, address_of code, null, null);
+                system_close(handle);
+                if (!status && code != 200)
+                        status = MWFD_FETCH_BAD_STATUS;
+                if (!status || (code != 429 && code != 503))
+                        break;
+        }
+        if (!status)
+        {
+                file_facts facts;
+
+                status = !file_look(AT_FDCWD, part, AT_SYMLINK_NOFOLLOW, address_of facts) || (facts.mode & MODE_FORMAT) != MODE_FILE ||
+                                         facts.size != (positive)bytes ? MWFD_FETCH_UNVERIFIED : 0;
+                handle = status ? -1 : system_open_at(AT_FDCWD, part, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+                status = status ? status : handle < 0 ? handle : 0;
+                if (!status && byte_store_reserve(body, (positive)bytes + 1, 0))
+                        while (body->used < (positive)bytes)
+                        {
+                                bipolar got = system_read_once(handle, body->bytes + body->used, (positive)bytes - body->used);
+
+                                if (got <= 0)
+                                        break;
+                                body->used += (positive)got;
+                        }
+                else if (!status)
+                        status = -ENOMEM;
+                if (handle >= 0)
+                        system_close(handle);
+                if (!status && !mwfd_verify_asset(body->bytes, body->used, bytes, sha256))
+                        status = MWFD_FETCH_UNVERIFIED;
+                if (status)
+                        byte_store_release(body), memory_fill(body, 0, sizeof(*body));
+        }
+        (void)system_remove_at(AT_FDCWD, part, 0);
+        return status;
+}
+
 // canvas wallpaper curated get HEX: the picture of the feed's wallpaper whose digest is HEX, fetched and checked, then made the wallpaper.
 static b32 locale_curated_get(string_address want)
 {
@@ -1141,9 +1226,13 @@ static b32 locale_curated_get(string_address want)
                 string_append_bounded(path, (string_address) ".jpg", sizeof(path));
                 if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                         break;
+                string_join(path, sizeof(path), (string_address)LOCALE_CURATED_DIR "/", hex);
+                string_append_bounded(path, (string_address) ".part", sizeof(path));
                 if (items[k].bytes > LOCALE_WALLPAPER_MOST || !locale_curated_text(items[k].url, url, sizeof(url)))
                         failed = -EFBIG, why = "size";
-                else if (!(failed = mwfd_fetch_asset((string_address)url, items[k].bytes, items[k].sha256, address_of body)))
+                else if ((failed = host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false)) < 0)
+                        why = "fetch";
+                else if (!(failed = locale_curated_stream((string_address)url, items[k].bytes, items[k].sha256, (string_address)path, address_of body)))
                 {
                         // The digest and the count are the feed's; what the bytes are is theirs: a PNG or a JPEG, kept under its name, and only
                         // a picture that decodes (the compositor gives it to the Scene that chose it as soon as it is kept, in one step).

@@ -41,6 +41,7 @@
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 # machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
+# machine-made 2026-11-25 (a curated wallpaper's fetch on its card), not yet read by a person: wallpaper_got wallpaper_lost wallpaper_lost_busy wallpaper_lost_digest wallpaper_retry wallpaper_unsynced
 @language ar
 @name العربية
 @translated machine
@@ -654,6 +655,12 @@ ui_confirm_again	b3ff	اضغط مرة أخرى للتأكيد:
 ui_field_digits	f52b	العدد يتكون من أرقام
 ui_field_full	fe02	هذا أقصى ما يتسع له
 wallpaper_change	ea8f	تغيير الخلفية
+wallpaper_got	d24f	%1$s من %2$s
+wallpaper_lost	feac	تعذّر جلبها
+wallpaper_lost_busy	e412	الخادم مشغول
+wallpaper_lost_digest	4620	ليست الصورة التي تسميها القائمة
+wallpaper_retry	af59	إعادة المحاولة
+wallpaper_unsynced	da83	تعذّر جلب الخلفيات المختارة
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	دائرة تحت كل إصبع على شاشة اللمس

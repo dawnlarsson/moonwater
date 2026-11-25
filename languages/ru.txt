@@ -40,6 +40,7 @@
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 # machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
+# machine-made 2026-11-25 (a curated wallpaper's fetch on its card), not yet read by a person: wallpaper_got wallpaper_lost wallpaper_lost_busy wallpaper_lost_digest wallpaper_retry wallpaper_unsynced
 @language ru
 @name Русский
 @translated machine
@@ -653,6 +654,12 @@ ui_confirm_again	b3ff	нажмите ещё раз для подтвержден
 ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается
 wallpaper_change	ea8f	Сменить обои
+wallpaper_got	d24f	%1$s из %2$s
+wallpaper_lost	feac	Не удалось загрузить
+wallpaper_lost_busy	e412	Сервер занят
+wallpaper_lost_digest	4620	Это не то изображение, что указано в ленте
+wallpaper_retry	af59	Повторить
+wallpaper_unsynced	da83	Не удалось загрузить подборку обоев
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Круг под каждым пальцем на сенсорном экране

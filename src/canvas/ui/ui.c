@@ -1125,6 +1125,18 @@ static void ui_colour_card_keys(int on);
 static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
                                 unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int lifted,
                                 int keyed, int mark[4]);
+// A ghost card's ground at a time (ns on the kit's clock), in the windows' theme: a card still coming, laid as a fill (ui_ghost's ink).
+// still: no motion (reduced motion), its ink at rest.
+static unsigned int ui_ghost_card_ink(unsigned int theme, unsigned int accent, positive now, int still);
+// A picture's fetch on its card, a strip across its foot (premultiplied, laid blended) or the card whole for a list that could not be had:
+// what (UI_FETCH_*), got of total bytes; a Retry button for a failure (its box answered in button, w 0 for none).
+#define UI_FETCH_GOING 0    // a picture coming: the kit's progress, bytes over total
+#define UI_FETCH_BUSY 1     // failed: the server busy after its tries
+#define UI_FETCH_DIGEST 2   // failed: not the picture the feed names
+#define UI_FETCH_LOST 3     // failed otherwise
+#define UI_FETCH_UNSYNCED 4 // the feed's list could not be had: the card of the ghosts that were, to try again
+static void ui_fetch_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                               unsigned int theme, unsigned int accent, int what, positive got, positive total, int hover, int keyed, int button[4]);
 // The kit's glass mark alone (the look of the source mark above, any symbol of ui_icon's: a brush, a link), in a picture side by side of
 // its own, premultiplied: the compositor lays it over a picture, blended, where a small round action is (the Scenes overview's).
 static void ui_glass_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int symbol,
@@ -7170,7 +7182,13 @@ LANGUAGE_ID(ui_colour_hex, "a colour is six hex digits, rrggbb") \
 LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
 LANGUAGE_ID(ui_field_digits, "a number is digits") \
 LANGUAGE_ID(ui_field_full, "that is as much as it holds") \
-LANGUAGE_ID(wallpaper_change, "Change wallpaper")
+LANGUAGE_ID(wallpaper_change, "Change wallpaper") \
+LANGUAGE_ID(wallpaper_got, "%1$s of %2$s") \
+LANGUAGE_ID(wallpaper_lost, "Could not fetch it") \
+LANGUAGE_ID(wallpaper_lost_busy, "The server is busy") \
+LANGUAGE_ID(wallpaper_lost_digest, "Not the picture the feed names") \
+LANGUAGE_ID(wallpaper_retry, "Retry") \
+LANGUAGE_ID(wallpaper_unsynced, "The curated wallpapers could not be fetched")
 
 enum
 {
@@ -38293,6 +38311,118 @@ static void ui_glass_mark_card_draw(unsigned int *pixels, unsigned long pitch, i
         ui_card_theme_take(&kept, theme, accent);
         ui_card_ui(ui, pixels, pitch, side, side, scale, null, null);
         ui_glass_mark(ui, 0, 0, side, symbol, lifted, keyed);
+        ui_card_theme_give(&kept);
+}
+
+/*
+        A ghost: the shape of a card still coming (a thumbnail being fetched, a row of a list not read yet), on the surface, no picture, its
+        ground breathing slowly over UI_GHOST_PERIOD, the surface's container with 4 to 12 percent of its ink; still with reduced motion. Any list
+        or grid lays one where its card will land, so the card takes its place with nothing moving. It takes no press and no keys.
+*/
+#define UI_GHOST_PERIOD (1600ll * UI_MS)
+static unsigned int ui_ghost_ink(b64 now, b32 still)
+{
+        b64 at = still ? 0 : (now % ui_paced(UI_GHOST_PERIOD) + ui_paced(UI_GHOST_PERIOD)) % ui_paced(UI_GHOST_PERIOD);
+        b64 half = ui_paced(UI_GHOST_PERIOD) / 2, p = at < half ? ui_progress(at, half) : UI_ONE - ui_progress(at - half, half);
+        unsigned int percent = 4 + (unsigned int)((ui_bezier_at(&ui_ease, p) * 8 + UI_HALF) >> UI_Q);
+        return ui_mix(ui_role(UI_ON_SURFACE) | 0xff000000u, percent, ui_role(UI_SURFACE_CONTAINER) | 0xff000000u);
+}
+
+static fn ui_ghost(struct ui address_to ui, const struct ui_box address_to box)
+{
+        ui_kit_fill(ui, box, ui_ghost_ink(ui_kit.now, ui_kit.motion), null);
+        if (!ui_kit.motion)
+                ui_kit.busy = 1;
+}
+
+static unsigned int ui_ghost_card_ink(unsigned int theme, unsigned int accent, positive now, int still)
+{
+        struct ui_card_theme kept;
+        unsigned int ink;
+        ui_card_theme_take(&kept, theme, accent);
+        ink = ui_ghost_ink((b64)now, still != 0);
+        ui_card_theme_give(&kept);
+        return ink;
+}
+
+/*
+        A picture's fetch on its card (the compositor's wallpaper editor): on the glass of the source mark, a strip across the card's foot
+        with the kit's progress (UI_PROGRESS) filling to got of total and the bytes said over it ("3.2 MB of 12.5 MB"), or, where it failed,
+        why in the label's type and a Retry button, the kit's text button, at its end; UI_FETCH_UNSYNCED is the card whole of a list that
+        could not be had, its words in its middle and its Retry under them. Premultiplied, cleared first; the button's ring with the keys.
+*/
+static struct ui ui_fetch_ui;
+static void ui_fetch_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                               unsigned int theme, unsigned int accent, int what, positive got, positive total, int hover, int keyed, int button[4])
+{
+        struct ui address_to ui = &ui_fetch_ui;
+        struct ui_card_theme kept;
+        char said[96], one[24], two[24], fitted[128];
+        const char address_to words = null;
+        unsigned int glass, ink;
+        int pad, line, top;
+        button[0] = button[1] = button[2] = button[3] = 0;
+        if (!pixels || w <= 0 || h <= 0)
+                return;
+        for (int row = 0; row < h; row++)
+                memory_zero(pixels + (positive)row * pitch, (positive)w * 4);
+        ui_card_theme_take(&kept, theme, accent);
+        ui_card_ui(ui, pixels, pitch, w, h, scale, engine, face);
+        pad = ui_px(ui, 10), line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line);
+        glass = (ui_role(UI_SURFACE) & 0xffffffu) | (what == UI_FETCH_UNSYNCED ? 0xff000000u : 0xb8000000u);
+        ink = ui_role(UI_ON_SURFACE) | 0xff000000u;
+        ui_kit_fill(ui, &(struct ui_box){0, 0, w * 256, h * 256, what == UI_FETCH_UNSYNCED ? ui_q8(ui, UI_RADIUS) : h * 128,
+                                         what == UI_FETCH_UNSYNCED ? ui_q8(ui, UI_RADIUS) : h * 128}, glass, null);
+        if (what == UI_FETCH_GOING)
+        {
+                struct ui_control bar;
+                memory_zero(&bar, sizeof(bar));
+                bar.kind = UI_PROGRESS, bar.value = total ? (b64)((got > total ? total : got) * (positive)UI_ONE / total) : -1;
+                bar.x = pad * 100 / ui->scale, bar.w = (w - 2 * pad) * 100 / ui->scale, bar.y = (h - ui_px(ui, 10)) * 100 / ui->scale;
+                ui_control_place(&bar);
+                ui_control_draw_one(ui, &bar);
+                if (total && engine && face)
+                {
+                        ui_size_text(one, sizeof(one), got > total ? total : got), ui_size_text(two, sizeof(two), total);
+                        language_format(said, sizeof(said), WORDS(wallpaper_got), one, two);
+                        words = said;
+                }
+        }
+        else
+                words = what == UI_FETCH_BUSY ? WORDS(wallpaper_lost_busy) : what == UI_FETCH_DIGEST ? WORDS(wallpaper_lost_digest)
+                        : what == UI_FETCH_UNSYNCED ? WORDS(wallpaper_unsynced) : WORDS(wallpaper_lost);
+        if (what != UI_FETCH_GOING && engine && face)
+        {
+                struct ui_control c;
+                int label = ui_kit_measure(ui, (string_address)WORDS(wallpaper_retry), UI_LABEL_LARGE), bw = label + 2 * ui_px(ui, 12);
+                int bh = what == UI_FETCH_UNSYNCED ? ui_px(ui, 36) : h;
+                bw = bw > w ? w : bw, bh = bh > h ? h : bh;
+                button[0] = what == UI_FETCH_UNSYNCED ? (w - bw) / 2 : ui_mirror(w - bw, bw, 0, w);
+                button[1] = what == UI_FETCH_UNSYNCED ? h / 2 : 0, button[2] = bw, button[3] = bh;
+                button[1] = button[1] + bh > h ? h - bh : button[1];
+                memory_zero(&c, sizeof(c));
+                c.kind = UI_BUTTON, c.variant = UI_BUTTON_TEXT, c.label = WORDS(wallpaper_retry), c.hover = hover;
+                c.x = button[0] * 100 / ui->scale, c.y = button[1] * 100 / ui->scale, c.w = bw * 100 / ui->scale, c.h = bh * 100 / ui->scale;
+                ui_control_place(&c);
+                ui_control_draw_one(ui, &c);
+                if (keyed)
+                {
+                        struct ui_box ring = {button[0] * 256, button[1] * 256, (button[0] + bw) * 256, (button[1] + bh) * 256, bh * 128, bh * 128};
+                        ui_kit_focus_ring(ui, &ring);
+                }
+        }
+        if (words && engine && face)
+        {
+                int room = what == UI_FETCH_UNSYNCED || what == UI_FETCH_GOING ? w - 2 * pad : w - 2 * pad - button[2];
+                if (room > 0)
+                {
+                        string_address fit = ui_fit(ui, (string_address)words, UI_LABEL_MEDIUM, room, fitted, sizeof(fitted));
+                        int width = ui_kit_measure(ui, fit, UI_LABEL_MEDIUM);
+                        int x = what == UI_FETCH_UNSYNCED ? (w - width) / 2 : ui_mirror(pad, width, 0, w);
+                        top = what == UI_FETCH_UNSYNCED ? h / 2 - line - ui_px(ui, 4) : what == UI_FETCH_GOING ? (h - ui_px(ui, 10) - line) / 2 : (h - line) / 2;
+                        ui_kit_text(ui, x, ui_kit_baseline(ui, top, UI_LABEL_MEDIUM), fit, UI_LABEL_MEDIUM, ink, 0);
+                }
+        }
         ui_card_theme_give(&kept);
 }
 

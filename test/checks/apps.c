@@ -11647,6 +11647,7 @@ b32 main()
         GROUP("check_wallpaper_editor", check_wallpaper_editor());
         GROUP("check_wallpaper_colour", check_wallpaper_colour());
         GROUP("check_wallpaper_source", check_wallpaper_source());
+        GROUP("check_wallpaper_loading", check_wallpaper_loading());
         GROUP("check_bar_options", check_bar_options());
         GROUP("check_taskbar_tree", check_taskbar_tree());
         GROUP("check_taskbar_fullscreen", check_taskbar_fullscreen());

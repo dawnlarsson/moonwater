@@ -611,6 +611,12 @@ ui_confirm_again	b3ff	press again to confirm:
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds
 wallpaper_change	ea8f	Change wallpaper
+wallpaper_got	d24f	%1$s of %2$s
+wallpaper_lost	feac	Could not fetch it
+wallpaper_lost_busy	e412	The server is busy
+wallpaper_lost_digest	4620	Not the picture the feed names
+wallpaper_retry	af59	Retry
+wallpaper_unsynced	da83	The curated wallpapers could not be fetched
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	A circle under each finger on a touch screen

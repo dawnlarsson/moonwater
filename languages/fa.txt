@@ -41,6 +41,7 @@
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 # machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
+# machine-made 2026-11-25 (a curated wallpaper's fetch on its card), not yet read by a person: wallpaper_got wallpaper_lost wallpaper_lost_busy wallpaper_lost_digest wallpaper_retry wallpaper_unsynced
 @language fa
 @name فارسی
 @translated machine
@@ -654,6 +655,12 @@ ui_confirm_again	b3ff	دوباره فشار دهید:
 ui_field_digits	f52b	عدد از رقم‌ها تشکیل می‌شود
 ui_field_full	fe02	بیش از این جا ندارد
 wallpaper_change	ea8f	تغییر کاغذ دیواری
+wallpaper_got	d24f	%1$s از %2$s
+wallpaper_lost	feac	دریافت نشد
+wallpaper_lost_busy	e412	سرور مشغول است
+wallpaper_lost_digest	4620	این تصویر فهرست نیست
+wallpaper_retry	af59	تلاش دوباره
+wallpaper_unsynced	da83	تصاویر زمینه برگزیده دریافت نشدند
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	دایره‌ای زیر هر انگشت روی صفحه لمسی

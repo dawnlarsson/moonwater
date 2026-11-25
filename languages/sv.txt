@@ -40,6 +40,7 @@
 # machine-made 2026-11-25 (the Waterlink sound pass), not yet read by a person: settings_link_mic settings_link_mic_about settings_link_screen settings_link_screen_about settings_link_speakers settings_link_speakers_about share_what_plays share_your_microphone share_your_speakers
 # machine-made 2026-11-25 (the glass opacity), not yet read by a person: =Glass opacity (percent, or default)
 # machine-made 2026-11-25 (the desktop's menu and the Scenes' brush), not yet read by a person: wallpaper_change
+# machine-made 2026-11-25 (a curated wallpaper's fetch on its card), not yet read by a person: wallpaper_got wallpaper_lost wallpaper_lost_busy wallpaper_lost_digest wallpaper_retry wallpaper_unsynced
 @language sv
 @name Svenska
 @translated machine
@@ -653,6 +654,12 @@ ui_confirm_again	b3ff	tryck igen för att bekräfta:
 ui_field_digits	f52b	ett tal består av siffror
 ui_field_full	fe02	mer ryms inte
 wallpaper_change	ea8f	Byt skrivbordsbild
+wallpaper_got	d24f	%1$s av %2$s
+wallpaper_lost	feac	Kunde inte hämtas
+wallpaper_lost_busy	e412	Servern är upptagen
+wallpaper_lost_digest	4620	Inte bilden som flödet anger
+wallpaper_retry	af59	Försök igen
+wallpaper_unsynced	da83	De utvalda bakgrunderna kunde inte hämtas
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	En cirkel under varje finger på en pekskärm
