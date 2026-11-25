@@ -423,6 +423,57 @@ static void compositor_walls_read(void)
 static void compositor_wall_edit(int screen, int how); // the editor: on (1), off (0) or turned (-1)
 
 /*
+        A curated picture chosen before its file is here: the Scene keeps what it shows while the command fetches it (canvas wallpaper
+        curated get), and is given it in one step when the command says the file is in place, verified and decoded (the ask "got HEX").
+        The last choice wins: a later one, of any card, takes the place of this one, and a picture that comes after it was let go of is
+        kept in the cache and given to no Scene. One that fails (the ask "lost HEX WHY") leaves the Scene as it was.
+*/
+static struct
+{
+        char screen[WINDOWS_OUTPUT_NAME];
+        unsigned int scene;
+        char word[SETTING_WALLPAPER_WORD]; // "" for none
+} compositor_wall_pending;
+
+static void compositor_wall_start_program(string_address *argv);
+
+// A word chosen for Scene scene of the screen named screen: at once when its picture is here (or it has none), else when it has come.
+static void compositor_wall_choose_named(const char *screen, unsigned int scene, const char *word)
+{
+        char path[sizeof(SETTING_WALLPAPER_DIR "/curated/") + SETTING_WALLPAPER_WORD + 8];
+
+        compositor_wall_pending.word[0] = 0;
+        if (memory_compare(word, "curated:", 8) || compositor_wall_picture_of(word, path, sizeof(path)))
+                return compositor_wall_put_named(screen, scene, word, 0);
+        if (!setting_wallpaper_word_ok(word, string_length((string_address)word)) || string_length((string_address)screen) >= WINDOWS_OUTPUT_NAME)
+                return;
+        string_copy_bounded((p8 *)compositor_wall_pending.screen, (string_address)screen, WINDOWS_OUTPUT_NAME);
+        compositor_wall_pending.scene = scene;
+        string_copy_bounded((p8 *)compositor_wall_pending.word, (string_address)word, SETTING_WALLPAPER_WORD);
+        {
+                string_address argv[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "curated",
+                                          (string_address) "get", (string_address)compositor_wall_pending.word + 8, null};
+
+                compositor_wall_start_program(argv);
+        }
+}
+
+// The command's word on a curated picture: got (its file is in place) gives it to the Scene that last chose it, lost lets that choice go.
+static void compositor_wall_fetched(const char *hex, int got)
+{
+        char path[sizeof(SETTING_WALLPAPER_DIR "/curated/") + SETTING_WALLPAPER_WORD + 8];
+
+        if (got)
+                compositor_walls.listed++, compositor_wall_changed();
+        if (!compositor_wall_pending.word[0] || !string_equals((string_address)compositor_wall_pending.word + 8, (string_address)hex))
+                return;
+        if (got && compositor_wall_picture_of(compositor_wall_pending.word, path, sizeof(path)))
+                compositor_wall_put_named(compositor_wall_pending.screen, compositor_wall_pending.scene, compositor_wall_pending.word, 0);
+        if (got ? path[0] != 0 : 1)
+                compositor_wall_pending.word[0] = 0;
+}
+
+/*
         What the command asks (setting.c's locale_wallpaper_ask), a file each in SETTING_WALLPAPER_ASK_DIR named SETTING_WALLPAPER_ASK, the
         asker's pid, a dash and its count: root's own, written by root alone, read and taken away. A line is "edit on|off|toggle", "scene
         SCREEN N WORD" (SCREEN - for the screen you are on) or "current WORD" (the Scene you are on). Read at the start too, for what was asked
@@ -455,9 +506,18 @@ static void compositor_wall_ask_line(char *line)
                 while (*walk && *walk != ' ')
                         walk++;
         }
-        // A curated picture fetched (canvas wallpaper curated get): the wallpaper and the miniatures made again with it.
+        // A curated picture fetched (canvas wallpaper curated get): the wallpaper and the miniatures made again with it, and the Scene that
+        // chose it given it; or lost (its fetch, its digest or its decode failed), and the Scene kept as it was.
         if (count == 1 && string_equals((string_address)word[0], "made"))
                 compositor_walls.listed++, compositor_wall_changed();
+        else if ((count == 2 && string_equals((string_address)word[0], "got")) || (count == 3 && string_equals((string_address)word[0], "lost")))
+        {
+                char curated[SETTING_WALLPAPER_WORD];
+
+                string_join((p8 *)curated, sizeof(curated), (string_address) "curated:", (string_address)word[1]);
+                if (setting_wallpaper_word_ok(curated, string_length((string_address)curated)) && curated[7] == ':' && curated[1] == 'u')
+                        compositor_wall_fetched(word[1], word[0][0] == 'g');
+        }
         else if (count == 2 && string_equals((string_address)word[0], "edit"))
                 compositor_wall_edit(compositor_space_current_screen(),
                                      string_equals((string_address)word[1], "on") ? 1 : string_equals((string_address)word[1], "off") ? 0 : -1);
@@ -465,6 +525,7 @@ static void compositor_wall_ask_line(char *line)
         {
                 int screen = compositor_space_current_screen();
 
+                compositor_wall_pending.word[0] = 0;
                 compositor_wall_put(screen, compositor_wall_current(screen), word[1]);
         }
         else if (count == 4 && string_equals((string_address)word[0], "scene"))
@@ -476,6 +537,7 @@ static void compositor_wall_ask_line(char *line)
                         scene = scene * 10 + (unsigned int)(word[2][digits] - '0');
                 if (word[2][digits] || !scene)
                         return;
+                compositor_wall_pending.word[0] = 0;
                 if (string_equals((string_address)word[1], "-"))
                         compositor_wall_put(compositor_space_current_screen(), scene, word[3]);
                 else if (string_length((string_address)word[1]) < WINDOWS_OUTPUT_NAME)
@@ -1159,6 +1221,7 @@ static void compositor_wall_editor_wheel_asks(p32 asks)
 
         if (asks & (UI_COLOUR_CHANGED | UI_COLOUR_DONE))
         {
+                compositor_wall_pending.word[0] = 0; // a colour chosen is the last choice: a picture still on its way is no longer the Scene's
                 setting_wallpaper_colour_word(ui_colour_card_rgb(), word);
                 if (compositor_wall_editor.cards > COMPOSITOR_WALL_COLOUR_CARD)
                         string_copy((string_address)compositor_wall_editor.word[COMPOSITOR_WALL_COLOUR_CARD], (string_address)word);
@@ -1299,15 +1362,8 @@ static void compositor_wall_editor_click(int x, int y)
 
                 word = seg >= 0 ? compositor_wall_seg_word(seg) : compositor_wall_is_moon(cur) ? cur : "auto";
         }
-        compositor_wall_put(screen, compositor_wall_current(screen), word);
-        if (!memory_compare(word, "curated:", 8))
-        {
-                // The feed's picture fetched and checked if it is not here yet; the wallpaper is made again with it when it is (the ask made).
-                string_address argv[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "curated",
-                                          (string_address) "get", (string_address)word + 8, null};
-
-                compositor_wall_start_program(argv);
-        }
+        // A curated picture not here yet is fetched and given to the Scene when it has come, verified and decoded: till then it shows what it did.
+        compositor_wall_choose_named(compositor_wall_screen_name(screen), compositor_wall_current(screen), word);
         compositor_wall_editor_damage();
 }
 

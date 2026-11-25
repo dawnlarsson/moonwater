@@ -1070,8 +1070,8 @@ static b32 locale_curated_get(string_address want)
         file_facts facts;
         bipolar failed = 0;
         bool found = false;
-
-        p8 word[SETTING_WALLPAPER_WORD];
+        const char address_to why = "fetch";
+        p8 word[SETTING_WALLPAPER_WORD], ask[SETTING_WALLPAPER_WORD + 16];
 
         string_join(word, sizeof(word), (string_address) "curated:", want);
         if (!setting_wallpaper_word_ok((const char address_to)word, string_length(word)))
@@ -1098,12 +1098,19 @@ static b32 locale_curated_get(string_address want)
                 if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                         break;
                 if (items[k].bytes > LOCALE_WALLPAPER_MOST || !locale_curated_text(items[k].url, url, sizeof(url)))
-                        failed = -EFBIG;
+                        failed = -EFBIG, why = "size";
                 else if (!(failed = mwfd_fetch_asset((string_address)url, items[k].bytes, items[k].sha256, address_of body)))
                 {
-                        // The digest and the count are the feed's; what the bytes are is theirs: a PNG or a JPEG, kept under its name.
+                        // The digest and the count are the feed's; what the bytes are is theirs: a PNG or a JPEG, kept under its name, and only
+                        // a picture that decodes (the compositor gives it to the Scene that chose it as soon as it is kept, in one step).
                         string_address suffix = locale_wallpaper_suffix(body.bytes, body.used);
+                        int width = 0, height = 0;
+                        unsigned int address_to decoded = suffix ? locale_wallpaper_decoded(body.bytes, body.used, &width, &height) : null;
 
+                        if (decoded)
+                                memory_free(decoded, (positive)width * (positive)height * 4);
+                        else
+                                suffix = null, why = "picture";
                         failed = suffix ? host_make_directory((string_address)LOCALE_CURATED_DIR, 0755, false) : -EBADMSG;
                         if (failed >= 0)
                         {
@@ -1118,10 +1125,25 @@ static b32 locale_curated_get(string_address want)
         if (!found)
                 return host_refuse("no wallpaper of the feed has the digest %s\n", want);
         if (failed < 0)
+        {
+                // The compositor lets go of the choice (the Scene keeps what it shows): lost, and why (the server busy after its tries, the
+                // bytes not the feed's, a picture that does not decode, one too large, any other failure of the fetch).
+                if (failed == MWFD_FETCH_BAD_STATUS)
+                        why = "busy";
+                else if (failed == MWFD_FETCH_UNVERIFIED)
+                        why = "digest";
+                string_join(ask, sizeof(ask), (string_address) "lost ", want);
+                string_append_bounded(ask, (string_address) " ", sizeof(ask));
+                string_append_bounded(ask, (string_address)why, sizeof(ask));
+                string_append_bounded(ask, (string_address) "\n", sizeof(ask));
+                (void)locale_wallpaper_ask(ask);
                 return host_refuse("the curated wallpaper %s could not be fetched, or is not the picture the feed names\n", want);
+        }
         if (enhance_wallpaper_licence() >= 0)
                 (void)enhance_model_fetch(); // the enhancer's weights, once, here where the network is; none and it is skipped
-        if (locale_wallpaper_ask((string_address) "made\n"))
+        string_join(ask, sizeof(ask), (string_address) "got ", want);
+        string_append_bounded(ask, (string_address) "\n", sizeof(ask));
+        if (locale_wallpaper_ask(ask))
                 return 1;
         host_say(log, host_label "the curated wallpaper %s is kept as %s\n", want, path);
         return 0;

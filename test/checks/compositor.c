@@ -4171,6 +4171,49 @@ static void check_wallpaper_source(void)
     }
     else
         string_format(log, "  curated source: the card's button NOT RUN -- no face for the band (argument 1)\n");
+    // A curated picture not here yet: the Scene keeps what it shows till the command says it is in place, the last choice winning.
+    {
+        static char got_dusk[96] = "got 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    got_dawn[96] = "got fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                    lost_dawn[96] = "lost fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 busy";
+        static const char dusk_file[] = SETTING_WALLPAPER_DIR "/curated/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg",
+                          dawn_file[] = SETTING_WALLPAPER_DIR "/curated/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210.jpg";
+        int dusk = 2 + (int)compositor_walls.names, dawn = dusk + 1;
+        b32 kept, superseded, lost, given, at_once;
+        char line[96];
+
+        system_remove_at(AT_FDCWD, (string_address)dusk_file, 0), system_remove_at(AT_FDCWD, (string_address)dawn_file, 0);
+        (void)system_make_directory_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_DIR, 0755);
+        (void)system_make_directory_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_DIR "/curated", 0755);
+        compositor_wall_put(0, 1, "auto");
+        compositor.pointer_x = compositor_wall_editor.card[dusk][0] + compositor_wall_editor.card[dusk][2] / 2;
+        compositor.pointer_y = compositor_wall_editor.card[dusk][1] + compositor_wall_editor.card[dusk][3] * 3 / 4;
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        kept = string_equals((string_address)compositor_wall_word(0, 1), "auto") &&
+               string_equals((string_address)compositor_wall_pending.word, (string_address)compositor_wall_editor.word[dusk]);
+        compositor.pointer_x = compositor_wall_editor.card[dawn][0] + compositor_wall_editor.card[dawn][2] / 2;
+        compositor.pointer_y = compositor_wall_editor.card[dawn][1] + compositor_wall_editor.card[dawn][3] * 3 / 4;
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)dusk_file, "x", 1, 0644);
+        memory_copy(line, got_dusk, sizeof(line)), compositor_wall_ask_line(line);
+        superseded = string_equals((string_address)compositor_wall_word(0, 1), "auto") &&
+                     string_equals((string_address)compositor_wall_pending.word, (string_address)compositor_wall_editor.word[dawn]);
+        memory_copy(line, lost_dawn, sizeof(line)), compositor_wall_ask_line(line);
+        lost = string_equals((string_address)compositor_wall_word(0, 1), "auto") && !compositor_wall_pending.word[0];
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)dawn_file, "x", 1, 0644);
+        memory_copy(line, got_dawn, sizeof(line)), compositor_wall_ask_line(line);
+        given = string_equals((string_address)compositor_wall_word(0, 1), (string_address)compositor_wall_editor.word[dawn]) && !compositor_wall_pending.word[0];
+        compositor.pointer_x = compositor_wall_editor.card[dusk][0] + compositor_wall_editor.card[dusk][2] / 2;
+        compositor.pointer_y = compositor_wall_editor.card[dusk][1] + compositor_wall_editor.card[dusk][3] * 3 / 4;
+        compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
+        at_once = string_equals((string_address)compositor_wall_word(0, 1), (string_address)compositor_wall_editor.word[dusk]) && !compositor_wall_pending.word[0];
+        system_remove_at(AT_FDCWD, (string_address)dusk_file, 0), system_remove_at(AT_FDCWD, (string_address)dawn_file, 0);
+        check("curated choice: a picture not here yet leaves the Scene as it was while it is fetched", kept);
+        check("curated choice: a second choice while the first is fetched takes its place, and the first come is not the Scene's", superseded);
+        check("curated choice: one lost (the server busy) leaves the Scene as it was and the choice let go", lost);
+        check("curated choice: the picture in place is the Scene's in one step, and one already here is the Scene's at once", given && at_once);
+    }
     compositor_wall_edit(0, 0);
     compositor_wall_editor.shown = 0, compositor_wall_editor.open = 0;
     compositor_wall_veil_keep();
