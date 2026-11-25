@@ -591,7 +591,6 @@ ui_colour_hex	1ae3	a colour is six hex digits, rrggbb
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds
-wallpaper_source	a3f8	Source
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	A circle under each finger on a touch screen

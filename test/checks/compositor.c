@@ -4057,9 +4057,9 @@ static void check_wallpaper_colour(void)
         A curated wallpaper's credit (setting.c's list, wallpaper.c's card): its source page is Commons's page of the original's file (the last
         segment kept byte for byte), none for any other address, and an address is held to the feed's rules where it is read (https, a host
         of lower case letters, digits, dots and dashes, a path with no dots segment, printable ASCII with no blank or quote). The list's
-        credit is read with its controls blanked and a source that is no page dropped; the card has its author and licence across its foot
-        and a Source button where the page is; pressed, and Enter on it after Tab, it asks the open tool for the page and the Scene's
-        wallpaper stays as it was.
+        credit is read with its controls blanked and a source that is no page dropped; the card has a small glass source mark in its top
+        corner (its picture premultiplied, laid blended), its credit beside it only while lifted; pressed, and Enter on it after Tab, it
+        asks the open tool for the page and the Scene's wallpaper stays as it was; a mark with no page opens nothing.
 */
 static void check_wallpaper_source(void)
 {
@@ -4074,7 +4074,7 @@ static void check_wallpaper_source(void)
     const char *before;
     positive length;
     b32 derived, refused, read, drawn = 0, pressed = 0, keyed = 0;
-    int card = -1, pill[4];
+    int card = -1, pill[4], other = -1;
     const struct compositor_wall_band *band;
 
     derived = setting_wallpaper_source("https://upload.wikimedia.org/wikipedia/commons/a/ab/Some_File%2C_x.jpg", 70, page, sizeof(page)) &&
@@ -4120,12 +4120,32 @@ static void check_wallpaper_source(void)
     for (unsigned int at = 0; at < compositor_wall_editor.cards; at++)
         if (compositor_wall_editor_credit((int)at) && compositor_wall_editor_credit((int)at)->source[0])
             card = (int)at;
-    if (card >= 0 && font_metrics_at(&band_face, 16 << 6).cell_height > 0 && compositor_wall_editor_pill(compositor_wall_editor.card[card], 100, pill))
+        else if (compositor_wall_editor_credit((int)at))
+            other = (int)at;
+    if (card >= 0 && other > card && font_metrics_at(&band_face, 16 << 6).cell_height > 0 &&
+        compositor_wall_editor_mark_strip(compositor_wall_editor.card[card], 100, pill))
     {
+        positive lit = 0, unlit = 0;
+        int frame = -1;
+
         band = &compositor_wall_editor.band[card - 2 - (int)compositor_walls.names];
-        drawn = band->pixels && band->button[2] > 0 && band->w == pill[2] &&
-                compositor_wall_editor.band[card - 1 - (int)compositor_walls.names].button[2] == 0; // the next one has no page: no button
+        for (unsigned int at = 0; at < 24; at++)
+            if (frames[at].pixels == band->pixels && band->pixels)
+                frame = (int)at;
+        // Idle: the mark alone, a disc at the strip's end the strip's height across, no credit beside it, a glass of low opacity.
+        for (int x = 0; band->pixels && x < band->w; x++)
+            unlit += band->pixels[(positive)(band->h / 2) * compositor_whole_lines(band->w) + (positive)x] >> 24 != 0;
+        drawn = band->pixels && band->button[2] == band->h && band->button[0] + band->button[2] == band->w && band->w == pill[2] && frame >= 0 &&
+                frames[frame].blend && unlit <= (positive)band->button[2] &&
+                band->pixels[(positive)(band->h / 2) * compositor_whole_lines(band->w) + (positive)(band->button[0] + 3)] >> 24 < 0x80;
         compositor.pointer_x = pill[0] + band->button[0] + band->button[2] / 2, compositor.pointer_y = pill[1] + band->button[1] + band->button[3] / 2;
+        compositor_wall_editor_hover();
+        compositor_wall_editor_frames(frames, rows, 0, 24);
+        // Lifted under the hand: more opaque, and its credit beside it.
+        for (int x = 0; band->pixels && x < band->w; x++)
+            lit += band->pixels[(positive)(band->h / 2) * compositor_whole_lines(band->w) + (positive)x] >> 24 != 0;
+        drawn = drawn && compositor_wall_editor.hover_source == card && lit > unlit + (positive)band->h &&
+                band->pixels[(positive)(band->h / 2) * compositor_whole_lines(band->w) + (positive)(band->button[0] + 3)] >> 24 >= 0xb0;
         compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 1), compositor_wall_editor_button(COMPOSITOR_BTN_LEFT, 0);
         pressed = compositor_wall_opened && string_equals((string_address)compositor_wall_opened, (string_address)compositor_walls.credit[0].source) &&
                   string_equals((string_address)compositor_wall_word(0, 1), (string_address)before) && compositor_wall_editing();
@@ -4135,12 +4155,19 @@ static void check_wallpaper_source(void)
         keyed = keyed && compositor_wall_editor_key(28, 1, 0, (unsigned int[2]){'\r', 0}, 1) && compositor_wall_opened &&
                 string_equals((string_address)compositor_wall_word(0, 1), (string_address)before);
         compositor_wall_editor_key(28, 0, 0, (unsigned int[2]){0, 0}, 0);
+        compositor_wall_opened = 0;
+        keyed = keyed && compositor_wall_editor_key(15, 1, 0, (unsigned int[2]){0, 0}, 0) && compositor_wall_editor.key_card == other;
+        compositor_wall_editor_key(15, 0, 0, (unsigned int[2]){0, 0}, 0);
+        keyed = keyed && compositor_wall_editor_key(28, 1, 0, (unsigned int[2]){'\r', 0}, 1) && !compositor_wall_opened;
+        compositor_wall_editor_key(28, 0, 0, (unsigned int[2]){0, 0}, 0);
         keyed = keyed && compositor_wall_editor_key(15, 1, 0, (unsigned int[2]){0, 0}, 0) && compositor_wall_editor.key_card == -1 &&
                 (ui_colour_card_state() & UI_COLOUR_KEYS);
         compositor_wall_editor_key(15, 0, 0, (unsigned int[2]){0, 0}, 0);
-        check("curated source: the card has its credit across its foot and a Source button where the page is known, none where it is not", drawn);
-        check("curated source: Source pressed asks the open tool for its page, and the Scene's wallpaper is as it was", pressed);
-        check("curated source: Tab takes the keys to the Source and Enter opens it (the wallpaper as it was), Tab again gives them to the wheel", keyed);
+        check("curated source: the card's source mark is a small glass disc in its top corner, blended, low opacity, no words, and lifted under the hand "
+              "it is more opaque with its credit (author and licence) beside it", drawn);
+        check("curated source: the mark pressed asks the open tool for its page, and the Scene's wallpaper is as it was", pressed);
+        check("curated source: Tab takes the keys to each card's mark, Enter opens its page (none for a mark with no page), Tab past the last gives them to the wheel",
+              keyed);
     }
     else
         string_format(log, "  curated source: the card's button NOT RUN -- no face for the band (argument 1)\n");

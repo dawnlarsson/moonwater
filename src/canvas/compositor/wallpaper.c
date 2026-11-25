@@ -693,7 +693,7 @@ static const unsigned int *compositor_wall_card(const struct compositor_space *s
 */
 #define COMPOSITOR_WALL_VEIL 245
 #define COMPOSITOR_WALL_VEIL_STEPS 4
-// A curated card's credit as it was drawn: its picture, what it was drawn for, and its Source button's box in it (w 0: none).
+// A curated card's source mark as it was drawn (ui.c's ui_source_card_draw): its picture, what it was drawn for, and the mark's box in it.
 struct compositor_wall_band
 {
         unsigned int *pixels;
@@ -728,7 +728,7 @@ static struct
         int wheel_w, wheel_h, wheel_scale, wheel_x, wheel_y; // the picture's size and scale, and the hand's place last told the wheel
         unsigned int wheel_look; // the theme and the accent it was drawn in
         b32 wheel_opened, wheel_drawn, wheel_busy, wheel_held; // made; its picture as it is; the kit's motion asks for frames; a press is its
-        struct compositor_wall_band *band; // each curated card's credit across its foot (its author, its licence, its Source button), as drawn
+        struct compositor_wall_band *band; // each curated card's source mark in its top corner (and its credit beside it while lifted), as drawn
         unsigned long band_bytes;
         unsigned int bands;
         int hover_source, press_source, key_card; // the card whose Source is under the hand, was pressed, has the keys (-1 none: the wheel has them)
@@ -927,21 +927,40 @@ static const struct compositor_wall_credit *compositor_wall_editor_credit(int ca
         return &compositor_walls.credit[at];
 }
 
-// The card whose Source button a point is on (the button's box as drawn, grown to the kit's least target, UI_TARGET), or -1.
+// Whether a curated card has its source mark: a page to open, or a credit to say.
+static int compositor_wall_editor_marked(const struct compositor_wall_credit *credit)
+{
+        return credit && (credit->source[0] || credit->author[0] || credit->licence[0]);
+}
+
+// The strip across a card's top its source mark is drawn in (the mark at its end): the mark's side tall, in from the card's edges.
+static int compositor_wall_editor_mark_strip(const int card[4], int scale, int out[4])
+{
+        int pad = 6 * scale / 100, side = UI_SOURCE_MARK_SIDE * scale / 100;
+
+        pad = pad < 2 ? 2 : pad;
+        side = side > card[3] / 3 ? card[3] / 3 : side;
+        if (side < 12 || card[2] < side + 2 * pad)
+                return 0;
+        out[0] = card[0] + pad, out[1] = card[1] + pad, out[2] = card[2] - 2 * pad, out[3] = side;
+        return 1;
+}
+
+// The card whose source mark a point is on (the mark as drawn, its hit the kit's least target round it, UI_TARGET), or -1.
 static int compositor_wall_editor_source_at(int x, int y)
 {
         int screen = compositor_wall_editor.screen, scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
-        int card = compositor_wall_editor_card_at(x, y), at = card - 2 - (int)compositor_walls.names, pill[4];
+        int card = compositor_wall_editor_card_at(x, y), at = card - 2 - (int)compositor_walls.names, strip[4];
         const struct compositor_wall_credit *credit = compositor_wall_editor_credit(card);
         const struct compositor_wall_band *band;
 
-        if (!credit || !credit->source[0] || at < 0 || (unsigned int)at >= compositor_wall_editor.bands ||
-            !compositor_wall_editor_pill(compositor_wall_editor.card[card], scale, pill))
+        if (!compositor_wall_editor_marked(credit) || at < 0 || (unsigned int)at >= compositor_wall_editor.bands ||
+            !compositor_wall_editor_mark_strip(compositor_wall_editor.card[card], scale, strip))
                 return -1;
         band = &compositor_wall_editor.band[at];
-        if (band->button[2] <= 0 || band->w != pill[2] || band->h != pill[3])
+        if (band->button[2] <= 0 || band->w != strip[2] || band->h != strip[3])
                 return -1;
-        return ui_reach_hit(1, UI_TARGET * scale / 100, x, y, pill[0] + band->button[0], pill[1] + band->button[1], band->button[2], band->button[3]) ? card : -1;
+        return ui_reach_hit(1, UI_TARGET * scale / 100, x, y, strip[0] + band->button[0], strip[1] + band->button[1], band->button[2], band->button[3]) ? card : -1;
 }
 
 // A curated card's Source pressed (or Enter on it): its page opened by the open tool in the person's browser; the wallpaper not chosen.
@@ -958,7 +977,7 @@ static void compositor_wall_editor_source(int card)
         compositor_wall_start_program(argv);
 }
 
-// Curated card i's credit drawn across its foot, w by h (its rows on whole 64-byte lines); 0 with no memory.
+// Curated card i's source mark drawn in its strip, w by h (premultiplied, its rows on whole 64-byte lines, laid over the card blended); 0 with no memory.
 static const unsigned int *compositor_wall_editor_band_pixels(int card, int w, int h, int scale)
 {
         struct windows *table = compositor.table;
@@ -969,7 +988,7 @@ static const unsigned int *compositor_wall_editor_band_pixels(int card, int w, i
         struct compositor_wall_band *band;
         void *p;
 
-        if (!credit || w <= 0 || h <= 0)
+        if (!compositor_wall_editor_marked(credit) || w <= 0 || h <= 0)
                 return 0;
         if (at >= compositor_wall_editor.bands)
         {
@@ -991,10 +1010,9 @@ static const unsigned int *compositor_wall_editor_band_pixels(int card, int w, i
                 return band->pixels = 0, band->bytes = 0, (const unsigned int *)0;
         band->pixels = (unsigned int *)p, band->w = w, band->h = h, band->scale = scale, band->hover = hover, band->keyed = keyed, band->look = look;
         band->listed = compositor_walls.listed;
-        memory_fill_u32_rect(band->pixels, (positive)compositor_whole_lines(w), (positive)w, (positive)h, compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u);
-        ui_credit_card_draw(band->pixels, compositor_whole_lines(w), w, h, scale, compositor.engine, &compositor.face, themed ? table->theme : UI_THEME_LIGHT,
-                            themed ? table->accent : UI_ACCENT_STANDARD, credit->author, credit->licence, credit->source[0] != 0, hover, keyed, band->button);
-        memory_or_u32(band->pixels, band->pixels, (positive)compositor_whole_lines(w) * (positive)h, 0xff000000u);
+        memory_zero(band->pixels, compositor_whole_lines(w) * (unsigned long)h * 4);
+        ui_source_card_draw(band->pixels, compositor_whole_lines(w), w, h, scale, compositor.engine, &compositor.face, themed ? table->theme : UI_THEME_LIGHT,
+                            themed ? table->accent : UI_ACCENT_STANDARD, credit->author, credit->licence, 1, hover, keyed, band->button);
         return band->pixels;
 }
 
@@ -1203,15 +1221,14 @@ static int compositor_wall_editor_key(unsigned int code, int value, unsigned int
                 return 0;
         if (bit)
                 *bit |= mask;
-        // Tab goes from the wheel to each curated card's Source and back (Shift the other way); Enter or Space on a Source opens its page.
+        // Tab goes from the wheel to each curated card's source mark and back (Shift the other way); Enter or Space on one opens its page.
         if (code == 15 && !(ui_colour_card_state() & UI_COLOUR_FIELD))
         {
                 int way = modifiers & WINDOW_KEY_SHIFT ? -1 : 1, at = compositor_wall_editor.key_card, n = (int)compositor_wall_editor.cards;
-                const struct compositor_wall_credit *credit;
 
                 do
                         at = at < 0 ? (way > 0 ? 0 : n - 1) : at + way;
-                while (at >= 0 && at < n && (!(credit = compositor_wall_editor_credit(at)) || !credit->source[0]));
+                while (at >= 0 && at < n && !compositor_wall_editor_marked(compositor_wall_editor_credit(at)));
                 compositor_wall_editor.key_card = at >= 0 && at < n ? at : -1;
                 ui_colour_card_keys(compositor_wall_editor.key_card < 0);
                 compositor_wall_editor.wheel_drawn = 0, compositor_wall_editor_damage();
@@ -1637,22 +1654,21 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                                 at++;
                         }
                 }
-                if (compositor_wall_editor_credit((int)card))
+                if (compositor_wall_editor_marked(compositor_wall_editor_credit((int)card)))
                 {
-                        // A curated wallpaper's credit across its foot: its author and its licence, and its Source button.
+                        // A curated wallpaper's source mark over its top corner, glass, blended over the picture (its credit beside it while lifted).
                         int band[4];
 
-                        if (compositor_wall_editor_pill(c, scale, band) && compositor_scenes_plain(frames, rows, at, room, filler, band, clip, scale))
+                        if (compositor_wall_editor_mark_strip(c, scale, band) && compositor_scenes_plain(frames, rows, at, room, filler, band, clip, scale))
                         {
                                 const unsigned int *px = compositor_wall_editor_band_pixels((int)card, band[2], band[3], scale);
 
                                 if (px)
-                                        frames[at].pixels = px + (unsigned long)(frames[at].y - band[1]) * compositor_whole_lines(band[2]) + (frames[at].x - band[0]),
-                                        frames[at].pitch = compositor_whole_lines(band[2]);
-                                else
-                                        frames[at].fill = compositor_ink_role(UI_SURFACE_HIGHEST) | 0xff000000u;
-                                frames[at].radius = band[3] / 2, frames[at].line = line, frames[at].edge = compositor_line_unlit();
-                                at++;
+                                {
+                                        frames[at].pixels = px + (unsigned long)(frames[at].y - band[1]) * compositor_whole_lines(band[2]) + (frames[at].x - band[0]);
+                                        frames[at].pitch = compositor_whole_lines(band[2]), frames[at].blend = 1;
+                                        at++;
+                                }
                         }
                 }
                 if (!word[0])

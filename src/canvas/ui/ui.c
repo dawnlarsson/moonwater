@@ -1117,11 +1117,12 @@ static unsigned int ui_colour_card_draw(unsigned int *pixels, unsigned long pitc
                                         unsigned int theme, unsigned int accent);
 static unsigned int ui_colour_card_event(unsigned int type, unsigned int flags, int a, int b, int x, int y);
 static void ui_colour_card_keys(int on);
-// And the credit of a curated wallpaper on its card: the author and the licence, and a Source button where the page is known (its box
-// answered in button, w 0 for none). hover and keyed say the button is under the hand or has the editor's keys.
-static void ui_credit_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
-                                unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int hover,
-                                int keyed, int button[4]);
+// And the source mark of a curated wallpaper on its card: a small round glass link mark in its top corner, its credit (author and licence)
+// beside it while it is lifted (lifted: the hand over it; keyed: the editor's keys on it). Its disc's box is answered in mark, w 0 for none.
+#define UI_SOURCE_MARK_SIDE 28 // the mark's side, logical pixels (the compositor lays the picture it is drawn in at this height)
+static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int lifted,
+                                int keyed, int mark[4]);
 
 
 // The panel's cells and what a press on one does:
@@ -7139,8 +7140,7 @@ LANGUAGE_ID(tray_settings, "Settings") \
 LANGUAGE_ID(ui_colour_hex, "a colour is six hex digits, rrggbb") \
 LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
 LANGUAGE_ID(ui_field_digits, "a number is digits") \
-LANGUAGE_ID(ui_field_full, "that is as much as it holds") \
-LANGUAGE_ID(wallpaper_source, "Source")
+LANGUAGE_ID(ui_field_full, "that is as much as it holds")
 
 enum
 {
@@ -37949,58 +37949,66 @@ static fn ui_card_ui(struct ui address_to ui, unsigned int *pixels, unsigned lon
 }
 
 /*
-        A curated wallpaper's credit on its card: a plate of the kit's surface across the picture (w by h, its rows pitch apart), the author
-        and the licence at its start, "author · licence" in the label's type cut to what fits, and at its end the Source button, the kit's
-        text button in the accent, where the page is known; the button's ring while it has the editor's keys. Answers the button's box in
-        button, its w 0 for none. Words are the language's (WORDS); the window reading from the right has the button at the start.
+        A curated wallpaper's source on its card: a small round glass mark over the picture's corner (the end of the top, the start reading
+        from the right), the kit's link symbol on a disc of the surface at a low opacity under a lit hairline, so the picture is the card.
+        Lifted (the hand over it, or the editor's keys on it) it is more opaque, and beside it, inward along the top, its label: the
+        credit, "author · licence" in the label's type cut to what fits, on the same glass. Drawn into a picture of its own (w by h,
+        premultiplied, laid over the card as a blended frame), the disc h across; its focus ring while it has the keys. Answers the disc's
+        box in mark (w 0 with no page). Its hit is the kit's least target round that box (UI_TARGET), as every small control's is.
 */
-static struct ui ui_credit_ui;
-static void ui_credit_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
-                                unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int hover,
-                                int keyed, int button[4])
+static struct ui ui_source_ui;
+static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
+                                unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int lifted,
+                                int keyed, int mark[4])
 {
-        struct ui address_to ui = &ui_credit_ui;
+        struct ui address_to ui = &ui_source_ui;
         struct ui_card_theme kept;
         char line[2 * SETTING_WALLPAPER_CREDIT + 8], fitted[2 * SETTING_WALLPAPER_CREDIT + 16];
-        int pad, room, label_w = 0, button_w = 0;
-        button[0] = button[1] = button[2] = button[3] = 0;
-        if (!pixels || w <= 0 || h <= 0)
+        unsigned int glass, ink, rim;
+        int side = h, x, symbol;
+        mark[0] = mark[1] = mark[2] = mark[3] = 0;
+        if (!pixels || w <= 0 || h <= 0 || !source)
                 return;
         ui_card_theme_take(&kept, theme, accent);
         ui_card_ui(ui, pixels, pitch, w, h, scale, engine, face);
-        pad = ui_px(ui, 8);
-        ui_kit_fill(ui, &(struct ui_box){0, 0, w * 256, h * 256, h * 128, h * 128}, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, null);
-        if (engine && face)
+        glass = (ui_role(UI_SURFACE) & 0xffffffu) | (lifted || keyed ? 0xb8000000u : 0x5c000000u);
+        rim = (ui_role(UI_ON_SURFACE) & 0xffffffu) | (lifted || keyed ? 0x59000000u : 0x2e000000u);
+        ink = (ui_role(UI_ON_SURFACE) & 0xffffffu) | (lifted || keyed ? 0xff000000u : 0xb3000000u);
+        side = side > w ? w : side;
+        x = ui_mirror(w - side, side, 0, w);
+        mark[0] = x, mark[1] = 0, mark[2] = side, mark[3] = side;
+        // Lifted, the credit beside it on the same glass, read before the mark from the inside of the card.
+        if ((lifted || keyed) && engine && face)
         {
-                if (source)
-                {
-                        struct ui_control c;
-                        memory_zero(&c, sizeof(c));
-                        c.kind = UI_BUTTON, c.variant = UI_BUTTON_TEXT, c.label = WORDS(wallpaper_source), c.hover = hover;
-                        label_w = ui_kit_measure(ui, (string_address)c.label, UI_LABEL_LARGE);
-                        button_w = label_w + 2 * ui_px(ui, 12);
-                        button_w = button_w > w ? w : button_w;
-                        button[0] = ui_mirror(w - button_w, button_w, 0, w), button[1] = 0, button[2] = button_w, button[3] = h;
-                        c.x = button[0] * 100 / ui->scale, c.y = 0, c.w = button_w * 100 / ui->scale, c.h = h * 100 / ui->scale;
-                        ui_control_place(&c);
-                        ui_control_draw_one(ui, &c);
-                        if (keyed)
-                        {
-                                struct ui_box ring = {button[0] * 256, 0, (button[0] + button_w) * 256, h * 256, h * 128, h * 128};
-                                ui_kit_focus_ring(ui, &ring);
-                        }
-                }
+                int pad = ui_px(ui, 10), room = w - side - ui_px(ui, 6) - 2 * pad;
                 string_copy_bounded((p8 address_to)line, (string_address)(author && author[0] ? author : ""), sizeof(line));
                 if (author && author[0] && licence && licence[0])
                         string_append_bounded((p8 address_to)line, (string_address) " \xc2\xb7 ", sizeof(line));
                 string_append_bounded((p8 address_to)line, (string_address)(licence ? licence : ""), sizeof(line));
-                room = w - 2 * pad - button_w;
                 if (line[0] && room > 0)
                 {
                         string_address said = ui_fit(ui, (string_address)line, UI_LABEL_MEDIUM, room, fitted, sizeof(fitted));
-                        int width = ui_kit_measure(ui, said, UI_LABEL_MEDIUM), x = ui_mirror(pad, width, 0, w);
-                        ui_kit_text(ui, x, ui_kit_baseline(ui, (h - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), said, UI_LABEL_MEDIUM,
-                                    ui_role(UI_ON_SURFACE_VARIANT), 0);
+                        int width = ui_kit_measure(ui, said, UI_LABEL_MEDIUM), pill = width + 2 * pad;
+                        int px = ui_mirror(w - side - ui_px(ui, 6) - pill, pill, 0, w);
+                        struct ui_box plate = {px * 256, 0, (px + pill) * 256, side * 256, side * 128, side * 128};
+                        ui_kit_fill(ui, &plate, glass, null);
+                        ui_kit_ring(ui, &plate, ui_stroke(ui), rim);
+                        ui_kit_text(ui, px + pad, ui_kit_baseline(ui, (side - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), said,
+                                    UI_LABEL_MEDIUM, ink, 0);
+                }
+        }
+        {
+                struct ui_box disc = {x * 256, 0, (x + side) * 256, side * 256, side * 128, side * 128};
+                ui_kit_fill(ui, &disc, glass, null);
+                ui_kit_ring(ui, &disc, ui_stroke(ui), rim);
+                symbol = side * 9 / 16;
+                ui_icon(ui, UI_ICON_LINK, x + (side - symbol) / 2, (side - symbol) / 2, symbol, 0, ink);
+                if (keyed)
+                {
+                        struct ui_box ring = ui_kit_focus_outset(ui, disc);
+                        ring.x0 = ring.x0 < 0 ? 0 : ring.x0, ring.y0 = ring.y0 < 0 ? 0 : ring.y0;
+                        ring.x1 = ring.x1 > w * 256 ? w * 256 : ring.x1, ring.y1 = ring.y1 > h * 256 ? h * 256 : ring.y1;
+                        ui_kit_focus_ring(ui, &ring);
                 }
         }
         ui_card_theme_give(&kept);

@@ -36,7 +36,6 @@
 # machine-made 2026-11-24 (the open tool's last way), not yet read by a person: open_copied open_failed open_nothing
 # machine-made 2026-11-24 (Files polish: new file, duplicate, copy path, free space), not yet read by a person: files_new_file files_sheet_free menu_copy_path menu_duplicate menu_new_file
 # machine-made 2026-11-24 (the colour wheel), not yet read by a person: ui_colour_hex
-# machine-made 2026-11-25 (a curated wallpaper's source), not yet read by a person: wallpaper_source
 # machine-made 2026-11-24 (a wallpaper is a PNG or a JPEG), not yet read by a person: files_pick
 @language he
 @name עברית
@@ -631,7 +630,6 @@ ui_colour_hex	1ae3	צבע הוא שש ספרות הקסדצימליות, rrggbb
 ui_confirm_again	b3ff	לחץ שוב לאישור: 
 ui_field_digits	f52b	מספר הוא ספרות
 ui_field_full	fe02	זה המקסימום שהוא מכיל
-wallpaper_source	a3f8	מקור
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	עיגול מתחת לכל אצבע במסך מגע
