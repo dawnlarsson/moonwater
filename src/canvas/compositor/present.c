@@ -1100,7 +1100,56 @@ static b32 ui_picture_for_screen(unsigned int *into, positive pitch, positive w,
 */
 #define COMPOSITOR_WALL_CACHE_DIR "/run/moonwater/wallpaper"
 #define COMPOSITOR_WALL_CACHE_VERSION 1u
-#define COMPOSITOR_WALL_CACHE_HEAD 16u
+#define COMPOSITOR_WALL_CACHE_KEEP 4 // the files kept at the most (a 4K picture is 33 MB of memory): more screens make theirs again
+
+/*
+        The directory held to the COMPOSITOR_WALL_CACHE_KEEP files changed last, the one just written among them: each other is taken
+        away, the oldest first, so the pictures of screens and Scenes no longer shown do not stay in memory (tmpfs) for the session.
+*/
+static void compositor_wall_cache_trim(void)
+{
+        p8 buffer[4096];
+        struct
+        {
+                char name[17];
+                b64 when;
+        } kept[COMPOSITOR_WALL_CACHE_KEEP + 1];
+        unsigned int count = 0;
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_WALL_CACHE_DIR, FILE_READ | O_DIRECTORY | O_CLOEXEC), got;
+
+        if (handle < 0)
+                return;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        const char *name = (const char *)(buffer + at + 19);
+                        p8 facts[256] = {0};
+                        b64 when;
+                        unsigned int oldest = 0;
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        if (string_length((string_address)name) != 16 ||
+                            compositor_call(syscall(statx), (positive)handle, (positive)name, 0x100, 0x41, (positive)facts, 0) < 0)
+                                continue;
+                        when = memory_load_unaligned(b64, facts + 112) * 1000000000ll + memory_load_unaligned(p32, facts + 120);
+                        if (count < COMPOSITOR_WALL_CACHE_KEEP)
+                        {
+                                memory_copy(kept[count].name, name, 17), kept[count++].when = when;
+                                continue;
+                        }
+                        // Full: whichever is older, this one or the oldest kept, goes.
+                        for (unsigned int k = 1; k < count; k++)
+                                oldest = kept[k].when < kept[oldest].when ? k : oldest;
+                        if (when < kept[oldest].when)
+                                (void)system_remove_at(handle, (string_address)name, 0);
+                        else
+                        {
+                                (void)system_remove_at(handle, (string_address)kept[oldest].name, 0);
+                                memory_copy(kept[oldest].name, name, 17), kept[oldest].when = when;
+                        }
+                }
+        system_close(handle);
+}
 
 // The strength kept (SETTING_WALLPAPER_SHARPEN_PATH, 0 to 100), the default when none is or it says something else.
 static unsigned int compositor_wall_strength(void)
@@ -1172,6 +1221,7 @@ static void compositor_wall_cache_write(const char *name, const unsigned int *fr
                 (void)compositor_call(syscall(renameat2), (positive)AT_FDCWD, (positive)made, (positive)AT_FDCWD, (positive)name, 0, 0);
         else
                 (void)system_remove_at(AT_FDCWD, (string_address)made, 0);
+        compositor_wall_cache_trim();
 }
 
 #include "../enhance.c" // the learned stage: restore and double the decoded picture, grade the screen's (no model, no stage)
