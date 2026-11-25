@@ -469,13 +469,14 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         letters, digits and dashes, and another picture of the same name already remembered gives it a number after. forget NAME remembers
         the picture no more: its copy and miniature are taken away, and a Scene that had it has the moon again. The compositor alone writes
         the Scenes' words, so what changes one is asked of it in a file of SETTING_WALLPAPER_ASK's name; the list is this command's alone.
+        sharpen [PERCENT|default] is how much a picture is sharpened once it is made a screen's size (locale_wallpaper_sharpen).
 
         A file that is not a picture the desktop can read, or one over 64 MiB, is refused before root is asked for. Its miniature is made
         from a decode at the fewest eighths that still give SETTING_WALLPAPER_MINI each way, so a 50-megapixel photograph is read in a
         moment.
 */
 #define LOCALE_WALLPAPER_MOST (64ul << 20)
-#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE, forget NAME or curated [fetch|get HEX]\n"
+#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE, forget NAME, curated [fetch|get HEX] or sharpen [PERCENT|default]\n"
 
 #ifndef SHELL_UTILITY_PROGRAM
 static unsigned int ui_image_kind(const p8 address_to file, positive size);
@@ -675,6 +676,41 @@ static bipolar locale_wallpaper_mini(string_address path, const unsigned int add
         failed = host_write_file(path, out, size, 0644, true);
         memory_free(out, size);
         return failed;
+}
+
+/*
+        canvas wallpaper sharpen [PERCENT|default]: how much a picture wallpaper is sharpened once it is made the screen's size (CAS's
+        strength, ui.c's ui_picture_sharpen), kept in SETTING_WALLPAPER_SHARPEN_PATH; default takes the file away (the strength is then
+        SETTING_WALLPAPER_SHARPEN_DEFAULT). The compositor reads it live and makes the wallpaper again. Bare, the strength.
+*/
+static b32 locale_wallpaper_sharpen(string_address how)
+{
+        p8 word[16], line[8];
+        positive value = 0, used = 0;
+        bipolar failed;
+
+        if (!how)
+        {
+                if (host_read_word((string_address)SETTING_WALLPAPER_SHARPEN_PATH, word, sizeof(word)) > 0)
+                        value = (positive)string_digits_max(word, 3, address_of used);
+                if (!used || word[used] || value > 100)
+                        value = SETTING_WALLPAPER_SHARPEN_DEFAULT;
+                host_say(log, host_label "wallpaper sharpen %p percent\n", value);
+                return 0;
+        }
+        if (string_equals(how, "default"))
+        {
+                host_need_root();
+                (void)system_remove_at(AT_FDCWD, (string_address)SETTING_WALLPAPER_SHARPEN_PATH, 0);
+                return 0;
+        }
+        value = (positive)string_digits_max(how, 3, address_of used);
+        if (!used || how[used] || value > 100)
+                return host_refuse("wallpaper sharpen is a percent from 0 to 100, or default, not %s\n", how);
+        host_need_root();
+        used = positive_into_string(line, value), line[used++] = '\n';
+        failed = host_write_file((string_address)SETTING_WALLPAPER_SHARPEN_PATH, line, used, 0644, true);
+        return failed < 0 ? host_fail("canvas wallpaper sharpen", failed) : 0;
 }
 
 // canvas wallpaper picture FILE: the picture read, judged, unpacked for its miniature, named, kept, listed first and asked for the Scene
@@ -1185,6 +1221,8 @@ static b32 locale_canvas_wallpaper(string_address address_to arguments, positive
                 return locale_wallpaper_remember(arguments[4]);
         if (string_equals(form, "forget") && count == 5)
                 return locale_wallpaper_forget(arguments[4]);
+        if (string_equals(form, "sharpen") && count <= 5)
+                return locale_wallpaper_sharpen(count == 5 ? arguments[4] : null);
         if (string_equals(form, "curated") && count == 4)
                 return locale_curated_say();
         if (string_equals(form, "curated") && count == 5 && string_equals(arguments[4], "fetch"))

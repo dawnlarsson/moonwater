@@ -67,9 +67,10 @@ moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggb
 moonwater canvas wallpaper             each Scene's wallpaper, and the pictures remembered
 moonwater canvas wallpaper edit [on|off]  the editor over the desktop, of the Scene you are on (a solid colour on its colour wheel, the moon, the pictures): open, shut, or turned
 moonwater canvas wallpaper scene N CHOICE [SCREEN]  Scene N's: auto, dark, white (the moon), colour:rrggbb (a solid colour) or a picture's name, on SCREEN or the one you are on
-moonwater canvas wallpaper picture FILE  remember a PNG and make it the wallpaper of the Scene you are on
+moonwater canvas wallpaper picture FILE  remember a picture (a PNG or a JPEG) and make it the wallpaper of the Scene you are on
 moonwater canvas wallpaper forget NAME  remember a picture no more; a Scene that had it has the moon
 moonwater canvas wallpaper curated [fetch|get HEX]  the feed's curated wallpapers: those kept, fetched and verified anew, or one's picture by its digest
+moonwater canvas wallpaper sharpen [PERCENT|default]  how much a picture wallpaper is sharpened once made the screen's size, 0 to 100 percent [35]
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 

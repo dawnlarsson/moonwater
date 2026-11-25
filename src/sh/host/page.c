@@ -78,6 +78,7 @@ static const host_row host_rows[] = {
     {null, "canvas wallpaper picture FILE", "remember a picture (a PNG or a JPEG) and make it the wallpaper of the Scene you are on", 'b'},
     {null, "canvas wallpaper forget NAME", "remember a picture no more; a Scene that had it has the moon", 'b'},
     {null, "canvas wallpaper curated [fetch|get HEX]", "the feed's curated wallpapers: those kept, fetched and verified anew, or one's picture by its digest", 'b'},
+    {null, "canvas wallpaper sharpen [PERCENT|default]", "how much a picture wallpaper is sharpened once made the screen's size, 0 to 100 percent [35]", 'b'},
     {null, "canvas record [SECONDS]", "record the presents of the compositor for SECONDS (1 to 10, 3 by default)", 'b'},
     {null, "canvas record report", "the report of the presents: the paths, flips, late and held presents", 'b'},
     {null, "canvas shot", "the screen as the compositor last composed it, to a file of the record (root)", 'b'},
