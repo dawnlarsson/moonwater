@@ -1856,6 +1856,8 @@ static int compositor_key_chord(unsigned int code, int value, unsigned int modif
                 compositor_scenes_close();
                 return 1;
         }
+        if (compositor_scenes_key(code, value, mods4))
+                return 1;
         if (compositor_wall_editing() && value == 1 && code == CK_KEY_ESC)
         {
                 // The wheel's field typing gives its keys back first; Escape again shuts the editor.

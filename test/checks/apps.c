@@ -11490,6 +11490,7 @@ b32 main()
         GROUP("check_glass_lift", check_glass_lift());
         GROUP("check_compositor_scenes_layout", check_compositor_scenes_layout());
         GROUP("check_compositor_scenes_input", check_compositor_scenes_input());
+        GROUP("check_compositor_scenes_brush", check_compositor_scenes_brush());
         GROUP("check_compositor_scenes_drag", check_compositor_scenes_drag());
         GROUP("check_compositor_scenes_frames", check_compositor_scenes_frames());
         GROUP("check_compositor_scenes_motion", check_compositor_scenes_motion());

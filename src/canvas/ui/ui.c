@@ -1129,6 +1129,10 @@ static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w
 // its own, premultiplied: the compositor lays it over a picture, blended, where a small round action is (the Scenes overview's).
 static void ui_glass_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int symbol,
                                     int lifted, int keyed);
+// A Scene card's brush in the overview: that glass mark with the kit's brush (UI_ICON_BRUSH), and its name, Change wallpaper.
+static void ui_brush_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int lifted,
+                                    int keyed);
+static const char *ui_brush_name(void);
 
 
 // The panel's cells and what a press on one does:
@@ -20406,6 +20410,14 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         // The handle from the top right, the ferrule across its end, the tuft round below it and its point to the bottom left.
         [UI_ICON_BRUSH] = {{UI_ICON_LINE, 41, 7, 26, 22, 0}, {UI_ICON_LINE, 22, 20, 28, 26, 0}, {UI_ICON_BOX, 12, 24, 24, 36, 6}, {UI_ICON_LINE, 15, 33, 8, 40, 0}},
 };
+
+static void ui_brush_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int lifted,
+                                    int keyed)
+{
+        ui_glass_mark_card_draw(pixels, pitch, side, scale, theme, accent, UI_ICON_BRUSH, lifted, keyed);
+}
+
+static const char *ui_brush_name(void) { return WORDS(wallpaper_change); }
 
 // A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.
 static inline b32 ui_icon_at(int origin, int size, int halves)

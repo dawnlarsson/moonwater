@@ -932,6 +932,90 @@ static void check_compositor_scenes_input(void)
 }
 
 /*
+        The Scenes overview's brush (scenes.c's compositor_scenes_brush): a desktop Scene's card has the kit's glass mark with the brush in its
+        foot's end corner, 6 in from its edges, and the "+" card none; its hit is the kit's least target round the mark; drawn it is a blended
+        frame of the mark, its glass under half opaque at rest and lifted under the hand; a press on it leaves the overview for that Scene
+        with the wallpaper's editor open on the screen; Tab goes to each brush in turn and Enter presses it; reading from the right it is in
+        the foot's start corner.
+*/
+static unsigned int scenes_brush_glass(const struct compositor_frame *frames, unsigned int count, const int b[4])
+{
+    for (unsigned int k = 0; k < count; k++)
+        if (frames[k].blend && frames[k].pixels && frames[k].x == b[0] && frames[k].y == b[1] && frames[k].width == b[2])
+            return frames[k].pixels[3 * frames[k].pitch + (unsigned long)b[2] / 2] >> 24; // inside the disc, above the symbol
+    return 0;
+}
+
+static void check_compositor_scenes_brush(void)
+{
+    static struct compositor_frame frames[64];
+    static unsigned int rows[64];
+    int b[4], c[4], other[4], scale, first, second;
+    unsigned int rest, lifted;
+    b32 placed, plus_none, hit, reach, drawn, pressed, keyed, mirrored;
+
+    if (!layout_table_map(512))
+    {
+        check("scenes brush: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    compositor.table->motion = 1;
+    compositor.outputs = 1;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 512, compositor.screen[0][3] = 512;
+    compositor_spaces_ensure();
+    compositor_space_add_id(0, 0);
+    compositor_wall_starts = 0;
+    compositor_scenes_open(0);
+    scale = compositor_scenes_scale();
+    memory_copy(c, compositor.scenes.card[1], sizeof(c));
+    placed = compositor.scenes.cards == 3 && compositor_scenes_brush(1, c, scale, b) && b[2] == UI_SOURCE_MARK_SIDE && b[3] == b[2] &&
+             b[0] + b[2] == c[0] + c[2] - 6 && b[1] + b[3] == c[1] + c[3] - 6 && compositor_scenes_brush(0, compositor.scenes.card[0], scale, other);
+    plus_none = !compositor_scenes_brush(2, compositor.scenes.card[2], scale, other);
+    hit = placed && compositor_scenes_brush_at(b[0] + b[2] / 2, b[1] + b[3] / 2) == 1 && compositor_scenes_brush_at(c[0] + 4, c[1] + 4) == -1;
+    reach = placed && compositor_scenes_brush_at(b[0] - 8, b[1] + b[3] / 2) == 1 && compositor_scenes_brush_at(b[0] - 12, b[1] + b[3] / 2) == -1;
+    rest = scenes_brush_glass(frames, compositor_scenes_frames(frames, rows, 0, 64), b);
+    compositor.pointer_x = b[0] + b[2] / 2, compositor.pointer_y = b[1] + b[3] / 2;
+    compositor_scenes_hover();
+    lifted = scenes_brush_glass(frames, compositor_scenes_frames(frames, rows, 0, 64), b);
+    drawn = compositor_scenes_kept.hover_brush == 1 && rest > 0 && rest < 128 && lifted >= 176;
+    string_format(log, "  scenes brush: its glass %p of 255 at rest, %p lifted\n", (positive)rest, (positive)lifted);
+    // A press on it: the overview leaves for its Scene, the editor open over it.
+    scenes_click(b[0] + b[2] / 2, b[1] + b[3] / 2);
+    pressed = placed && !compositor.scenes.open && compositor_spaces_active_index(0) == 1 && compositor_wall_editing() && compositor_wall_editor.screen == 0;
+    compositor_wall_edit(-1, 0), compositor_wall_editor.shown = 0;
+    // The keys: Tab to the first brush, Tab to the second, Enter presses it.
+    compositor_space_switch_index(0, 0);
+    compositor_scenes_open(0);
+    compositor.held[0] = 0; // the fixture holds the logo key; a Tab with it is no Tab of the overview's
+    compositor_key(0, CK_KEY_TAB, 1, 0), compositor_key(0, CK_KEY_TAB, 0, 0);
+    first = compositor_scenes_kept.key_brush;
+    compositor_key(0, CK_KEY_TAB, 1, 0), compositor_key(0, CK_KEY_TAB, 0, 0);
+    second = compositor_scenes_kept.key_brush;
+    compositor_key(0, 28, 1, 0), compositor_key(0, 28, 0, 0);
+    keyed = first == 0 && second == 1 && !compositor.scenes.open && compositor_spaces_active_index(0) == 1 && compositor_wall_editing();
+    string_format(log, "  scenes brush: Tab to %b then %b, then Enter: the overview open %b, the Scene %b, the editor %b; the card %b,%b %bx%b, the brush %b,%b\n",
+                  (bipolar)first, (bipolar)second, (bipolar)compositor.scenes.open, (bipolar)compositor_spaces_active_index(0), (bipolar)compositor_wall_editing(),
+                  (bipolar)c[0], (bipolar)c[1], (bipolar)c[2], (bipolar)c[3], (bipolar)b[0], (bipolar)b[1]);
+    compositor_wall_edit(-1, 0), compositor_wall_editor.shown = 0;
+    // Reading from the right: the foot's start corner.
+    compositor_scenes_open(0);
+    language.rtl = 1;
+    mirrored = compositor_scenes_brush(1, compositor.scenes.card[1], scale, other) && other[0] == compositor.scenes.card[1][0] + 6 && other[1] == b[1];
+    language.rtl = 0;
+    compositor_scenes_close();
+    compositor_wall_starts = 1;
+    check("scenes brush: a desktop Scene's card has the glass brush in its foot's end corner, the mark's side across", placed);
+    check("scenes brush: the \"+\" card has none", plus_none);
+    check("scenes brush: a point on it is its card's, and the card's top start corner is not", hit);
+    check("scenes brush: its hit is the kit's least target round it, and no further", reach);
+    check("scenes brush: drawn, its glass is under half opaque at rest and lifted under the hand", drawn);
+    check("scenes brush: a press on it goes to that Scene and opens the wallpaper's editor over it", pressed);
+    check("scenes brush: Tab goes to each brush in turn and Enter presses it", keyed);
+    check("scenes brush: reading from the right it is in the foot's start corner", mirrored);
+}
+
+/*
         C8 Scenes, step 3: the globe's drag. BEGIN starts it and opens nothing; MOVE sets its progress and velocity; END commits
         (the overview opens) over the swipe speed away from the band, cancels over it toward the band, and otherwise commits
         when progress is over half. Progress is clamped to 0..1024. Phases outside a drag, and a BEGIN while open, do nothing.
@@ -1254,8 +1338,8 @@ static void check_compositor_scenes_more(void)
     {
         if (scenes_rows[k] == 1 && scenes_frames[k].x == r1[0] && scenes_frames[k].width == r1[2] && scenes_frames[k].lit == COMPOSITOR_LIT_ALL)
             lit = scenes_frames[k].lit_ink == (compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu);
-        if (compositor_scenes_kept.title && scenes_frames[k].pixels >= compositor_scenes_kept.title &&
-            scenes_frames[k].pixels < compositor_scenes_kept.title + compositor_scenes_kept.title_bytes / 4)
+        if (compositor_scenes_kept.title.pixels && scenes_frames[k].pixels >= compositor_scenes_kept.title.pixels &&
+            scenes_frames[k].pixels < compositor_scenes_kept.title.pixels + compositor_scenes_kept.title.bytes / 4)
             titled = scenes_frames[k].y >= r1[1] + r1[3] && scenes_frames[k].radius == scenes_frames[k].height / 2;
     }
     check("scenes more: the window under the hand has its ring lit in the accent", lit);

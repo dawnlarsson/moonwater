@@ -117,6 +117,17 @@ static int compositor_scenes_gap(void)
         return gap < 4 ? 4 : gap;
 }
 
+// Words on a plate (taskbar_scenes_title, the kit's painter): its picture, the plate's width in it, and what it was made of (the words,
+// the picture's size and inks), so it is made again only when one changes.
+struct compositor_scenes_plate
+{
+        unsigned int *pixels;
+        unsigned long bytes;
+        int w, h, plate;
+        unsigned int ink, ground;
+        char of[WINDOWS_TITLE];
+};
+
 // What the overview draws, kept between presents (C8 step 4): the layout's sizes, the generations it was made at, and the
 // wallpaper's miniature every Scene card is drawn on.
 static struct
@@ -135,14 +146,20 @@ static struct
         int hover_row, hover_card, hover_close, held, drop_card, at_x, at_y;
         int auto_opened; // opened by a window dragged to the band, which shuts it again when the drag ends
         int room[4];     // the screen's room the overview was laid out in (the screen less the band)
-        // The title under the window under the hand: its picture (the kit's, taskbar_scenes_title), the plate's width in it, and what it
-        // was made of (the row, its title, the picture's size and inks), so it is made again only when one changes.
-        unsigned int *title, *wall_half;
-        unsigned long title_bytes, wall_half_bytes;
-        int title_row, title_w, title_h, title_plate;
-        unsigned int title_ink, title_ground;
-        char title_of[WINDOWS_TITLE];
-} compositor_scenes_kept;
+        // The title under the window under the hand, and the name beside a Scene card's lifted brush.
+        struct compositor_scenes_plate title, tip;
+        unsigned int *wall_half;
+        unsigned long wall_half_bytes;
+        // Each Scene card's brush (the kit's glass mark, UI_ICON_BRUSH): the card whose brush is under the hand and the one with the keys
+        // (-1 none), its three pictures one under the other (at rest, lifted, lifted with the keys) and what they were drawn at, and the
+        // keys it took (their release is its too).
+        int hover_brush, key_brush;
+        unsigned int *brush;
+        unsigned long brush_bytes;
+        int brush_side, brush_scale;
+        unsigned int brush_theme, brush_accent;
+        unsigned char keys[32];
+} compositor_scenes_kept = {.hover_brush = -1, .key_brush = -1};
 
 // The height of the title under a window, in device pixels at a scale in percent.
 static int compositor_scenes_title_h(int scale)
@@ -318,6 +335,44 @@ static unsigned int compositor_scenes_sid(int card)
         return sp ? sp->id : 0;
 }
 
+// The overview's scale: its screen's, or the compositor's.
+static int compositor_scenes_scale(void)
+{
+        int scale = compositor_output_scale(compositor.scenes.screen);
+
+        return scale > 0 ? scale : compositor.scale;
+}
+
+/*
+        Scene card i's brush where card c is drawn: the kit's glass mark (UI_SOURCE_MARK_SIDE across, a third of the card at the most) in its
+        foot's end corner, the start reading from the right, in from its edges as the wallpaper editor's source mark is; the close button
+        has the top's. A desktop Scene's card has one ("+" and a fullscreen window's Scene none), and a card too small for it none.
+*/
+static int compositor_scenes_brush(int card, const int c[4], int scale, int out[4])
+{
+        struct compositor_space *sp = compositor_space_at(compositor.scenes.screen, card);
+        int pad = 6 * scale / 100, side = UI_SOURCE_MARK_SIDE * scale / 100;
+
+        pad = pad < 2 ? 2 : pad;
+        side = side > c[3] / 3 ? c[3] / 3 : side;
+        if (card < 0 || (unsigned int)card + 1 >= compositor.scenes.cards || !sp || sp->kind != COMPOSITOR_SPACE_DESKTOP || side < 12 || c[2] < side + 2 * pad)
+                return 0;
+        out[0] = language_rtl() ? c[0] + pad : c[0] + c[2] - pad - side, out[1] = c[1] + c[3] - pad - side, out[2] = out[3] = side;
+        return 1;
+}
+
+// The card whose brush a point is on (its hit the kit's least target round the mark, UI_TARGET, as every small control's is), or -1.
+static int compositor_scenes_brush_at(int x, int y)
+{
+        int scale = compositor_scenes_scale(), b[4];
+
+        for (unsigned int card = 0; card + 1 < compositor.scenes.cards; card++)
+                if (compositor_scenes_brush((int)card, compositor.scenes.card[card], scale, b) &&
+                    ui_reach_hit(1, UI_TARGET * scale / 100, x, y, b[0], b[1], b[2], b[3]))
+                        return (int)card;
+        return -1;
+}
+
 // The overview opens on a screen: the Scene strip and the current Scene's windows are laid out there. Mission Control, the
 // drawer this replaces, is closed when it opens.
 static void compositor_wall_edit(int screen, int how); // wallpaper.c: the wallpaper's editor, which shuts when the overview opens
@@ -335,6 +390,7 @@ static void compositor_scenes_open(int screen)
         compositor.scenes.pressed = 0, compositor.scenes.press_row = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_row = compositor_scenes_kept.hover_card = compositor_scenes_kept.drop_card = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_close = compositor_scenes_kept.held = compositor_scenes_kept.auto_opened = 0;
+        compositor_scenes_kept.hover_brush = compositor_scenes_kept.key_brush = -1;
         compositor_scenes_relayout();
         compositor_scenes_damage();
 }
@@ -362,6 +418,7 @@ static void compositor_scenes_close(void)
         compositor.scenes.open = 0, compositor.scenes.pressed = 0, compositor.scenes.press_row = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_row = compositor_scenes_kept.hover_card = compositor_scenes_kept.drop_card = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_close = compositor_scenes_kept.held = compositor_scenes_kept.auto_opened = 0;
+        compositor_scenes_kept.hover_brush = compositor_scenes_kept.key_brush = -1;
 }
 
 // The overview shut at once, with no motion (the screens changed under it).
@@ -405,11 +462,67 @@ static int compositor_scenes_held(void)
         return compositor.scenes.open && compositor_scenes_kept.held;
 }
 
+// A Scene card's brush pressed (or Enter on it): the overview leaves for that Scene, rolled to as a press on the card rolls to it, and the
+// wallpaper's editor opens over it.
+static void compositor_scenes_brush_press(int card)
+{
+        int screen = compositor.scenes.screen;
+
+        compositor_scenes_close();
+        compositor_space_switch_index(screen, card);
+        compositor_scenes_relayout(); // the Scene switched to goes home from the overview, its windows from their rects
+        compositor_wall_edit(screen, 1);
+}
+
+/*
+        The overview's keys (input.c's compositor_key_chord asks here first): Tab goes to each Scene card's brush in turn and past the last
+        to none (Shift the other way), and Enter, keypad Enter or Space presses the brush with the keys. A key's release is taken where its
+        press was, so no window is let go of a key it never had. Answers whether it was taken.
+*/
+static int compositor_scenes_key(unsigned int code, int value, unsigned int mods4)
+{
+        unsigned char mask = (unsigned char)(1u << (code & 7)), *bit = code < 256 ? &compositor_scenes_kept.keys[code >> 3] : 0;
+        int n = (int)compositor.scenes.cards - 1, at = compositor_scenes_kept.key_brush, way = mods4 & WINDOW_KEY_SHIFT ? -1 : 1, b[4];
+
+        if (!value)
+        {
+                if (!bit || !(*bit & mask))
+                        return 0;
+                *bit &= (unsigned char)~mask;
+                return 1;
+        }
+        if (!compositor.scenes.open || !bit || (mods4 & ~WINDOW_KEY_SHIFT))
+                return 0;
+        if (code == 15) // Tab
+        {
+                do
+                        at = at < 0 ? (way > 0 ? 0 : n - 1) : at + way;
+                while (at >= 0 && at < n && !compositor_scenes_brush(at, compositor.scenes.card[at], compositor_scenes_scale(), b));
+                compositor_scenes_kept.key_brush = at >= 0 && at < n ? at : -1;
+                compositor_scenes_damage();
+        }
+        else if ((code == 28 || code == 96 || code == 57) && !mods4 && at >= 0)
+        {
+                if (value == 1)
+                        compositor_scenes_brush_press(at);
+        }
+        else
+                return 0;
+        *bit |= mask;
+        return 1;
+}
+
 // A click that did not drag: a window is focused and the overview leaves; a Scene card switches to that Scene and leaves; the
-// "+" card adds a Scene and stays open; anything else leaves.
+// "+" card adds a Scene and stays open; anything else leaves. A Scene card's brush leaves for its Scene with the wallpaper's editor open.
 static void compositor_scenes_click(int x, int y)
 {
-        int card = compositor_scenes_card_at(x, y), row = compositor_scenes_window_at(x, y);
+        int card = compositor_scenes_card_at(x, y), row = compositor_scenes_window_at(x, y), brush = compositor_scenes_brush_at(x, y);
+
+        if (brush >= 0)
+        {
+                compositor_scenes_brush_press(brush);
+                return;
+        }
 
         // A Scene card's close button takes the Scene away (its windows go to the one before it) and the overview stays.
         if (card >= 0 && compositor_scenes_on_close(card, x, y))
@@ -830,34 +943,66 @@ static unsigned int compositor_scenes_plain(struct compositor_frame *frames, uns
         return compositor_scenes_cut(f, clip) ? 1 : 0;
 }
 
-// The title of a window as a plate w by h at the most (taskbar_scenes_title, the kit's painter): made when the row, its title, the size
-// or the inks change, and kept. Answers the plate's width, 0 for none.
-static int compositor_scenes_title_of(int row, int w, int h, int screen)
+// Words as a plate w by h at the most (taskbar_scenes_title, the kit's painter), kept in kept: made when the words, the size or the inks
+// change. Answers the plate's width, 0 for none.
+static int compositor_scenes_plate_of(struct compositor_scenes_plate *kept, const char *words, int w, int h, int screen)
 {
         unsigned long bytes = compositor_whole_lines(w) * (unsigned long)h * 4;
         unsigned int ink = compositor_ink_role(UI_ON_SURFACE) & 0xffffffu, ground = compositor_ink_role(UI_SURFACE_HIGH) & 0xffffffu;
         struct taskbar_view view;
+        char said[WINDOWS_TITLE];
 
-        if (row < 0 || row >= COMPOSITOR_ROWS || w <= 0 || h <= 0 || !compositor.title[row][0])
+        if (w <= 0 || h <= 0 || !words || !words[0])
                 return 0;
-        if (compositor_scenes_kept.title && compositor_scenes_kept.title_row == row && compositor_scenes_kept.title_w == w && compositor_scenes_kept.title_h == h &&
-            compositor_scenes_kept.title_ink == ink && compositor_scenes_kept.title_ground == ground &&
-            !memory_compare(compositor_scenes_kept.title_of, compositor.title[row], WINDOWS_TITLE))
-                return compositor_scenes_kept.title_plate;
-        if (compositor_scenes_kept.title_bytes < bytes)
+        memory_zero(said, sizeof(said)), string_copy_bounded((p8 *)said, (string_address)words, sizeof(said));
+        if (kept->pixels && kept->w == w && kept->h == h && kept->ink == ink && kept->ground == ground && !memory_compare(kept->of, said, sizeof(said)))
+                return kept->plate;
+        if (kept->bytes < bytes)
         {
-                void *p = compositor_scenes_kept.title;
+                void *p = kept->pixels;
 
-                if (!mem_buf_grow(&p, &compositor_scenes_kept.title_bytes, bytes, MEM_BUF_GPU_FORGET))
-                        return compositor_scenes_kept.title = 0, compositor_scenes_kept.title_bytes = 0, 0;
-                compositor_scenes_kept.title = (unsigned int *)p;
+                if (!mem_buf_grow(&p, &kept->bytes, bytes, MEM_BUF_GPU_FORGET))
+                        return kept->pixels = 0, kept->bytes = 0, 0;
+                kept->pixels = (unsigned int *)p;
         }
         view = compositor_taskbar_view_for(compositor_bands() > 1 ? screen : 0);
-        compositor_scenes_kept.title_plate = taskbar_scenes_title(&view, compositor_scenes_kept.title, compositor_whole_lines(w), w, h, compositor.title[row], ink, ground);
-        compositor_scenes_kept.title_row = row, compositor_scenes_kept.title_w = w, compositor_scenes_kept.title_h = h;
-        compositor_scenes_kept.title_ink = ink, compositor_scenes_kept.title_ground = ground;
-        memory_copy(compositor_scenes_kept.title_of, compositor.title[row], WINDOWS_TITLE);
-        return compositor_scenes_kept.title_plate;
+        kept->plate = taskbar_scenes_title(&view, kept->pixels, compositor_whole_lines(w), w, h, said, ink, ground);
+        kept->w = w, kept->h = h, kept->ink = ink, kept->ground = ground;
+        memory_copy(kept->of, said, sizeof(said));
+        return kept->plate;
+}
+
+// The title of a window as a plate (compositor_scenes_plate_of).
+static int compositor_scenes_title_of(int row, int w, int h, int screen)
+{
+        return row >= 0 && row < COMPOSITOR_ROWS ? compositor_scenes_plate_of(&compositor_scenes_kept.title, compositor.title[row], w, h, screen) : 0;
+}
+
+// The brush's picture side across in its state (0 at rest, 1 lifted, 2 lifted with the keys): the kit's glass mark with its symbol
+// (ui_brush_mark_card_draw), the three made when the side, the scale or the look changes and kept one under the other. 0 with no memory.
+static const unsigned int *compositor_scenes_brush_pixels(int side, int scale, int state)
+{
+        struct windows *table = compositor.table;
+        unsigned int themed = table && table->themed, theme = themed ? table->theme : UI_THEME_LIGHT, accent = themed ? table->accent : UI_ACCENT_STANDARD;
+        unsigned long pitch = compositor_whole_lines(side), bytes = pitch * (unsigned long)side * 3 * 4;
+
+        if (side <= 0 || state < 0 || state > 2)
+                return 0;
+        if (!compositor_scenes_kept.brush || compositor_scenes_kept.brush_side != side || compositor_scenes_kept.brush_scale != scale ||
+            compositor_scenes_kept.brush_theme != theme || compositor_scenes_kept.brush_accent != accent)
+        {
+                void *p = compositor_scenes_kept.brush;
+
+                if (compositor_scenes_kept.brush_bytes < bytes && !mem_buf_grow(&p, &compositor_scenes_kept.brush_bytes, bytes, MEM_BUF_GPU_FORGET))
+                        return compositor_scenes_kept.brush = 0, compositor_scenes_kept.brush_bytes = 0, (const unsigned int *)0;
+                compositor_scenes_kept.brush = (unsigned int *)p;
+                for (int k = 0; k < 3; k++)
+                        ui_brush_mark_card_draw(compositor_scenes_kept.brush + (unsigned long)k * pitch * (unsigned long)side, pitch, side, scale, theme, accent,
+                                                k > 0, k == 2);
+                compositor_scenes_kept.brush_side = side, compositor_scenes_kept.brush_scale = scale;
+                compositor_scenes_kept.brush_theme = theme, compositor_scenes_kept.brush_accent = accent;
+        }
+        return compositor_scenes_kept.brush + (unsigned long)state * pitch * (unsigned long)side;
 }
 
 // Card i where it is drawn: its rect in the strip, lifted above the screen's top by the share not shown.
@@ -975,6 +1120,31 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                         from[0] = frames[own].x, from[1] = frames[own].y, from[2] = frames[own].width, from[3] = frames[own].height;
                         compositor_scenes_in_card(s, c, from, to);
                         at = own + compositor_scenes_put(&frames[own], made, from, to, cut, radius * c[2] / s[2], 0);
+                }
+                // Its brush over the foot's corner, over its windows: the glass mark blended over the picture, lifted under the hand or with
+                // the keys, and lifted all the way open, its name beside it inward along the foot on a plate as a window's title is.
+                int b[4], lifted = compositor.scenes.open && (compositor_scenes_kept.hover_brush == (int)card || compositor_scenes_kept.key_brush == (int)card);
+
+                if (compositor_scenes_brush((int)card, c, scale, b) && compositor_scenes_plain(frames, rows, at, room, filler, b, clip, scale))
+                {
+                        const unsigned int *px = compositor_scenes_brush_pixels(b[2], scale, !lifted ? 0 : compositor_scenes_kept.key_brush == (int)card ? 2 : 1);
+
+                        if (px)
+                        {
+                                frames[at].pixels = px + (unsigned long)(frames[at].y - b[1]) * compositor_whole_lines(b[2]) + (frames[at].x - b[0]);
+                                frames[at].pitch = compositor_whole_lines(b[2]), frames[at].blend = 1;
+                                at++;
+                        }
+                        int plate = lifted && t == UI_ONE ? compositor_scenes_plate_of(&compositor_scenes_kept.tip, ui_brush_name(), c[2], b[3], screen) : 0;
+                        int tip[4] = {language_rtl() ? b[0] + b[2] + gap / 2 : b[0] - gap / 2 - plate, b[1], plate, b[3]};
+
+                        if (plate > 0 && compositor_scenes_plain(frames, rows, at, room, filler, tip, clip, scale))
+                        {
+                                frames[at].pixels = compositor_scenes_kept.tip.pixels + (unsigned long)(frames[at].y - tip[1]) * compositor_whole_lines(c[2]) +
+                                                    (frames[at].x - tip[0]);
+                                frames[at].pitch = compositor_whole_lines(c[2]), frames[at].radius = b[3] / 2;
+                                at++;
+                        }
                 }
         }
         // The "+" card: a plate of the kit's surface with a line, and a plus in its middle.
@@ -1098,7 +1268,7 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                                 place[0] = place[0] < s[0] ? s[0] : place[0] + plate > s[0] + s[2] ? s[0] + s[2] - plate : place[0];
                                 if (compositor_scenes_plain(frames, rows, at, room, filler, place, clip, scale))
                                 {
-                                        frames[at].pixels = compositor_scenes_kept.title + (unsigned long)(frames[at].y - place[1]) * compositor_whole_lines(w) + (frames[at].x - place[0]);
+                                        frames[at].pixels = compositor_scenes_kept.title.pixels + (unsigned long)(frames[at].y - place[1]) * compositor_whole_lines(w) + (frames[at].x - place[0]);
                                         frames[at].pitch = compositor_whole_lines(w), frames[at].radius = h / 2;
                                         at++;
                                 }
@@ -1193,6 +1363,7 @@ static void compositor_scenes_hover(void)
         if (x == compositor_scenes_kept.at_x && y == compositor_scenes_kept.at_y && !compositor.scenes.pressed && !compositor_scenes_kept.held)
                 return;
         int row = compositor_scenes_window_at(x, y), card = compositor_scenes_card_at(x, y), close = card >= 0 && compositor_scenes_on_close(card, x, y);
+        int brush = compositor_scenes_brush_at(x, y);
         int held = compositor_scenes_kept.held, d = (x - compositor.scenes.press_x < 0 ? compositor.scenes.press_x - x : x - compositor.scenes.press_x) +
                                                      (y - compositor.scenes.press_y < 0 ? compositor.scenes.press_y - y : y - compositor.scenes.press_y);
 
@@ -1201,9 +1372,11 @@ static void compositor_scenes_hover(void)
         if (held && !compositor_scenes_kept.auto_opened)
                 compositor_scenes_kept.drop_card = card;
         if (row != compositor_scenes_kept.hover_row || card != compositor_scenes_kept.hover_card || close != compositor_scenes_kept.hover_close ||
+            brush != compositor_scenes_kept.hover_brush ||
             held != compositor_scenes_kept.held || (held && (x != compositor_scenes_kept.at_x || y != compositor_scenes_kept.at_y)))
                 compositor_scenes_damage();
         compositor_scenes_kept.hover_row = row, compositor_scenes_kept.hover_card = card, compositor_scenes_kept.hover_close = close;
+        compositor_scenes_kept.hover_brush = brush;
         compositor_scenes_kept.held = held, compositor_scenes_kept.at_x = x, compositor_scenes_kept.at_y = y;
 }
 
