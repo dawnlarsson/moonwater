@@ -93,6 +93,7 @@ typedef struct
 static const enhance_shape enhance_shapes[] = {
     {ENHANCE_RESTORE, 2, 1, 6, {{16, 32, 1}, {32, 32, 1}, {32, 32, 1}, {32, 32, 1}, {32, 32, 1}, {32, 16, 0}}},
     {ENHANCE_GRADE, 1, 1, 6, {{4, 16, 1}, {16, 24, 1}, {24, 24, 1}, {24, 24, 1}, {24, 32, 2}, {32, 6, 3}}},
+    {ENHANCE_UPSCALE, 1, 2, 6, {{4, 32, 1}, {32, 32, 1}, {32, 32, 1}, {32, 32, 1}, {32, 32, 1}, {32, 16, 0}}},
 };
 #define ENHANCE_SHAPES (sizeof(enhance_shapes) / sizeof(enhance_shapes[0]))
 #endif

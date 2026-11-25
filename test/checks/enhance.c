@@ -526,6 +526,19 @@ static p8 enhance_runtime_sides(void)
                 }
         holds &= !enhance_run_net(net, dst, 1, src, 1, 0, 5, 1) && !enhance_run_net(net, dst, 1, src, 1, 5, 0, 1);
         holds &= !enhance_run_net(null, dst, 1, src, 1, 1, 1, 1);
+        //      The upscaler, when the shapes have one: every side doubled, the source kept, alpha 0xff.
+        const enhance_net *up = enhance_find(&m, ENHANCE_UPSCALE);
+        static p32 wide[4 * 100];
+
+        for (positive w = 1; up && w <= 9 && holds; w++)
+                for (positive h = 1; h <= 9; h++)
+                {
+                        enhance_test_picture(src, w, h);
+                        memory_copy(copy, src, w * h * 4);
+                        holds &= enhance_run_net(up, wide, 2 * w, src, w, w, h, 1) && !memory_compare(copy, src, w * h * 4);
+                        for (positive i = 0; i < 4 * w * h; i++)
+                                holds &= (wide[i] >> 24) == 0xff;
+                }
         return holds;
 }
 
