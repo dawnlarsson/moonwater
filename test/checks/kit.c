@@ -6914,6 +6914,55 @@ static fn check_kit_graph(void)
                 check("graph: a node of another machine is marked down its left side in the information accent",
                       pixels[70 * 300 + 50 + 2] == (ui_role(UI_INFO) | 0xff000000u) && pixels[70 * 300 + 50 + 12] != (ui_role(UI_INFO) | 0xff000000u));
         }
+        // A wire's mute: a tap on its knob asks for it (UI_GRAPH_MUTED) and turns nothing, a press moved past the slop turns the knob and
+        // asks for no mute, M with the keys on a chosen wire asks for it; a muted wire is drawn faded, its knob too, at the level it keeps.
+        {
+                static struct ui_graph_edge muting[1] = {{0, 1, 0, 0, 1, 1, 0, 60}};
+                struct ui_graph_node two[2] = {{0, 0, 40, 30, 0, null, {null, null}, 0, 1}, {200, 0, 40, 30, 0, null, {null, null}, 1, 0}};
+                unsigned int tap = 0, turn = 0, key;
+                b64 cx, cy;
+                ui_graph_start(&g);
+                g.node = two, g.nodes = 2, g.edge = muting, g.edges = 1, g.rules = UI_GRAPH_WIRING, g.keys = 0, g.knob_most = 100;
+                g.x = 50, g.y = 20, g.w = 200, g.h = 100, g.grid = -1, g.homed = 1, g.zoom = UI_GRAPH_ONE, g.pan_x = -120 * 256, g.pan_y = -15 * 256;
+                ui_graph_knob_centre(&ui, &g, &muting[0], &cx, &cy);
+                ui_kit.pointer_x = ui_graph_px(cx), ui_kit.pointer_y = ui_graph_px(cy);
+                event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0};
+                tap |= ui_graph_event(&ui, &g, &event);
+                event = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
+                tap |= ui_graph_event(&ui, &g, &event);
+                check("graph: a tap on a wire's knob asks for its mute, and turns nothing", (tap & UI_GRAPH_MUTED) && g.muted_edge == 0 && !(tap & UI_GRAPH_TURNED));
+                g.muted_edge = -1;
+                event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0};
+                turn |= ui_graph_event(&ui, &g, &event);
+                ui_kit.pointer_y -= 40;
+                event = (struct window_event){WINDOW_EVENT_MOTION, 0, ui_kit.pointer_x, ui_kit.pointer_y, 0};
+                turn |= ui_graph_event(&ui, &g, &event);
+                event = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
+                turn |= ui_graph_event(&ui, &g, &event);
+                check("graph: a knob turned past the slop turns, and asks for no mute", (turn & UI_GRAPH_TURNED) && g.turned_level > 60 && !(turn & UI_GRAPH_MUTED));
+                g.keys = 1, g.chosen = 0, g.edge_chosen = 0, g.muted_edge = -1;
+                event = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_M, 'm', 0};
+                key = ui_graph_key(&ui, &g, &event);
+                check("graph keys: M on the chosen wire asks for its mute", (key & UI_GRAPH_MUTED) && g.muted_edge == 0);
+                // Drawn: the knob's arc of a muted wire is not the accent's, and that of a wire not muted is.
+                g.keys = 0, g.chosen = -1, g.edge_chosen = -1, g.turning = -1, g.knob_hover = -1;
+                {
+                        unsigned int accent = ui_role(UI_PRIMARY) | 0xff000000u;
+                        int lit[2] = {0, 0};
+                        for (int muted = 0; muted < 2; muted++)
+                        {
+                                muting[0].muted = (unsigned char)muted;
+                                for (int at = 0; at < 300 * 200; at++)
+                                        pixels[at] = 0xff123456u;
+                                ui_graph_draw(&ui, &g);
+                                for (int dy = -12; dy <= 12; dy++)
+                                        for (int dx = -12; dx <= 12; dx++)
+                                                lit[muted] += pixels[(ui_graph_px(cy) + dy) * 300 + ui_graph_px(cx) + dx] == accent;
+                        }
+                        check("graph: a muted wire's knob is drawn faded, its level's arc not the accent's", lit[0] > 0 && lit[1] == 0);
+                        muting[0].muted = 0;
+                }
+        }
 }
 
 // The taskbar globe's press (ui.c taskbar_globe_*): a tap opens on release, a drag away past the slop drives the scenes and opens nothing,

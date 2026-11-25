@@ -502,7 +502,7 @@ settings_router_away	7976	Ausente: sem ligação agora
 settings_router_combiner	2833	Combinador, também um microfone
 settings_router_denied	ccf1	Não permitido em %s
 settings_router_hint	6509	Arraste da direita de um para a esquerda de outro para enviar o som para lá; gire um botão para o nível e pressione uma saída duas vezes para tocar nela
-settings_router_keys	e8ec	Setas escolhem, Enter liga, Tab escolhe um fio, Delete desliga, Page Up e Down rodam-no, F2 dá nome
+settings_router_keys	9ec2	Setas escolhem, Enter liga, Tab escolhe um fio, M silencia-o, Delete desliga, Page Up e Down rodam-no, F2 dá nome
 settings_router_main	7928	Principal
 settings_router_microphone	1969	Microfone
 settings_router_new	1db9	Combinador %d

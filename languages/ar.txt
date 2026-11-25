@@ -503,7 +503,7 @@ settings_router_away	7976	غائب: لا اتصال الآن
 settings_router_combiner	2833	دامج، وميكروفون أيضًا
 settings_router_denied	ccf1	غير مسموح على %s
 settings_router_hint	6509	اسحب من يمين عقدة إلى يسار أخرى لإرسال صوتها إليها؛ أدر المقبض لضبط المستوى، واضغط مخرجًا مرتين للتشغيل عليه
-settings_router_keys	e8ec	الأسهم تختار، وEnter يوصل، وTab يختار سلكًا، وDelete يفصله، وPage Up وDown يديرانه، وF2 يسمّي
+settings_router_keys	9ec2	الأسهم تختار، وEnter يوصل، وTab يختار سلكًا، وM يكتمه، وDelete يفصله، وPage Up وDown يديرانه، وF2 يسمّي
 settings_router_main	7928	الرئيسي
 settings_router_microphone	1969	ميكروفون
 settings_router_new	1db9	دامج %d

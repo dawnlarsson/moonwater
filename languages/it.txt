@@ -502,7 +502,7 @@ settings_router_away	7976	Assente: nessun collegamento ora
 settings_router_combiner	2833	Combinatore, anche un microfono
 settings_router_denied	ccf1	Non consentito su %s
 settings_router_hint	6509	Trascina dalla destra di uno alla sinistra di un altro per mandarvi il suo suono; gira una manopola per il livello e premi due volte un’uscita per suonare su di essa
-settings_router_keys	e8ec	Frecce scelgono, Invio collega, Tab sceglie un cavo, Canc lo toglie, Pag su e giù lo ruotano, F2 nomina
+settings_router_keys	9ec2	Frecce scelgono, Invio collega, Tab sceglie un cavo, M lo silenzia, Canc lo toglie, Pag su e giù lo ruotano, F2 nomina
 settings_router_main	7928	Principale
 settings_router_microphone	1969	Microfono
 settings_router_new	1db9	Combinatore %d

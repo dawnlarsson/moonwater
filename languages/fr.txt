@@ -502,7 +502,7 @@ settings_router_away	7976	Absent : aucun lien pour l'instant
 settings_router_combiner	2833	Combineur, aussi un micro
 settings_router_denied	ccf1	Non autorisé sur %s
 settings_router_hint	6509	Faites glisser de la droite d’un nœud à la gauche d’un autre pour y envoyer son son ; tournez un bouton pour son niveau, et appuyez deux fois sur une sortie pour y jouer
-settings_router_keys	e8ec	Flèches : choisir, Entrée : relier, Tab : un fil, Suppr : le retirer, Page préc./suiv. : tourner, F2 : nommer
+settings_router_keys	9ec2	Flèches : choisir, Entrée : relier, Tab : un fil, M : le couper, Suppr : le retirer, Page préc./suiv. : tourner, F2 : nommer
 settings_router_main	7928	Principal
 settings_router_microphone	1969	Micro
 settings_router_new	1db9	Combineur %d

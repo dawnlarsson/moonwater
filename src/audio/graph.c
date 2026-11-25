@@ -694,12 +694,13 @@ AUDIO_GRAPH_API long audio_graph_named(const struct audio_graph *g, const char *
 
 /*
         An edge from one node's out to another's in, at a level, with its flags: an edge between the same two already there takes the new
-        level and flags. 1 when the graph has it, 0 when it is refused: an end that has no such side, a node to itself, or a wire that
+        level and mute, and keeps whether it is the server's own and goes to the output that plays. 1 when the graph has it, 0 when it is refused: an end that has no such side, a node to itself, or a wire that
         would close a loop of combiners (counted in refused); -1 with no memory.
 */
 AUDIO_GRAPH_API int audio_graph_wire(struct audio_graph *g, long from, long to, long level, unsigned int flags)
 {
         long e;
+        unsigned int kept = 0;
 
         if (from < 0 || to < 0 || from >= g->nodes || to >= g->nodes || from == to || !audio_node_outs(g->kind[from]) || !audio_node_ins(g->kind[to]))
                 return 0;
@@ -715,8 +716,12 @@ AUDIO_GRAPH_API int audio_graph_wire(struct audio_graph *g, long from, long to, 
                 g->from[e] = (unsigned int)from, g->to[e] = (unsigned int)to, g->now[e] = 0, g->peak[e] = 0;
                 g->edges++;
         }
+        else
+                // An edge made again keeps whether it is the server's own and whether it goes to the output that plays: the person's line over
+                // a wire of the server's sets its level or mutes it, and taken off it is still cut, its knob still the master volume's.
+                kept = g->eflags[e] & (AUDIO_EDGE_DEFAULT | AUDIO_EDGE_PLAYING);
         g->level[e] = (unsigned short)(level < 0 ? 0 : level > AUDIO_GRAPH_LEVEL_MOST ? AUDIO_GRAPH_LEVEL_MOST : level);
-        g->eflags[e] = (unsigned char)(flags & ~AUDIO_EDGE_CUT);
+        g->eflags[e] = (unsigned char)((flags & ~AUDIO_EDGE_CUT) | kept);
         g->target[e] = (flags & AUDIO_EDGE_MUTED) ? 0.0f : g->level[e] == 100 ? 1.0f : audio_volume_gain((unsigned long)g->level[e] * AUDIO_VOLUME_NORM / 100);
         return 1;
 }

@@ -502,7 +502,7 @@ settings_router_away	7976	Abwesend: gerade keine Verbindung
 settings_router_combiner	2833	Kombinierer, auch ein Mikrofon
 settings_router_denied	ccf1	Auf %s nicht erlaubt
 settings_router_hint	6509	Von rechts an einem zum linken Rand eines anderen ziehen, um seinen Ton dorthin zu schicken; einen Knopf drehen für die Lautstärke, einen Ausgang zweimal drücken, um darauf zu spielen
-settings_router_keys	e8ec	Pfeile wählen, Enter verbindet, Tab wählt eine Leitung, Entf trennt, Bild auf und ab drehen, F2 benennt
+settings_router_keys	9ec2	Pfeile wählen, Enter verbindet, Tab wählt eine Leitung, M schaltet sie stumm, Entf trennt, Bild auf und ab drehen, F2 benennt
 settings_router_main	7928	Haupt
 settings_router_microphone	1969	Mikrofon
 settings_router_new	1db9	Kombinierer %d

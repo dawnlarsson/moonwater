@@ -502,7 +502,7 @@ settings_router_away	7976	Немає на зв'язку: з'єднання не�
 settings_router_combiner	2833	Суматор, а також мікрофон
 settings_router_denied	ccf1	Не дозволено на %s
 settings_router_hint	6509	Тягніть справа наліво, щоб спрямувати звук; ручка — рівень; два натискання на вихід — грати на ньому
-settings_router_keys	e8ec	Стрілки вибір, Enter з'єднати, Tab дріт, Delete зняти, Page Up/Down крутити, F2 назва
+settings_router_keys	9ec2	Стрілки вибір, Enter з'єднати, Tab дріт, M приглушити, Delete зняти, Page Up/Down крутити, F2 назва
 settings_router_main	7928	Головний
 settings_router_microphone	1969	Мікрофон
 settings_router_new	1db9	Суматор %d

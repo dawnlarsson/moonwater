@@ -502,7 +502,7 @@ settings_router_away	7976	Borta: ingen länk nu
 settings_router_combiner	2833	Kombinerare, också en mikrofon
 settings_router_denied	ccf1	Inte tillåtet på %s
 settings_router_hint	6509	Dra från högerkanten på en till vänsterkanten på en annan för att skicka ljudet dit; vrid en ratt för nivån och tryck två gånger på en utgång för att spela på den
-settings_router_keys	e8ec	Pilar väljer, Enter kopplar, Tab väljer en tråd, Delete kopplar bort, Page Up och Down vrider, F2 namnger
+settings_router_keys	9ec2	Pilar väljer, Enter kopplar, Tab väljer en tråd, M tystar den, Delete kopplar bort, Page Up och Down vrider, F2 namnger
 settings_router_main	7928	Huvud
 settings_router_microphone	1969	Mikrofon
 settings_router_new	1db9	Kombinerare %d

@@ -502,7 +502,7 @@ settings_router_away	7976	Ausente: sin enlace ahora
 settings_router_combiner	2833	Combinador, también un micrófono
 settings_router_denied	ccf1	No permitido en %s
 settings_router_hint	6509	Arrastra desde la derecha de uno a la izquierda de otro para enviar allí su sonido; gira una perilla para su nivel y pulsa una salida dos veces para reproducir en ella
-settings_router_keys	e8ec	Flechas eligen, Intro conecta, Tab elige un cable, Supr lo quita, Re Pág y Av Pág lo giran, F2 nombra
+settings_router_keys	9ec2	Flechas eligen, Intro conecta, Tab elige un cable, M lo silencia, Supr lo quita, Re Pág y Av Pág lo giran, F2 nombra
 settings_router_main	7928	Principal
 settings_router_microphone	1969	Micrófono
 settings_router_new	1db9	Combinador %d

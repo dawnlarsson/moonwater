@@ -503,7 +503,7 @@ settings_router_away	7976	دور: اکنون پیوندی نیست
 settings_router_combiner	2833	ترکیب‌کننده، و میکروفون هم
 settings_router_denied	ccf1	در %s مجاز نیست
 settings_router_hint	6509	از راست یکی به چپ دیگری بکشید تا صدا برود؛ پیچ سطح است؛ دو بار زدن روی خروجی پخش می‌کند
-settings_router_keys	e8ec	پیکان‌ها انتخاب، Enter وصل، Tab سیم، Delete جدا، Page Up و Down چرخش، F2 نام
+settings_router_keys	9ec2	پیکان‌ها انتخاب، Enter وصل، Tab سیم، M بی‌صدا، Delete جدا، Page Up و Down چرخش، F2 نام
 settings_router_main	7928	اصلی
 settings_router_microphone	1969	میکروفون
 settings_router_new	1db9	ترکیب‌کننده %d

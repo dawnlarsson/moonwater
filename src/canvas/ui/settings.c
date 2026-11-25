@@ -5063,8 +5063,9 @@ static fn settings_field_menu(void)
         display map's). Every node the server has is one: each program with a sound, each microphone, Main and the person's combiners, each
         output and the loopback microphone, and each device of another machine over Waterlink, which says the machine and that it comes over
         Waterlink (or that it is not allowed there, and the line that allows it) and is ringed in the information accent. Any out is wired to
-        any in by the hand or the keys (ui.c's ui_graph_wire_key: arrows, Enter, Tab, Delete, Page Up and Down, F2), each wire's knob its
-        level (the master volume on Main's wire to the output that plays); a wire that would close a loop of combiners is not drawn. Add
+        any in by the hand or the keys (ui.c's ui_graph_wire_key: arrows, Enter, Tab, M, Delete, Page Up and Down, F2), each wire's knob its
+        level (the master volume on Main's wire to the output that plays), a tap on it (or M) its mute, the level kept and the wire drawn
+        faded while it is muted; a wire that would close a loop of combiners is not drawn. Add
         combiner makes one, offered to programs as a microphone too; a second press on a combiner's name (or Rename, or F2) names it in place,
         and Remove lets it go with its wires; a second press on an output makes it the one that plays. The server's page (src/audio/state.c,
         version 5) is read four times a second while the page is up; what the router does goes to the server's file of the wiring
@@ -5101,7 +5102,7 @@ static struct settings_router
         b64 pressed_at;
         // What the hand did that the page does not say yet (the server reads the file at once, and writes its page after): a wire drawn
         // (1) or taken off (0), its knob at level (-1 the page's), between two nodes by what they are, until a moment has passed.
-        struct settings_route_hold { unsigned long from, to; int level; signed char wired; b64 until; } hold[SETTINGS_ROUTER_HOLDS];
+        struct settings_route_hold { unsigned long from, to; int level; signed char wired, muted; b64 until; } hold[SETTINGS_ROUTER_HOLDS];
         // A knob turned and not yet written (a drag is many turns: the file is written at most every SETTINGS_ROUTER_WRITE_NS).
         char pending_from[AUDIO_GRAPH_KEY], pending_to[AUDIO_GRAPH_KEY];
         int pending_level, pending_mute, pending_default;
@@ -5250,8 +5251,8 @@ static fn settings_router_list(void)
         for (long e = 0; e < edges; e++)
         {
                 const struct audio_state_edge address_to wire = &r->wires[e];
-                r->edge[g->edges++] = (struct ui_graph_edge){(unsigned short)wire->from, (unsigned short)wire->to, 0, 0, 1, 1,
-                                                             (unsigned char)(!(wire->flags & AUDIO_EDGE_LIVE) || (wire->flags & AUDIO_EDGE_MUTED)), (unsigned short)wire->level};
+                r->edge[g->edges++] = (struct ui_graph_edge){(unsigned short)wire->from, (unsigned short)wire->to, 0, 0, 1, 1, (unsigned char)!(wire->flags & AUDIO_EDGE_LIVE),
+                                                             (unsigned short)wire->level, (unsigned char)((wire->flags & AUDIO_EDGE_MUTED) != 0)};
         }
         // What the hand did and the page does not say yet, shown as the hand left it.
         for (int h = 0; h < SETTINGS_ROUTER_HOLDS; h++)
@@ -5272,9 +5273,15 @@ static fn settings_router_list(void)
                 if (!hold->wired && e < g->edges)
                         r->edge[e] = r->edge[--g->edges];
                 else if (hold->wired && e == g->edges)
-                        r->edge[g->edges++] = (struct ui_graph_edge){(unsigned short)from, (unsigned short)to, 0, 0, 1, 1, 0, (unsigned short)(hold->level >= 0 ? hold->level : 100)};
-                else if (hold->wired && hold->level >= 0)
-                        r->edge[e].level = (unsigned short)hold->level;
+                        r->edge[g->edges++] = (struct ui_graph_edge){(unsigned short)from, (unsigned short)to, 0, 0, 1, 1, 0, (unsigned short)(hold->level >= 0 ? hold->level : 100),
+                                                                     (unsigned char)(hold->muted > 0)};
+                else if (hold->wired)
+                {
+                        if (hold->level >= 0)
+                                r->edge[e].level = (unsigned short)hold->level;
+                        if (hold->muted >= 0)
+                                r->edge[e].muted = (unsigned char)hold->muted;
+                }
         }
         g->node = r->node, g->edge = r->edge;
         if (g->chosen >= g->nodes)
@@ -5294,7 +5301,7 @@ static b32 settings_router_holding(void)
 }
 
 // What the hand did between two nodes, held over the page until it says so (or a moment has passed): the same pair's hold is replaced.
-static fn settings_router_hold(int from, int to, int wired, int level)
+static fn settings_router_hold(int from, int to, int wired, int level, int muted)
 {
         struct settings_router address_to r = settings_route;
         int at = 0, oldest = 0;
@@ -5308,7 +5315,7 @@ static fn settings_router_hold(int from, int to, int wired, int level)
                 oldest = !r->hold[h].until || r->hold[h].until < r->hold[oldest].until ? h : oldest;
         }
         at = oldest >= 0 ? oldest : at;
-        r->hold[at] = (struct settings_route_hold){r->id[from], r->id[to], level, (signed char)wired, (b64)ui_kit.now + SETTINGS_ROUTER_HOLD_NS};
+        r->hold[at] = (struct settings_route_hold){r->id[from], r->id[to], level, (signed char)wired, (signed char)muted, (b64)ui_kit.now + SETTINGS_ROUTER_HOLD_NS};
 }
 
 // The page read again (mapped read-only as the mixer maps it, as much of it as it says it is): true when what the router shows changed.
@@ -5506,9 +5513,20 @@ static fn settings_router_turned(int e, int level)
                 settings_router_flush();
         string_copy_bounded((string_address)r->pending_from, (string_address)from, sizeof(r->pending_from));
         string_copy_bounded((string_address)r->pending_to, (string_address)to, sizeof(r->pending_to));
-        r->pending_level = level, r->pending_mute = (flags & AUDIO_EDGE_MUTED) != 0, r->pending_default = (flags & AUDIO_EDGE_DEFAULT) != 0;
+        r->pending_level = level, r->pending_mute = r->edge[e].muted != 0, r->pending_default = (flags & AUDIO_EDGE_DEFAULT) != 0;
         if ((b64)ui_kit.now - r->written_at >= SETTINGS_ROUTER_WRITE_NS)
                 settings_router_flush();
+}
+
+// A wire muted or unmuted at its level, kept in the file (Main's wire to the output that plays at a whole: its knob is the master volume).
+static fn settings_router_muted(int e, int mute)
+{
+        unsigned int flags = settings_router_flags(e);
+        char from[AUDIO_GRAPH_KEY], to[AUDIO_GRAPH_KEY];
+        if (settings_route->pending_from[0])
+                settings_router_flush();
+        settings_router_ends(e, from, to);
+        ctl_graph_wire(from, to, flags & AUDIO_EDGE_PLAYING ? 100 : settings_route->edge[e].level, mute, (flags & AUDIO_EDGE_DEFAULT) != 0);
 }
 
 // A wire taken off: a wire of the server's own is cut in the file, the person's own goes from it.
@@ -5574,16 +5592,23 @@ static fn settings_router_did(unsigned int did)
         struct ui_graph address_to g = &r->graph;
         if (did & UI_GRAPH_TURNED)
         {
-                settings_router_hold(r->edge[g->turned].from, r->edge[g->turned].to, 1, g->turned_level);
+                settings_router_hold(r->edge[g->turned].from, r->edge[g->turned].to, 1, g->turned_level, r->edge[g->turned].muted);
                 settings_router_turned(g->turned, g->turned_level);
         }
         if (did & UI_GRAPH_UNWIRED)
         {
-                settings_router_hold(r->edge[g->unwired].from, r->edge[g->unwired].to, 0, -1);
+                settings_router_hold(r->edge[g->unwired].from, r->edge[g->unwired].to, 0, -1, -1);
                 settings_router_unwired(g->unwired);
         }
         if ((did & UI_GRAPH_WIRED) && settings_router_wired(g->wired_from, g->wired_to))
-                settings_router_hold(g->wired_from, g->wired_to, 1, 100);
+                settings_router_hold(g->wired_from, g->wired_to, 1, 100, 0);
+        if ((did & UI_GRAPH_MUTED) && g->muted_edge >= 0 && g->muted_edge < g->edges)
+        {
+                int e = g->muted_edge, mute = !r->edge[e].muted;
+                settings_router_hold(r->edge[e].from, r->edge[e].to, 1, -1, mute);
+                settings_router_muted(e, mute);
+                r->edge[e].muted = (unsigned char)mute;
+        }
         if (g->turning < 0 && r->pending_from[0])
                 settings_router_flush();
         if ((did & UI_GRAPH_NAMED) && settings_router_combiner() >= 0)
@@ -5606,7 +5631,7 @@ static fn settings_router_did(unsigned int did)
                         r->place[at].id = r->id[k], r->place[at].x = g->at_x, r->place[at].y = g->at_y, r->places += at == r->places;
         }
         // A wire's change is listed at once over the page (its hold); a turned knob moved its edge itself.
-        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED))
+        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED | UI_GRAPH_MUTED))
                 r->polled = 0;
         if (did & (UI_GRAPH_DRAW | UI_GRAPH_CHOSE | UI_GRAPH_NAMED))
                 settings_router_damage();

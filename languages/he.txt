@@ -503,7 +503,7 @@ settings_router_away	7976	לא זמין: אין חיבור כעת
 settings_router_combiner	2833	משלב, וגם מיקרופון
 settings_router_denied	ccf1	לא מורשה ב־%s
 settings_router_hint	6509	גררו מימין של אחד לשמאל של אחר כדי לשלוח לשם את הצליל שלו; סובבו כפתור לעוצמה, ולחצו פעמיים על יציאה כדי לנגן בה
-settings_router_keys	e8ec	חצים בוחרים, Enter מחבר, Tab בוחר חוט, Delete מנתק, Page Up ו־Down מסובבים, F2 נותן שם
+settings_router_keys	9ec2	חצים בוחרים, Enter מחבר, Tab בוחר חוט, M משתיק, Delete מנתק, Page Up ו־Down מסובבים, F2 נותן שם
 settings_router_main	7928	ראשי
 settings_router_microphone	1969	מיקרופון
 settings_router_new	1db9	משלב %d

@@ -11767,6 +11767,11 @@ static void sv_test_graph_plan(void)
         audio_plan_parse(&again, out, n);
         m = audio_plan_format(&again, twice, sizeof(twice));
         SVCHECK(m == n && !memcmp(out, twice, (size_t)n), "read back, the text is the same");
+        audio_plan_wired(&plan, "combiner:Main", "output:default", 100, 1, 1);
+        n = audio_plan_format(&plan, out, sizeof(out));
+        SVCHECK(strstr(out, "wire\tcombiner:Main\toutput:default\t100\tmuted\n") != 0, "a wire of the server's muted is a muted line of the file, its level kept");
+        audio_plan_wired(&plan, "combiner:Main", "output:default", 100, 0, 1);
+        SVCHECK(audio_plan_find(&plan, "combiner:Main", "output:default") < 0, "and unmuted at a whole it is the server's again");
         // The UI's edits: a wire of the server's put back at a whole goes from the file; taken off, it is cut; the person's own goes.
         audio_plan_wired(&plan, "program:0/firefox", "combiner:Main", 100, 0, 1);
         SVCHECK(audio_plan_find(&plan, "program:0/firefox", "combiner:Main") < 0, "a server's wire drawn again at a whole is the server's (no line)");
@@ -11873,6 +11878,17 @@ static void sv_test_graph_live(void)
         SVCHECK(g.edges == 2 && g.now[g.first[a]] == 1.0f && g.now[g.first[prog]] == 0.0f, "a build keeps the gain of a wire that stays (%f) and a new wire ramps (%f)", g.now[g.first[a]],
                 g.now[g.first[prog]]);
         SVCHECK(audio_graph_straight(&g, a, out2) && !audio_graph_straight(&g, prog, out2), "a wire at a whole and steady goes straight; one that ramps does not");
+        // A wire of the server's muted by the person's line: muted at its level, still the server's own (taken off, it is cut), still to the
+        // output that plays.
+        audio_graph_begin(&g);
+        a = audio_graph_add(&g, AUDIO_NODE_COMBINER, "Main", 0);
+        out1 = audio_graph_add(&g, AUDIO_NODE_OUTPUT, "alsa_output.x.00", "Speakers");
+        audio_graph_wire(&g, a, out1, 100, AUDIO_EDGE_DEFAULT | AUDIO_EDGE_PLAYING);
+        audio_graph_wire(&g, a, out1, 100, AUDIO_EDGE_MUTED);
+        audio_graph_end(&g);
+        SVCHECK(g.edges == 1 && (g.eflags[0] & AUDIO_EDGE_MUTED) && (g.eflags[0] & AUDIO_EDGE_DEFAULT) && (g.eflags[0] & AUDIO_EDGE_PLAYING) && g.target[0] == 0.0f &&
+                    g.level[0] == 100,
+                "a wire of the server's muted by the person keeps its level, stays the server's and the playing output's, and carries nothing");
 }
 
 // A playback stream of the engine's by hand: a root program named name, float stereo, its ring filled with value, playing.

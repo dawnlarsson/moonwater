@@ -7002,7 +7002,7 @@ LANGUAGE_ID(settings_router_away, "Away: no link now") \
 LANGUAGE_ID(settings_router_combiner, "Combiner, a microphone too") \
 LANGUAGE_ID(settings_router_denied, "Not allowed on %s") \
 LANGUAGE_ID(settings_router_hint, "Drag from the right of one to the left of another to send its sound there; turn a knob for its level, and press an output twice to play on it") \
-LANGUAGE_ID(settings_router_keys, "Arrows choose, Enter wires, Tab picks a wire, Delete unwires, Page Up and Down turn it, F2 names") \
+LANGUAGE_ID(settings_router_keys, "Arrows choose, Enter wires, Tab picks a wire, M mutes it, Delete unwires, Page Up and Down turn it, F2 names") \
 LANGUAGE_ID(settings_router_main, "Main") \
 LANGUAGE_ID(settings_router_microphone, "Microphone") \
 LANGUAGE_ID(settings_router_new, "Combiner %d") \
@@ -17527,7 +17527,7 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_KNOB 11   // logical pixels: a wire's knob's radius
 #define UI_GRAPH_KNOB_RUN 160 // logical pixels the hand moves up a knob for the whole of its range
 #define UI_GRAPH_REACH 3   // a port is taken by a press within this many of its radii
-#define UI_GRAPH_AGAIN_NS 400000000ll // a second press on a knob within this puts it at its whole
+#define UI_GRAPH_AGAIN_NS 400000000ll // a second press on a node the app lets be named, within this, names it
 #define UI_GRAPH_LEAST 7   // points: the least size a node's words step down to (a label wider than the node there is cut with an ellipsis)
 #define UI_GRAPH_CUT 160   // bytes of a node's line cut short
 
@@ -17557,6 +17557,7 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_UNWIRED 128u // edge unwired was taken off (let go of away from an in port; with UI_GRAPH_WIRED as well, moved to another)
 #define UI_GRAPH_TURNED 256u  // edge turned's knob is at turned_level now
 #define UI_GRAPH_NAMED 512u   // the chosen node was named in place: naming_text is its new name
+#define UI_GRAPH_MUTED 1024u  // edge muted_edge's mute is to be turned (a tap on its knob, M with the keys): the app keeps its level
 #define UI_GRAPH_NAME 64      // bytes of a name typed in place, its end with it
 #define UI_GRAPH_KEY_F2 60
 
@@ -17579,6 +17580,7 @@ struct ui_graph_edge
         unsigned char knob;      // a knob on its middle, at level (of ui_graph.knob_most) that the hand turns (UI_GRAPH_TURNED)
         unsigned char quiet;     // drawn quiet: a wire that carries nothing now
         unsigned short level;
+        unsigned char muted;     // muted at its level (a tap on its knob, or M with the keys, asks the app to turn it: UI_GRAPH_MUTED): drawn faded
 };
 
 struct ui_graph
@@ -17611,9 +17613,9 @@ struct ui_graph
         int rest_x, rest_y;          // a trackpad's 120ths of a pixel not yet panned
         // A wire in hand and a knob turned (UI_GRAPH_WIRING): the out port a wire is drawn from (-1 none), the edge taken up by its in
         // end to be drawn again (-1 none), the edge whose knob the hand turns (-1 none) with its level and the pointer at the press,
-        // the knob under the pointer, and the last press on one (a second soon after puts it at its whole).
-        int drag_from, drag_out, lifted, turning, turn_from, turn_y, knob_hover, knob_last;
-        b64 knob_at;
+        // the knob under the pointer, and the edge whose mute a tap on its knob (or M) asks to turn (UI_GRAPH_MUTED).
+        int drag_from, drag_out, lifted, turning, turn_from, turn_y, knob_hover, muted_edge;
+        b32 knob_moved;              // the knob in hand has been turned (past the slop): its release is no tap
         // What an event did (UI_GRAPH_WIRED, _UNWIRED, _TURNED).
         int wired_from, wired_out, wired_to, wired_in, unwired, turned, turned_level;
         // The keys' wiring (UI_GRAPH_WIRING with keys): the edge chosen among the chosen node's (-1 none), a wire in hand from the keys (its
@@ -17630,8 +17632,8 @@ static fn ui_graph_start(struct ui_graph address_to g)
 {
         g->chosen = g->hover = g->held = g->dropped = -1;
         g->moving = 0, g->panning = 0, g->homed = 0, g->zoom = UI_GRAPH_ONE, g->pan_x = g->pan_y = 0;
-        g->drag_from = g->lifted = g->turning = g->knob_hover = g->knob_last = g->unwired = g->turned = -1;
-        g->edge_chosen = g->named_press = -1, g->key_wire = g->naming = 0, g->naming_length = 0;
+        g->drag_from = g->lifted = g->turning = g->knob_hover = g->unwired = g->turned = -1;
+        g->edge_chosen = g->named_press = g->muted_edge = -1, g->key_wire = g->naming = g->knob_moved = 0, g->naming_length = 0;
 }
 
 // a / b rounded down, b above 0.
@@ -17978,8 +17980,9 @@ static int ui_graph_toward(const struct ui_graph address_to g, int dx, int dy)
         its primary and back) or a switch wires as a hand does: an arrow chooses the nearest node that way; Enter on a node with an out takes a
         wire from it, an arrow carries its far end to another node, and Enter there draws it (UI_GRAPH_WIRED) while Escape lets it go; Tab and
         Shift+Tab choose among the chosen node's wires, Delete or Backspace takes the chosen wire off (UI_GRAPH_UNWIRED), Page Up and Page Down
-        (or ] and [) turn its knob a twentieth (UI_GRAPH_TURNED); F2 names a node the app lets be named in place, and while a name is typed the
-        keys are its: a letter is put at its end, Backspace takes one off, Enter gives it (UI_GRAPH_NAMED), Escape keeps the old one.
+        (or ] and [) turn its knob a twentieth (UI_GRAPH_TURNED), M mutes it or unmutes it at its level (UI_GRAPH_MUTED); F2 names a node the
+        app lets be named in place, and while a name is typed the keys are its: a letter is put at its end, Backspace takes one off, Enter
+        gives it (UI_GRAPH_NAMED), Escape keeps the old one.
 */
 static unsigned int ui_graph_wire_key(struct ui_graph address_to g, const struct window_event address_to event)
 {
@@ -18048,6 +18051,8 @@ static unsigned int ui_graph_wire_key(struct ui_graph address_to g, const struct
                                 g->edge_chosen = n++ == at ? e : g->edge_chosen;
                 return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
         }
+        if ((event->b == 'm' || event->b == 'M') && g->edge_chosen >= 0 && g->edge_chosen < g->edges)
+                return g->muted_edge = g->edge_chosen, UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_MUTED;
         if ((event->a == UI_KEY_DELETE || event->a == UI_KEY_BACKSPACE) && g->edge_chosen >= 0 && g->edge_chosen < g->edges)
                 return g->unwired = g->edge_chosen, g->edge_chosen = -1, UI_GRAPH_TAKEN | UI_GRAPH_DRAW | UI_GRAPH_UNWIRED;
         if ((event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN || event->b == ']' || event->b == '[') && g->edge_chosen >= 0 && g->edge_chosen < g->edges &&
@@ -18163,6 +18168,10 @@ static unsigned int ui_graph_wiring(const struct ui address_to ui, struct ui_gra
                 if (g->turning >= 0)
                 {
                         int run = ui_dev(ui, UI_GRAPH_KNOB_RUN);
+                        // A hand that has not moved past the slop is a tap to come, not a turn.
+                        if (!g->knob_moved && !ui_press_past(ui, g->press_x, g->press_y, px, py))
+                                return UI_GRAPH_TAKEN;
+                        g->knob_moved = 1;
                         return UI_GRAPH_TAKEN | ui_graph_turn(g, g->turning, g->turn_from + (int)((b64)(g->turn_y - py) * ui_graph_most_level(g) / (run > 0 ? run : 1)));
                 }
                 if (g->drag_from >= 0)
@@ -18182,10 +18191,8 @@ static unsigned int ui_graph_wiring(const struct ui address_to ui, struct ui_gra
                         return 0;
                 if ((e = ui_graph_knob_at(ui, g, px, py)) >= 0)
                 {
-                        if (e == g->knob_last && (b64)ui_kit.now - g->knob_at < UI_GRAPH_AGAIN_NS)
-                                return g->knob_last = -1, UI_GRAPH_TAKEN | ui_graph_turn(g, e, ui_graph_most_level(g));
-                        g->knob_last = e, g->knob_at = (b64)ui_kit.now;
                         g->turning = e, g->turn_from = g->edge[e].level, g->turn_y = py, g->turned = -1;
+                        g->press_x = px, g->press_y = py, g->knob_moved = 0;
                         return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
                 }
                 if ((k = ui_graph_port_at(ui, g, px, py, &out, &port)) < 0)
@@ -18202,8 +18209,15 @@ static unsigned int ui_graph_wiring(const struct ui address_to ui, struct ui_gra
                 g->drag_from = k, g->drag_out = port, g->last_x = px, g->last_y = py;
                 return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
         }
+        // A knob let go: a tap (no turn past the slop) asks for its wire's mute to be turned, a turn is done.
         if (g->turning >= 0)
-                return g->turning = -1, UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        {
+                unsigned int did = UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                if (!g->knob_moved && !(event->flags & WINDOW_KEY_CANCEL))
+                        g->muted_edge = g->turning, did |= UI_GRAPH_MUTED;
+                g->turning = -1, g->knob_moved = 0;
+                return did;
+        }
         if (g->drag_from < 0)
                 return 0;
         {
@@ -18456,6 +18470,9 @@ static fn ui_graph_knob(struct ui address_to ui, const struct ui_graph address_t
         b64 cx, cy, r = ui_q8(ui, UI_GRAPH_KNOB), arc = r * 7 / 10, dot = ui_stroke(ui) * 3 / 2, most = ui_graph_most_level(g);
         b32 lit = e == g->turning || e == g->knob_hover;
         unsigned int face = ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, accent = ui_role(edge->quiet ? UI_OUTLINE : UI_PRIMARY) | 0xff000000u;
+        // Muted: its disc toward the ground and its level's arc the faded outline, the level kept to be seen.
+        if (edge->muted)
+                face = ui_mix(ui_role(UI_SURFACE_LOW) | 0xff000000u, 50, face), accent = ui_mix(ui_role(UI_OUTLINE) | 0xff000000u, 45, ui_role(UI_SURFACE_LOW) | 0xff000000u);
         struct ui_box disc;
         enum { steps = 40 };
         // The arc's places round a circle of one (Q30), made once: a sine and a cosine a bead each frame was most of a knob's cost.
@@ -18701,7 +18718,7 @@ static fn ui_graph_draw(struct ui address_to ui, struct ui_graph address_to g)
                 if (g->edge[e].from < g->nodes && g->edge[e].to < g->nodes && !(wiring && e == g->lifted))
                         ui_graph_wire(ui, g, &panel, &g->edge[e],
                                       wiring && e == g->edge_chosen ? ui_role(UI_INFO) | 0xff000000u
-                                      : g->edge[e].quiet ? ui_mix(ui_role(UI_OUTLINE) | 0xff000000u, 45, ground)
+                                      : g->edge[e].quiet || g->edge[e].muted ? ui_mix(ui_role(UI_OUTLINE) | 0xff000000u, 45, ground)
                                                          : ui_role(g->edge[e].from == g->chosen || g->edge[e].to == g->chosen ? UI_PRIMARY : UI_OUTLINE) | 0xff000000u);
         for (int k = 0; k < g->nodes; k++)
                 if (k != g->held)
