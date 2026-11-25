@@ -4041,6 +4041,15 @@ static void check_wallpaper_colour(void)
     follows = ui_colour_card_rgb() == 0x336699 && !(ui_colour_card_state() & (UI_COLOUR_KEYS | UI_COLOUR_FIELD | UI_COLOUR_HELD));
     check("solid colour: the editor opened on a Scene with a colour is its wheel at that colour, with no keys or hand on it", follows);
     compositor_wall_edit(0, 0);
+    // Opened on a Scene of its own number (the overview's brush, the desktop's menu): that Scene shown, the editor over it.
+    {
+        unsigned int second = compositor_space_add_id(0, 0);
+
+        compositor_wall_edit_scene(0, 2);
+        check("wallpaper editor: opened on Scene 2 of a screen, Scene 2 is shown and the editor is over it",
+              second && compositor_wall_editing() && compositor_wall_current(0) == 2 && compositor_wall_editor.screen == 0);
+        compositor_wall_edit(0, 0);
+    }
     compositor_wall_editor.shown = 0, compositor_wall_editor.open = 0;
     compositor_wall_veil_keep();
     compositor_walls.lines = compositor_walls.names = compositor_walls.curateds = 0;

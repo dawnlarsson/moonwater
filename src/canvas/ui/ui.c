@@ -1123,6 +1123,10 @@ static void ui_colour_card_keys(int on);
 static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
                                 unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int lifted,
                                 int keyed, int mark[4]);
+// The kit's glass mark alone (the look of the source mark above, any symbol of ui_icon's: a brush, a link), in a picture side by side of
+// its own, premultiplied: the compositor lays it over a picture, blended, where a small round action is (the Scenes overview's).
+static void ui_glass_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int symbol,
+                                    int lifted, int keyed);
 
 
 // The panel's cells and what a press on one does:
@@ -38175,6 +38179,31 @@ static fn ui_card_ui(struct ui address_to ui, unsigned int *pixels, unsigned lon
         box in mark (w 0 with no page). Its hit is the kit's least target round that box (UI_TARGET), as every small control's is.
 */
 static struct ui ui_source_ui;
+
+/*
+        The kit's glass mark: a small round action over a picture, its symbol (UI_ICON_*) on a disc of the surface at 36 percent under a lit
+        hairline at 18 percent of the ink and the symbol at 70; lifted (the hand over it, or the keys on it) the disc at 72 percent, the
+        hairline at 35 and the symbol whole; its focus ring while it has the keys. side across, its box's top left at x, y (device pixels).
+*/
+static fn ui_glass_mark(struct ui address_to ui, int x, int y, int side, int symbol, int lifted, int keyed)
+{
+        unsigned int glass = (ui_role(UI_SURFACE) & 0xffffffu) | (lifted || keyed ? 0xb8000000u : 0x5c000000u);
+        unsigned int rim = (ui_role(UI_ON_SURFACE) & 0xffffffu) | (lifted || keyed ? 0x59000000u : 0x2e000000u);
+        unsigned int ink = (ui_role(UI_ON_SURFACE) & 0xffffffu) | (lifted || keyed ? 0xff000000u : 0xb3000000u);
+        struct ui_box disc = {x * 256, y * 256, (x + side) * 256, (y + side) * 256, side * 128, side * 128};
+        int inner = side * 9 / 16;
+        ui_kit_fill(ui, &disc, glass, null);
+        ui_kit_ring(ui, &disc, ui_stroke(ui), rim);
+        ui_icon(ui, symbol, x + (side - inner) / 2, y + (side - inner) / 2, inner, 0, ink);
+        if (keyed)
+        {
+                struct ui_box ring = ui_kit_focus_outset(ui, disc);
+                ring.x0 = ring.x0 < 0 ? 0 : ring.x0, ring.y0 = ring.y0 < 0 ? 0 : ring.y0;
+                ring.x1 = ring.x1 > ui->width * 256 ? ui->width * 256 : ring.x1, ring.y1 = ring.y1 > ui->height * 256 ? ui->height * 256 : ring.y1;
+                ui_kit_focus_ring(ui, &ring);
+        }
+}
+
 static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w, int h, int scale, font_engine *engine, const font_face *face,
                                 unsigned int theme, unsigned int accent, const char *author, const char *licence, int source, int lifted,
                                 int keyed, int mark[4])
@@ -38215,20 +38244,25 @@ static void ui_source_card_draw(unsigned int *pixels, unsigned long pitch, int w
                                     UI_LABEL_MEDIUM, ink, 0);
                 }
         }
-        {
-                struct ui_box disc = {x * 256, 0, (x + side) * 256, side * 256, side * 128, side * 128};
-                ui_kit_fill(ui, &disc, glass, null);
-                ui_kit_ring(ui, &disc, ui_stroke(ui), rim);
-                symbol = side * 9 / 16;
-                ui_icon(ui, UI_ICON_LINK, x + (side - symbol) / 2, (side - symbol) / 2, symbol, 0, ink);
-                if (keyed)
-                {
-                        struct ui_box ring = ui_kit_focus_outset(ui, disc);
-                        ring.x0 = ring.x0 < 0 ? 0 : ring.x0, ring.y0 = ring.y0 < 0 ? 0 : ring.y0;
-                        ring.x1 = ring.x1 > w * 256 ? w * 256 : ring.x1, ring.y1 = ring.y1 > h * 256 ? h * 256 : ring.y1;
-                        ui_kit_focus_ring(ui, &ring);
-                }
-        }
+        ui_glass_mark(ui, x, 0, side, UI_ICON_LINK, lifted, keyed);
+        (void)symbol;
+        ui_card_theme_give(&kept);
+}
+
+// The same glass mark alone, side across, in a picture of its own (side by side, premultiplied, cleared first): what the compositor lays
+// over a picture where a small round action is (the Scenes overview's brush, a curated card's source), one look for all of them.
+static void ui_glass_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int symbol,
+                                    int lifted, int keyed)
+{
+        struct ui address_to ui = &ui_source_ui;
+        struct ui_card_theme kept;
+        if (!pixels || side <= 0 || symbol < 0 || symbol >= UI_ICON_COUNT)
+                return;
+        for (int row = 0; row < side; row++)
+                memory_zero(pixels + (positive)row * pitch, (positive)side * 4);
+        ui_card_theme_take(&kept, theme, accent);
+        ui_card_ui(ui, pixels, pitch, side, side, scale, null, null);
+        ui_glass_mark(ui, 0, 0, side, symbol, lifted, keyed);
         ui_card_theme_give(&kept);
 }
 

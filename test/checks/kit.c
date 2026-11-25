@@ -6060,6 +6060,18 @@ static fn check_kit_colour(void)
                 check("colour wheel: recorded, its disc is runs of its own tones and dots, every table read whole, the processor's pixels both ways",
                       !scene.lost && runs > (positive)k.side && reach <= scene.used && !differ);
         }
+        // The kit's glass mark (a curated card's source, the overview's brush): low opacity at rest, lifted more opaque, the symbol over it.
+        {
+                static unsigned int mark[40 * 40];
+                unsigned int rest, lifted, centre;
+
+                ui_glass_mark_card_draw(mark, 40, 40, 100, UI_THEME_DARK, UI_ACCENT_DAWN, UI_ICON_LINK, 0, 0);
+                rest = mark[20 * 40 + 3] >> 24, centre = mark[20 * 40 + 20];
+                ui_glass_mark_card_draw(mark, 40, 40, 100, UI_THEME_DARK, UI_ACCENT_DAWN, UI_ICON_LINK, 1, 0);
+                lifted = mark[20 * 40 + 3] >> 24;
+                check("glass mark: a round mark low in opacity at rest (under half) and lifted (seven tenths), clear outside its disc",
+                      rest > 0 && rest < 0x80 && lifted >= 0xb0 && !mark[0] && !mark[39] && centre >> 24 >= rest);
+        }
         // At twice the scale its parts are twice as large, and the disc's edge is the same red.
         ui.scale = 200;
         ui_colour_draw(&ui, &k, 0, 0, 320, 280);

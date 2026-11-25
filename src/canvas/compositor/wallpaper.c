@@ -1140,6 +1140,24 @@ static void compositor_wall_edit(int screen, int how)
         compositor_wall_editor_damage();
 }
 
+// The editor opened on desktop Scene number (from 1) of a screen: that Scene shown first, then the editor over it (the Scenes overview's
+// brush on a Scene's card, the desktop's menu). A number the screen has no desktop Scene of opens it on the Scene shown.
+static void compositor_wall_edit_scene(int screen, unsigned int number)
+{
+        unsigned int seen = 0;
+
+        compositor_spaces_ensure();
+        if (screen < 0 || screen >= compositor_output_count())
+                screen = 0;
+        for (unsigned int i = 0; i < compositor.spaces.count && number; i++)
+                if (compositor.spaces.list[i].screen == screen && compositor.spaces.list[i].kind == COMPOSITOR_SPACE_DESKTOP && ++seen == number)
+                {
+                        compositor_space_activate(screen, compositor.spaces.list[i].id);
+                        break;
+                }
+        compositor_wall_edit(screen, 1);
+}
+
 // The editor shut at once, with no motion (the screens changed under it).
 static void compositor_wall_editor_shut(void)
 {
