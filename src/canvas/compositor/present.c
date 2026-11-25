@@ -963,8 +963,9 @@ HOT static void compositor_present(void)
 */
 static struct
 {
-        int ready;          // the words were read
-        unsigned int stamp; // COMPOSITOR_WALL_DIR's change time when they were read, 0 with no such directory
+        int ready;            // the words were read
+        unsigned int stamp;   // COMPOSITOR_WALL_DIR's change time when they were read, 0 with no such directory
+        unsigned int sharpen; // the strength a picture is sharpened by (compositor_wall_strength), read with them
 } compositor_wall_rows;
 
 /*
@@ -1083,19 +1084,118 @@ static int compositor_wall_picture_of(const char *word, char *path, positive roo
 
 static b32 ui_image_measure(const p8 *file, positive size, unsigned int most, unsigned int want_w, unsigned int want_h, unsigned int *width,
                             unsigned int *height);
-static unsigned int *ui_image_decode_at(const p8 *file, positive size, int *width_out, int *height_out, unsigned int most, unsigned int want_w,
-                                        unsigned int want_h);
+static unsigned int *ui_image_decode_clean(const p8 *file, positive size, int *width_out, int *height_out, unsigned int most, unsigned int want_w,
+                                           unsigned int want_h);
+static b32 ui_picture_for_screen(unsigned int *into, positive pitch, positive w, positive h, const unsigned int *picture, positive width,
+                                 positive height, unsigned int strength);
+
+/*
+        What a picture was made into for a screen's size is kept, so the decode, the cleaning, the resampling and the sharpening (a few
+        hundred milliseconds for a 50-megapixel original) are done once for each size: COMPOSITOR_WALL_CACHE_DIR/KEY, KEY 16 hex digits
+        of the FNV-1a hash of the picture's path, its file's change stamp, the size, the strength and COMPOSITOR_WALL_CACHE_VERSION;
+        the file "MWWP", w, h and the strength (32 bits each) and then the w by h pixels, a row after a row. The directory is on tmpfs,
+        so a boot makes each again; a file is written whole under a name of its own and renamed over the key, so a reader finds the
+        whole of one or none, and one whose head is not the size and strength asked is made again. The learned stage's state is in
+        the key too (its licence and its model file's stamp, enhance.c's), so a model fetched later, or the stage turned, makes it again.
+*/
+#define COMPOSITOR_WALL_CACHE_DIR "/run/moonwater/wallpaper"
+#define COMPOSITOR_WALL_CACHE_VERSION 1u
+#define COMPOSITOR_WALL_CACHE_HEAD 16u
+
+// The strength kept (SETTING_WALLPAPER_SHARPEN_PATH, 0 to 100), the default when none is or it says something else.
+static unsigned int compositor_wall_strength(void)
+{
+        char word[16];
+        long got = windows_read_line(SETTING_WALLPAPER_SHARPEN_PATH, word, sizeof(word), FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+        unsigned int value = 0;
+        long at = 0;
+
+        while (at < got && word[at] >= '0' && word[at] <= '9' && value <= 100)
+                value = value * 10 + (unsigned int)(word[at++] - '0');
+        return at && at == got && value <= 100 ? value : SETTING_WALLPAPER_SHARPEN_DEFAULT;
+}
+
+static void compositor_wall_cache_name(char *into, const char *path, unsigned int stamp, int w, int h, unsigned int strength, unsigned int stage)
+{
+        p64 hash = 14695981039346656037ull;
+        unsigned int words[6] = {stamp, (unsigned int)w, (unsigned int)h, strength, stage, COMPOSITOR_WALL_CACHE_VERSION};
+        positive at = sizeof(COMPOSITOR_WALL_CACHE_DIR "/") - 1;
+
+        for (const char *c = path; *c; c++)
+                hash = (hash ^ (p8)*c) * 1099511628211ull;
+        for (positive k = 0; k < sizeof(words); k++)
+                hash = (hash ^ ((const p8 *)words)[k]) * 1099511628211ull;
+        memory_copy(into, COMPOSITOR_WALL_CACHE_DIR "/", at);
+        for (int digit = 0; digit < 16; digit++)
+                into[at + (positive)digit] = "0123456789abcdef"[hash >> (60 - 4 * digit) & 15];
+        into[at + 16] = 0;
+}
+
+static int compositor_wall_cache_read(const char *name, unsigned int *into, int pitch, int w, int h, unsigned int strength)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)name, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        p32 head[4];
+        int whole = 0;
+
+        if (handle < 0)
+                return 0;
+        if (system_read_retry((positive)handle, (p8 *)head, sizeof(head)) == (bipolar)sizeof(head) && !memory_compare(head, "MWWP", 4) &&
+            head[1] == (p32)w && head[2] == (p32)h && head[3] == strength)
+        {
+                whole = 1;
+                for (int y = 0; whole && y < h; y++)
+                        whole = system_read_retry((positive)handle, (p8 *)(into + (long)y * pitch), (positive)w * 4) == (bipolar)((positive)w * 4);
+        }
+        system_close(handle);
+        return whole;
+}
+
+static void compositor_wall_cache_write(const char *name, const unsigned int *from, int pitch, int w, int h, unsigned int strength)
+{
+        char made[sizeof(COMPOSITOR_WALL_CACHE_DIR "/") + 16 + 8];
+        p32 head[4] = {0, (p32)w, (p32)h, strength};
+        bipolar handle;
+        int whole;
+
+        memory_copy(head, "MWWP", 4);
+        (void)compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_WALL_CACHE_DIR, 0755, 0, 0, 0);
+        string_copy((string_address)made, (string_address)name);
+        string_append_bounded((string_address)made, (string_address) ".new", sizeof(made));
+        handle = system_open_at_mode(AT_FDCWD, (string_address)made, FILE_WRITE | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (handle < 0)
+                return;
+        whole = system_write_all((b32)handle, (p8 *)head, sizeof(head)) == (bipolar)sizeof(head);
+        for (int y = 0; whole && y < h; y++)
+                whole = system_write_all((b32)handle, (p8 *)(from + (long)y * pitch), (positive)w * 4) == (bipolar)((positive)w * 4);
+        system_close(handle);
+        if (whole)
+                (void)compositor_call(syscall(renameat2), (positive)AT_FDCWD, (positive)made, (positive)AT_FDCWD, (positive)name, 0, 0);
+        else
+                (void)system_remove_at(AT_FDCWD, (string_address)made, 0);
+}
 
 #include "../enhance.c" // the learned stage: restore and double the decoded picture, grade the screen's (no model, no stage)
 
 static int compositor_wall_picture(const char *path, unsigned int *into, int pitch, int w, int h)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        bipolar handle;
         p8 *file;
-        positive got = 0, vis_w, vis_h, ox, oy;
-        unsigned int *picture = null, pw = 0, ph = 0;
+        positive got = 0;
+        unsigned int *picture = null, pw = 0, ph = 0, stamp = 0, strength = compositor_wall_strength();
         int width = 0, height = 0;
+        char kept[sizeof(COMPOSITOR_WALL_CACHE_DIR "/") + 16 + 8];
+        unsigned int stage = 0;
 
+        // Made for this size already, from this file as it is now (and the learned stage as it is now).
+        compositor_wall_look(path, &stamp);
+#ifdef ENHANCE_MODEL_DIR
+        compositor_wall_look(ENHANCE_MODEL_PATH, &stage);
+        stage ^= (unsigned int)(enhance_wallpaper_licence() + 1) * 2654435761u;
+#endif
+        compositor_wall_cache_name(kept, path, stamp, w, h, strength, stage);
+        if (compositor_wall_cache_read(kept, into, pitch, w, h, strength))
+                return 1;
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
         if (handle < 0)
                 return 0;
         file = (p8 *)memory_checked(COMPOSITOR_WALL_FILE_MOST);
@@ -1112,7 +1212,7 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
                 return 0;
         if (got < COMPOSITOR_WALL_FILE_MOST && ui_image_measure(file, got, COMPOSITOR_WALL_SIDE_MOST, (unsigned int)w, (unsigned int)h, &pw, &ph) &&
             (positive)pw * ph <= COMPOSITOR_WALL_PIXELS_MOST)
-                picture = ui_image_decode_at(file, got, &width, &height, COMPOSITOR_WALL_SIDE_MOST, (unsigned int)w, (unsigned int)h);
+                picture = ui_image_decode_clean(file, got, &width, &height, COMPOSITOR_WALL_SIDE_MOST, (unsigned int)w, (unsigned int)h);
         memory_free(file, COMPOSITOR_WALL_FILE_MOST);
         if (!picture)
                 return 0;
@@ -1124,49 +1224,22 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
         if (enhancing)
                 picture = enhance_wallpaper_picture(&enhancer, picture, &width, &height, w, h);
 #endif
-        if ((positive)width * (positive)h > (positive)height * (positive)w)
-                vis_h = (positive)height, vis_w = (positive)height * (positive)w / (positive)h, ox = ((positive)width - vis_w) / 2, oy = 0;
-        else
-                vis_w = (positive)width, vis_h = (positive)width * (positive)h / (positive)w, ox = 0, oy = ((positive)height - vis_h) / 2;
-        vis_w = vis_w ? vis_w : 1, vis_h = vis_h ? vis_h : 1;
-        if (vis_w <= (positive)w && vis_h <= (positive)h)
+        // Cut to the screen's shape, made its size in linear light and sharpened (ui.c's ui_picture_for_screen).
+        if (!ui_picture_for_screen(into, (positive)pitch, (positive)w, (positive)h, picture, (positive)width, (positive)height, strength))
         {
-                memory_resample_u32_rect(into, (positive)pitch, (positive)w, (positive)h,
-                                         picture + oy * (positive)width + ox, (positive)width,
-                                         vis_w, vis_h, (positive)w, (positive)h, 0, 0);
-                for (int y = 0; y < h; y++)
-                        memory_or_u32(into + (long)y * pitch, into + (long)y * pitch, (positive)w, 0xff000000u);
-        }
-        else
-        for (int y = 0; y < h; y++)
-        {
-                positive y0 = oy + (positive)y * vis_h / (positive)h, y1 = oy + ((positive)y + 1) * vis_h / (positive)h;
-                unsigned int *restrict dst_row = into + (long)y * pitch;
-
-                y1 = y1 > y0 ? y1 : y0 + 1;
-                for (int x = 0; x < w; x++)
-                {
-                        positive x0 = ox + (positive)x * vis_w / (positive)w, x1 = ox + ((positive)x + 1) * vis_w / (positive)w, r = 0, g = 0, b = 0, n;
-
-                        x1 = x1 > x0 ? x1 : x0 + 1, n = (y1 - y0) * (x1 - x0);
-                        for (positive sy = y0; sy < y1; sy++)
-                        {
-                                const unsigned int *src_row = picture + sy * (positive)width;
-                                for (positive sx = x0; sx < x1; sx++)
-                                {
-                                        unsigned int px = src_row[sx];
-
-                                        r += px >> 16 & 255, g += px >> 8 & 255, b += px & 255;
-                                }
-                        }
-                        dst_row[x] = 0xff000000u | (unsigned int)(r / n) << 16 | (unsigned int)(g / n) << 8 | (unsigned int)(b / n);
-                }
+#ifdef ENHANCE_MODEL_DIR
+                if (enhancing)
+                        enhance_model_drop(&enhancer);
+#endif
+                memory_free(picture, (positive)width * (positive)height * 4);
+                return 0;
         }
 #ifdef ENHANCE_MODEL_DIR
         if (enhancing)
                 enhance_grade(&enhancer, into, (positive)pitch, (positive)w, (positive)h, (f64)licence / 100.0, 0),
                     enhance_model_drop(&enhancer);
 #endif
+        compositor_wall_cache_write(kept, into, pitch, w, h, strength);
         memory_free(picture, (positive)width * (positive)height * 4);
         return 1;
 }
@@ -1352,7 +1425,7 @@ static void compositor_wall_keep(void)
 
                 words = hash_fnv1a(words * 16777619u, word, string_length((string_address)word));
         }
-        now[5] = compositor_wall_rows.stamp ^ compositor_ground << 7, now[6] = compositor_walls_gen();
+        now[5] = compositor_wall_rows.stamp ^ compositor_ground << 7 ^ compositor_wall_rows.sharpen * 2654435761u, now[6] = compositor_walls_gen();
         now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0, now[8] = words;
         if (!memory_compare(compositor_wall_key, now, sizeof(now)))
         {

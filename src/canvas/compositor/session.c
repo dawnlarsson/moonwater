@@ -313,6 +313,7 @@ static void compositor_wall_read(void)
 
         compositor_walls_read();
         compositor_wall_rows.stamp = compositor_wall_look(COMPOSITOR_WALL_DIR, &stamp) == 0040000u ? stamp | 1u : 0;
+        compositor_wall_rows.sharpen = compositor_wall_strength();
         compositor_wall_rows.ready = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
@@ -1243,7 +1244,7 @@ static const struct compositor_setting_spec compositor_setting_specs[] = {
         CS_G(SETTING_GPU_PATH, COMPOSITOR_SET_GPU),
         {"/root/canvas.gpu.tiled", COMPOSITOR_SET_GPU, COMPOSITOR_BIND_INT_EQ, 0, 0, 0, &compositor_tiled_on}, // the opt-in: a switch, on is 0
         CS_G(SETTING_WALLPAPER_SCENES_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_PICTURES_PATH, COMPOSITOR_SET_WALL),
-        CS_G(SETTING_WALLPAPER_CURATED_PATH, COMPOSITOR_SET_WALL),
+        CS_G(SETTING_WALLPAPER_CURATED_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_SHARPEN_PATH, COMPOSITOR_SET_WALL),
         CS_G(SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK),
         CS_G(SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK),
         CS_G(SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK),

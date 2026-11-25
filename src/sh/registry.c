@@ -151,6 +151,10 @@
 #define SETTING_WALLPAPER_WORD 96  // the bytes of a word, its end with them: auto, dark, white, picture:NAME or curated:HEX
 #define SETTING_WALLPAPER_NAME 48  // and of a picture's name, letters, digits and dashes
 #define SETTING_WALLPAPER_MINI 512 // a miniature's longer side, at the most
+// How much a picture wallpaper is sharpened once it is made the screen's size (CAS's strength, 0 to 100): a number a line, none kept
+// the default.
+#define SETTING_WALLPAPER_SHARPEN_PATH "/root/canvas.wallpaper.sharpen"
+#define SETTING_WALLPAPER_SHARPEN_DEFAULT 35
 // A curated wallpaper's credit, as the list says it after its digest and id (a tab before each): its author and its licence, each at most
 // SETTING_WALLPAPER_CREDIT bytes less one (the command cuts a longer one at a character), and its source page, the address of the page that
 // carries its licence and history (setting_wallpaper_source), at most SETTING_WALLPAPER_SOURCE less one: a Commons title is 255 bytes at

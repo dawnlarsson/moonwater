@@ -22200,6 +22200,11 @@ static inline INLINE CONST b16 ui_jpeg_held16(b32 value)
         return (b16)(value > 32767 ? 32767 : value < -32768 ? -32768 : value);
 }
 
+static inline INLINE CONST p8 ui_jpeg_held8(b32 value)
+{
+        return (p8)(value < 0 ? 0 : value > 255 ? 255 : value);
+}
+
 static inline INLINE CONST p8 ui_jpeg_sample(b32 value)
 {
         return (p8)((value > 127 ? 127 : value < -128 ? -128 : value) + 128);
@@ -22979,6 +22984,112 @@ static fn ui_jpeg_release(struct ui_jpeg address_to j)
 }
 
 /*
+        A component's plane cleaned within what its own quantizers allow (a decode for a wallpaper asks for it): the JPEG's blocking and
+        ringing, and nothing a quantizer could not have made. On the plane's own block grid at its scale, before anything is
+        resampled, so a step is judged where the encoder made it:
+
+        blocking. Each edge between two blocks, a row or a column at a time: where the step across it is below what the DC and the
+        first two ACs' quantizers could leave (their steps over 8, the largest error a block's edge can carry) and each side is flat
+        to half that, the two samples at the edge are moved toward each other by H.264's normal filter, ((q0 - p0) * 4 + (p1 - q1) + 4)
+        >> 3, held to half the threshold; at full scale the second samples take half of it. A larger step is a real edge, a busier
+        side is texture, and both are left as they are.
+
+        ringing. In a block that holds a strong edge (a step of four times the threshold of its middle frequencies' quantizers), each
+        sample becomes the mean of those of its 3 by 3 neighbours within that threshold of it (a sigma filter): the ripples the
+        quantizer left about the edge go, the edge and the samples across it stay. A block with no such edge is not touched.
+
+        A file made at a high quality has quantizers of 1 to 3, whose thresholds are under 2: nothing moves at all.
+*/
+static fn ui_jpeg_clean(struct ui_jpeg_component address_to c)
+{
+        const p16 address_to q = c->quantization;
+        b32 step = ((b32)q[0] + 2 * (b32)q[1] + 2 * (b32)q[8] + 4) / 8, middle = 0, flat = step / 2, most = step / 2;
+        positive s = c->scale, w = c->width, h = c->height;
+        p8 address_to plane = c->plane;
+
+        for (int k = 10; k <= 30; k++)
+                middle += q[ui_jpeg_natural[k]];
+        middle = (middle + 84) / 168;
+        if (s < 2 || w < 2 || h < 2)
+                return;
+        // The steps across the block edges: down each column (positive 1 apart) and along each row (pitch apart).
+        for (int across = 0; step >= 2 && across < 2; across++)
+        {
+                positive lines = across ? w : h, length = across ? h : w, line_step = across ? 1 : c->pitch, sample = across ? c->pitch : 1;
+
+                for (positive line = 0; line < lines; line++)
+                {
+                        p8 address_to at = plane + line * line_step;
+
+                        for (positive edge = s; edge < length; edge += s)
+                        {
+                                p8 address_to p0 = at + (edge - 1) * sample, address_to q0 = at + edge * sample;
+                                p8 address_to p1 = edge >= 2 ? p0 - sample : p0, address_to q1 = edge + 1 < length ? q0 + sample : q0;
+                                b32 d = (b32)*q0 - (b32)*p0, delta;
+
+                                if (d >= step || -d >= step || (b32)*p1 - (b32)*p0 > flat || (b32)*p0 - (b32)*p1 > flat ||
+                                    (b32)*q1 - (b32)*q0 > flat || (b32)*q0 - (b32)*q1 > flat)
+                                        continue;
+                                delta = (d * 4 + ((b32)*p1 - (b32)*q1) + 4) >> 3;
+                                delta = delta > most ? most : delta < -most ? -most : delta;
+                                *p0 = ui_jpeg_held8((b32)*p0 + delta), *q0 = ui_jpeg_held8((b32)*q0 - delta);
+                                if (s >= 8 && p1 != p0 && q1 != q0)
+                                        *p1 = ui_jpeg_held8((b32)*p1 + delta / 2), *q1 = ui_jpeg_held8((b32)*q1 - delta / 2);
+                        }
+                }
+        }
+        // The ringing about strong edges, block by block, each from a copy of it and its border as they were.
+        if (middle < 2 || s < 4)
+                return;
+        p8 copy[(8 + 2) * (8 + 2)];
+        for (positive by = 0; by * s < h; by++)
+                for (positive bx = 0; bx * s < w; bx++)
+                {
+                        positive x0 = bx * s, y0 = by * s, x1 = x0 + s < w ? x0 + s : w, y1 = y0 + s < h ? y0 + s : h;
+                        b32 strongest = 0;
+
+                        for (positive y = y0; y < y1; y++)
+                                for (positive x = x0; x + 1 < x1; x++)
+                                {
+                                        b32 d = (b32)plane[y * c->pitch + x + 1] - (b32)plane[y * c->pitch + x];
+                                        strongest = d > strongest ? d : -d > strongest ? -d : strongest;
+                                }
+                        for (positive y = y0; y + 1 < y1; y++)
+                                for (positive x = x0; x < x1; x++)
+                                {
+                                        b32 d = (b32)plane[(y + 1) * c->pitch + x] - (b32)plane[y * c->pitch + x];
+                                        strongest = d > strongest ? d : -d > strongest ? -d : strongest;
+                                }
+                        if (strongest < 4 * middle)
+                                continue;
+                        for (positive y = 0; y < y1 - y0 + 2; y++)
+                                for (positive x = 0; x < x1 - x0 + 2; x++)
+                                {
+                                        positive sy = y0 + y ? y0 + y - 1 : 0, sx = x0 + x ? x0 + x - 1 : 0;
+
+                                        sy = sy < h ? sy : h - 1, sx = sx < w ? sx : w - 1;
+                                        copy[y * 10 + x] = plane[sy * c->pitch + sx];
+                                }
+                        for (positive y = y0; y < y1; y++)
+                                for (positive x = x0; x < x1; x++)
+                                {
+                                        const p8 address_to centre = copy + (y - y0 + 1) * 10 + (x - x0 + 1);
+                                        b32 sum = 0, count = 0;
+
+                                        for (int dy = -1; dy <= 1; dy++)
+                                                for (int dx = -1; dx <= 1; dx++)
+                                                {
+                                                        b32 n = centre[dy * 10 + dx], d = n - (b32)*centre;
+
+                                                        if (d <= middle && -d <= middle)
+                                                                sum += n, count++;
+                                                }
+                                        plane[y * c->pitch + x] = (p8)((sum + count / 2) / count);
+                                }
+                }
+}
+
+/*
         A component's row y of the picture, at the picture's width: its plane's own row where it is full size, else made in into by the
         triangle filters (by two down, or by two across or both where its plane is more than two samples wide, at a scale above an
         eighth, as libjpeg chooses them) or a box of its samples for any other ratio. The rows above the first and below the last are those rows again, as libjpeg's
@@ -23076,10 +23187,11 @@ static unsigned int address_to ui_picture_orient(unsigned int address_to pixels,
 
 /*
         A JPEG file decoded: at most most each way (UI_JPEG_SIDE_MOST at the most) before it is scaled, at the fewest eighths that still
-        give want_w by want_h as it will stand (0 by 0: whole), turned as its EXIF says. Null for no JPEG, or one this cannot decode.
+        give want_w by want_h as it will stand (0 by 0: whole), its planes cleaned when clean is set (ui_jpeg_clean), turned as its
+        EXIF says. Null for no JPEG, or one this cannot decode.
 */
 static unsigned int address_to ui_jpeg_decode_at(const p8 address_to file, positive size, int address_to width_out, int address_to height_out, unsigned int most,
-                                                 unsigned int want_w, unsigned int want_h)
+                                                 unsigned int want_w, unsigned int want_h, b32 clean)
 {
         struct ui_jpeg address_to j;
         unsigned int address_to pixels = null, w, h;
@@ -23125,6 +23237,8 @@ static unsigned int address_to ui_jpeg_decode_at(const p8 address_to file, posit
                                                 last = block[k] ? k : 0;
                                         ui_jpeg_put(c, bx, by, block, last);
                                 }
+                if (clean && c->seen)
+                        ui_jpeg_clean(c);
         }
         w = j->out_w, h = j->out_h;
         row_room = ((positive)w + 64) * 2 + 64;
@@ -23232,7 +23346,20 @@ static unsigned int address_to ui_image_decode_at(const p8 address_to file, posi
         if (kind == UI_IMAGE_PNG)
                 return ui_png_decode_most(file, size, width_out, height_out, most);
         if (kind == UI_IMAGE_JPEG)
-                return ui_jpeg_decode_at(file, size, width_out, height_out, most, want_w, want_h);
+                return ui_jpeg_decode_at(file, size, width_out, height_out, most, want_w, want_h, false);
+        return null;
+}
+
+// The same for a wallpaper: a JPEG's blocking and ringing cleaned within what its quantizers allow (ui_jpeg_clean).
+static unsigned int address_to ui_image_decode_clean(const p8 address_to file, positive size, int address_to width_out, int address_to height_out,
+                                                     unsigned int most, unsigned int want_w, unsigned int want_h)
+{
+        unsigned int kind = ui_image_kind(file, size);
+
+        if (kind == UI_IMAGE_PNG)
+                return ui_png_decode_most(file, size, width_out, height_out, most);
+        if (kind == UI_IMAGE_JPEG)
+                return ui_jpeg_decode_at(file, size, width_out, height_out, most, want_w, want_h, true);
         return null;
 }
 
@@ -23240,6 +23367,344 @@ static unsigned int address_to ui_image_decode_at(const p8 address_to file, posi
 static unsigned int address_to ui_image_decode(const p8 address_to file, positive size, int address_to width_out, int address_to height_out)
 {
         return ui_image_decode_at(file, size, width_out, height_out, UI_IMAGE_MOST, 0, 0);
+}
+
+/* ---- pictures: made for a screen ----
+
+        A wallpaper is made once for each screen's size (the compositor keeps what it made, present.c's compositor_wall_cache): the
+        picture decoded at the fewest eighths that still cover the screen, its JPEG blocking and ringing cleaned within what its own
+        quantizers allow (ui_image_decode_clean), then here cut to the screen's shape at its middle and made the screen's size in
+        linear light, by an area average over whole steps where it is at least twice as large and Lanczos-3 for what is left, and
+        last sharpened a touch by AMD's contrast-adaptive sharpening (CAS), strong where the detail is soft, nothing where it is sharp
+        already, and held to the range of each pixel's neighbours so it leaves no halo.
+
+        Light adds in linear light, so that is where the average and the filter work: the sRGB samples to 16-bit linear values by
+        ui_picture_linear, and back to a byte by ui_picture_srgb (the byte whose linear value is nearest), made once from the first.
+        Lanczos-3's lobes are 14-bit weights summing to 16384 each, the columns' pass made once a row into a ring of rows the rows'
+        pass reads (a row of 64-bit sums, the lobes' overshoot held at the end).
+*/
+static const p16 ui_picture_linear[256] = {
+        0, 20, 40, 60, 80, 99, 119, 139, 159, 179, 199, 219, 241, 264, 288, 313,
+        340, 367, 396, 427, 458, 491, 526, 562, 599, 637, 677, 718, 761, 805, 851, 898,
+        947, 997, 1048, 1101, 1156, 1212, 1270, 1330, 1391, 1453, 1517, 1583, 1651, 1720, 1790, 1863,
+        1937, 2013, 2090, 2170, 2250, 2333, 2418, 2504, 2592, 2681, 2773, 2866, 2961, 3058, 3157, 3258,
+        3360, 3464, 3570, 3678, 3788, 3900, 4014, 4129, 4247, 4366, 4488, 4611, 4736, 4864, 4993, 5124,
+        5257, 5392, 5530, 5669, 5810, 5953, 6099, 6246, 6395, 6547, 6700, 6856, 7014, 7174, 7335, 7500,
+        7666, 7834, 8004, 8177, 8352, 8528, 8708, 8889, 9072, 9258, 9445, 9635, 9828, 10022, 10219, 10417,
+        10619, 10822, 11028, 11235, 11446, 11658, 11873, 12090, 12309, 12530, 12754, 12980, 13209, 13440, 13673, 13909,
+        14146, 14387, 14629, 14874, 15122, 15371, 15623, 15878, 16135, 16394, 16656, 16920, 17187, 17456, 17727, 18001,
+        18277, 18556, 18837, 19121, 19407, 19696, 19987, 20281, 20577, 20876, 21177, 21481, 21787, 22096, 22407, 22721,
+        23038, 23357, 23678, 24002, 24329, 24658, 24990, 25325, 25662, 26001, 26344, 26688, 27036, 27386, 27739, 28094,
+        28452, 28813, 29176, 29542, 29911, 30282, 30656, 31033, 31412, 31794, 32179, 32567, 32957, 33350, 33745, 34143,
+        34544, 34948, 35355, 35764, 36176, 36591, 37008, 37429, 37852, 38278, 38706, 39138, 39572, 40009, 40449, 40891,
+        41337, 41785, 42236, 42690, 43147, 43606, 44069, 44534, 45002, 45473, 45947, 46423, 46903, 47385, 47871, 48359,
+        48850, 49344, 49841, 50341, 50844, 51349, 51858, 52369, 52884, 53401, 53921, 54445, 54971, 55500, 56032, 56567,
+        57105, 57646, 58190, 58737, 59287, 59840, 60396, 60955, 61517, 62082, 62650, 63221, 63795, 64372, 64952, 65535
+};
+static p8 ui_picture_srgb[65536];
+static b32 ui_picture_srgb_made;
+
+static fn ui_picture_srgb_make(void)
+{
+        positive byte = 0;
+
+        for (positive value = 0; value < 65536; value++)
+        {
+                while (byte < 255 && (positive)ui_picture_linear[byte] + ui_picture_linear[byte + 1] < 2 * value)
+                        byte++;
+                ui_picture_srgb[value] = (p8)byte;
+        }
+        ui_picture_srgb_made = true;
+}
+
+// Lanczos-3 at t (in the source's samples, scaled to the filter's width).
+static f32 ui_picture_lanczos(f32 t)
+{
+        f32 a = t < 0 ? -t : t, pi = 3.14159265358979f;
+
+        if (a < 1e-6f)
+                return 1;
+        if (a >= 3)
+                return 0;
+        return 3 * fast_sin(pi * a) * fast_sin(pi * a / 3) / (pi * pi * a * a);
+}
+
+/*
+        The taps of an output's samples from in of the source's (a row's columns or a column's rows): count of them each, from first
+        (the source's ends repeated where the filter reaches past them), in 14-bit weights that sum to 16384. Each output is centred
+        at (x + 0.5) * in / out - 0.5; the filter is widened by in / out when that is more than 1.
+*/
+struct ui_picture_taps
+{
+        positive count;
+        b32 address_to first;
+        b16 address_to weight;
+        positive bytes;
+};
+
+static b32 ui_picture_taps_make(struct ui_picture_taps address_to t, positive in, positive out)
+{
+        f32 scale = (f32)in / (f32)out, width = scale > 1 ? scale > 10 ? 10 : scale : 1;
+        positive count = (positive)(3 * width) * 2 + 2;
+
+        t->count = count;
+        t->bytes = out * (sizeof(b32) + count * sizeof(b16));
+        if (!(t->first = (b32 address_to)memory_checked(t->bytes)))
+                return false;
+        t->weight = (b16 address_to)(t->first + out);
+        for (positive x = 0; x < out; x++)
+        {
+                f32 centre = ((f32)x + 0.5f) * scale - 0.5f, edge = centre - 3 * width, sum = 0, raw[64];
+                b32 start = (b32)edge, most = 0, total = 0;
+                b16 address_to w = t->weight + x * count;
+
+                // The first sample inside the filter: the floor of its edge, and one on.
+                start -= (f32)start > edge, start++;
+                t->first[x] = start;
+                for (positive k = 0; k < count; k++)
+                        sum += raw[k] = ui_picture_lanczos(((f32)(start + (b32)k) - centre) / width);
+                for (positive k = 0; k < count; k++)
+                {
+                        w[k] = (b16)(raw[k] / sum * 16384.0f + (raw[k] >= 0 ? 0.5f : -0.5f));
+                        total += w[k];
+                        most = w[k] > w[most] ? (b32)k : most;
+                }
+                w[most] = (b16)(w[most] + 16384 - total);
+        }
+        return true;
+}
+
+static fn ui_picture_taps_free(struct ui_picture_taps address_to t)
+{
+        if (t->first)
+                memory_free(t->first, t->bytes), t->first = null;
+}
+
+/*
+        from (from_w by from_h, a row from_w words) at its visible part ox, oy, vw by vh, made w by h into into (pitch words a row),
+        opaque. False: no memory for it (into is not written).
+*/
+static b32 ui_picture_resample(unsigned int address_to into, positive pitch, positive w, positive h, const unsigned int address_to from, positive from_w,
+                               positive ox, positive oy, positive vw, positive vh)
+{
+        positive m = vw / w < vh / h ? vw / w : vh / h, sw, sh, ring_rows, ring_bytes, planes_bytes = 0, row_bytes;
+        p16 address_to planes = null;
+        b32 address_to ring = null;
+        b32 address_to ring_of = null;
+        b64 address_to sums = null;
+        p16 address_to row = null;
+        struct ui_picture_taps across = {0}, down = {0};
+        b32 made = false;
+
+        if (!ui_picture_srgb_made)
+                ui_picture_srgb_make();
+        // The whole steps of a large reduction first: each sample the mean of an m by m square of the visible part, in linear light,
+        // the squares centred on it.
+        if (m >= 2)
+        {
+                sw = vw / m, sh = vh / m, ox += (vw - sw * m) / 2, oy += (vh - sh * m) / 2;
+                planes_bytes = sw * sh * 3 * sizeof(p16);
+                if (!(planes = (p16 address_to)memory_checked(planes_bytes)))
+                        return false;
+                for (positive y = 0; y < sh; y++)
+                        for (positive x = 0; x < sw; x++)
+                        {
+                                p64 r = 0, g = 0, b = 0;
+
+                                for (positive dy = 0; dy < m; dy++)
+                                {
+                                        const unsigned int address_to at = from + (oy + y * m + dy) * from_w + ox + x * m;
+
+                                        for (positive dx = 0; dx < m; dx++)
+                                                r += ui_picture_linear[at[dx] >> 16 & 255], g += ui_picture_linear[at[dx] >> 8 & 255], b += ui_picture_linear[at[dx] & 255];
+                                }
+                                planes[(y * sw + x) * 3] = (p16)((r + m * m / 2) / (m * m));
+                                planes[(y * sw + x) * 3 + 1] = (p16)((g + m * m / 2) / (m * m));
+                                planes[(y * sw + x) * 3 + 2] = (p16)((b + m * m / 2) / (m * m));
+                        }
+        }
+        else
+                sw = vw, sh = vh;
+        if (!ui_picture_taps_make(&across, sw, w) || !ui_picture_taps_make(&down, sh, h))
+                goto done;
+        ring_rows = down.count;
+        ring_bytes = ring_rows * w * 3 * sizeof(b32);
+        row_bytes = sw * 3 * sizeof(p16);
+        ring = (b32 address_to)memory_checked(ring_bytes);
+        ring_of = (b32 address_to)memory_checked(ring_rows * sizeof(b32));
+        sums = (b64 address_to)memory_checked(w * 3 * sizeof(b64));
+        row = (p16 address_to)memory_checked(row_bytes);
+        if (!ring || !ring_of || !sums || !row)
+                goto done;
+        for (positive k = 0; k < ring_rows; k++)
+                ring_of[k] = -1;
+        for (positive y = 0; y < h; y++)
+        {
+                unsigned int address_to out = into + y * pitch;
+
+                memory_zero(sums, w * 3 * sizeof(b64));
+                for (positive k = 0; k < down.count; k++)
+                {
+                        b32 source = down.first[y] + (b32)k;
+                        positive slot;
+                        b32 address_to hrow;
+                        b64 weight = down.weight[y * down.count + k];
+
+                        source = source < 0 ? 0 : source >= (b32)sh ? (b32)sh - 1 : source;
+                        slot = (positive)source % ring_rows, hrow = ring + slot * w * 3;
+                        // The columns' pass of a source row, once, into its slot of the ring.
+                        if (ring_of[slot] != source)
+                        {
+                                const p16 address_to line = planes + (positive)source * sw * 3;
+
+                                if (!planes)
+                                {
+                                        const unsigned int address_to at = from + (oy + (positive)source) * from_w + ox;
+
+                                        for (positive x = 0; x < sw; x++)
+                                                row[x * 3] = ui_picture_linear[at[x] >> 16 & 255], row[x * 3 + 1] = ui_picture_linear[at[x] >> 8 & 255],
+                                                row[x * 3 + 2] = ui_picture_linear[at[x] & 255];
+                                        line = row;
+                                }
+                                for (positive x = 0; x < w; x++)
+                                {
+                                        const b16 address_to tap = across.weight + x * across.count;
+                                        b32 r = 0, g = 0, b = 0;
+
+                                        for (positive t = 0; t < across.count; t++)
+                                        {
+                                                b32 at = across.first[x] + (b32)t;
+                                                positive i = (positive)(at < 0 ? 0 : at >= (b32)sw ? (b32)sw - 1 : at) * 3;
+
+                                                r += tap[t] * (b32)line[i], g += tap[t] * (b32)line[i + 1], b += tap[t] * (b32)line[i + 2];
+                                        }
+                                        hrow[x * 3] = (r + 2) >> 2, hrow[x * 3 + 1] = (g + 2) >> 2, hrow[x * 3 + 2] = (b + 2) >> 2;
+                                }
+                                ring_of[slot] = source;
+                        }
+                        for (positive x = 0; x < w * 3; x++)
+                                sums[x] += weight * hrow[x];
+                }
+                // The columns' 14 bits of weight less 2 and the rows' 14: back to 16-bit linear, the lobes' overshoot held, and to the
+                // byte nearest.
+                for (positive x = 0; x < w; x++)
+                {
+                        b64 r = (sums[x * 3] + (1 << 25)) >> 26, g = (sums[x * 3 + 1] + (1 << 25)) >> 26, b = (sums[x * 3 + 2] + (1 << 25)) >> 26;
+
+                        r = r < 0 ? 0 : r > 65535 ? 65535 : r, g = g < 0 ? 0 : g > 65535 ? 65535 : g, b = b < 0 ? 0 : b > 65535 ? 65535 : b;
+                        out[x] = 0xff000000u | (unsigned int)ui_picture_srgb[r] << 16 | (unsigned int)ui_picture_srgb[g] << 8 | ui_picture_srgb[b];
+                }
+        }
+        made = true;
+done:
+        ui_picture_taps_free(&across), ui_picture_taps_free(&down);
+        if (planes)
+                memory_free(planes, planes_bytes);
+        if (ring)
+                memory_free(ring, ring_bytes);
+        if (ring_of)
+                memory_free(ring_of, ring_rows * sizeof(b32));
+        if (sums)
+                memory_free(sums, w * 3 * sizeof(b64));
+        if (row)
+                memory_free(row, row_bytes);
+        return made;
+}
+
+/*
+        pixels (w by h, pitch words a row) sharpened in place by CAS (FidelityFX's CasFilter, its sharpen-only path) at strength 0 to
+        100 (its sharpness, 0 to 1): each channel's soft minimum and maximum (its cross and its 3 by 3, summed), amp = sqrt(min(mn,
+        2 - mx) / mx) held to 0..1, the cross weighted -amp / lerp(8, 5, sharpness), then held to the cross's own range, so a pixel
+        never goes past its neighbours (no halo). The rows above and below are read as they were, from a ring of three; the picture's
+        edges are repeated.
+*/
+static b32 ui_picture_sharpen(unsigned int address_to pixels, positive pitch, positive w, positive h, unsigned int strength)
+{
+        positive bytes = (w + 2) * 3 * sizeof(unsigned int);
+        f32 peak = -1.0f / (8.0f - 3.0f * (f32)(strength > 100 ? 100 : strength) / 100.0f);
+        unsigned int address_to rows;
+
+        if (!strength || w < 1 || h < 1)
+                return true;
+        if (!(rows = (unsigned int address_to)memory_checked(bytes)))
+                return false;
+        // Row r as it was in the ring's slot r % 3, its ends repeated one further: rows 0 and 1 first, then each next one before
+        // the row above it is written.
+#define UI_CAS_KEEP(r)                                                                                                          \
+        do                                                                                                                      \
+        {                                                                                                                       \
+                unsigned int address_to line = rows + ((r) % 3) * (w + 2);                                                     \
+                memory_copy(line + 1, pixels + (r) * pitch, w * 4);                                                             \
+                line[0] = line[1], line[w + 1] = line[w];                                                                       \
+        } while (0)
+        UI_CAS_KEEP(0);
+        if (h > 1)
+                UI_CAS_KEEP(1);
+        for (positive y = 0; y < h; y++)
+        {
+                if (y >= 1 && y + 1 < h)
+                        UI_CAS_KEEP(y + 1);
+                const unsigned int address_to at = rows + (y % 3) * (w + 2) + 1;
+                const unsigned int address_to up = y ? rows + ((y - 1) % 3) * (w + 2) + 1 : at;
+                const unsigned int address_to below = y + 1 < h ? rows + ((y + 1) % 3) * (w + 2) + 1 : at;
+                unsigned int address_to out = pixels + y * pitch;
+
+                for (positive x = 0; x < w; x++)
+                {
+                        unsigned int word = 0xff000000u;
+
+                        for (unsigned int shift = 0; shift < 24; shift += 8)
+                        {
+#define UI_CAS_AT(row, dx) ((b32)((row)[(b32)x + (dx)] >> shift & 255))
+                                b32 a = UI_CAS_AT(up, -1), b = UI_CAS_AT(up, 0), c = UI_CAS_AT(up, 1), d = UI_CAS_AT(at, -1), e = UI_CAS_AT(at, 0);
+                                b32 f = UI_CAS_AT(at, 1), g = UI_CAS_AT(below, -1), hh = UI_CAS_AT(below, 0), i = UI_CAS_AT(below, 1);
+#undef UI_CAS_AT
+                                b32 cross_mn = d < e ? d : e, cross_mx = d > e ? d : e, mn, mx, value;
+                                f32 amp, weight;
+
+                                cross_mn = f < cross_mn ? f : cross_mn, cross_mn = b < cross_mn ? b : cross_mn, cross_mn = hh < cross_mn ? hh : cross_mn;
+                                cross_mx = f > cross_mx ? f : cross_mx, cross_mx = b > cross_mx ? b : cross_mx, cross_mx = hh > cross_mx ? hh : cross_mx;
+                                mn = cross_mn, mx = cross_mx;
+                                mn = a < mn ? a : mn, mn = c < mn ? c : mn, mn = g < mn ? g : mn, mn = i < mn ? i : mn;
+                                mx = a > mx ? a : mx, mx = c > mx ? c : mx, mx = g > mx ? g : mx, mx = i > mx ? i : mx;
+                                mn += cross_mn, mx += cross_mx;
+                                if (!mx)
+                                        continue;
+                                amp = (f32)(mn < 510 - mx ? mn : 510 - mx) / (f32)mx;
+                                amp = narrow_square_root(amp < 0 ? 0 : amp > 1 ? 1 : amp);
+                                weight = amp * peak;
+                                value = (b32)(((f32)(b + d + f + hh) * weight + (f32)e) / (1.0f + 4.0f * weight) + 0.5f);
+                                value = value < cross_mn ? cross_mn : value > cross_mx ? cross_mx : value;
+                                word |= (unsigned int)value << shift;
+                        }
+                        out[x] = word;
+                }
+        }
+#undef UI_CAS_KEEP
+        memory_free(rows, bytes);
+        return true;
+}
+
+/*
+        A picture (width by height) made a screen's w by h into into (pitch words a row): cut to the screen's shape at its middle,
+        resampled and sharpened by strength (0 to 100). False: no memory for it, and into is not written.
+*/
+static b32 ui_picture_for_screen(unsigned int address_to into, positive pitch, positive w, positive h, const unsigned int address_to picture,
+                                 positive width, positive height, unsigned int strength)
+{
+        positive vw, vh, ox, oy;
+
+        if (!w || !h || !width || !height)
+                return false;
+        if (width * h > height * w)
+                vh = height, vw = height * w / h, ox = (width - vw) / 2, oy = 0;
+        else
+                vw = width, vh = width * h / w, ox = 0, oy = (height - vh) / 2;
+        vw = vw ? vw : 1, vh = vh ? vh : 1;
+        if (!ui_picture_resample(into, pitch, w, h, picture, width, ox, oy, vw, vh))
+                return false;
+        ui_picture_sharpen(into, pitch, w, h, strength);
+        return true;
 }
 
 /* ---- apps: their pictures ---- */

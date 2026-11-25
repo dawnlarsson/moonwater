@@ -47049,7 +47049,7 @@ static void memory_transpose_u32(p32 *into, positive into_pitch, const p32 *from
 JPEG_FUZZ_ENTRY = r"""
 /*
         One input every way the decoder is asked: measured (as ui_image_measure does), then decoded whole, at the half, quarter and
-        eighth its header asks for and at 1 by 1, under a side bound of 2048 (the arithmetic is the bound's at any bound, and a larger
+        eighth its header asks for and at 1 by 1, every other one cleaned as a wallpaper's is (ui_jpeg_clean), under a side bound of 2048 (the arithmetic is the bound's at any bound, and a larger
         one only buys time), and once under a bound below its size, which must be refused. Each picture is read whole, so the sanitizer
         sees every word it answered, and must be the size its scale makes, turned as its orientation says.
 */
@@ -47074,7 +47074,7 @@ static int jpeg_fuzz_one(const unsigned char *data, unsigned long size)
                 for (int k = 0; k < 6; k++)
                 {
                         int w = 0, h = 0;
-                        unsigned int *pixels = ui_jpeg_decode_at(copy, size, &w, &h, 2048, wants[k][0], wants[k][1]);
+                        unsigned int *pixels = ui_jpeg_decode_at(copy, size, &w, &h, 2048, wants[k][0], wants[k][1], k & 1);
                         unsigned int scale = !k ? 8 : orientation >= 5 ? ui_jpeg_scale(width, height, wants[k][1], wants[k][0])
                                                                          : ui_jpeg_scale(width, height, wants[k][0], wants[k][1]);
                         unsigned int ew = (width * scale + 7) / 8, eh = (height * scale + 7) / 8;
@@ -47093,7 +47093,7 @@ static int jpeg_fuzz_one(const unsigned char *data, unsigned long size)
         if (found && (width > 1 || height > 1))
         {
                 int w = 0, h = 0;
-                unsigned int *pixels = ui_jpeg_decode_at(copy, size, &w, &h, (width > height ? width : height) - 1, 0, 0);
+                unsigned int *pixels = ui_jpeg_decode_at(copy, size, &w, &h, (width > height ? width : height) - 1, 0, 0, 1);
 
                 if (pixels)
                         __builtin_trap();
