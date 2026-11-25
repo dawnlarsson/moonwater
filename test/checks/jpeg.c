@@ -146,6 +146,69 @@ static fn jpeg_reference_samples_blend_rows(p8 address_to into, const p8 address
                 into[x] = (p8)((near[x] * 3u + far[x] + (bias & 3)) >> 2);
 }
 
+// jpeg_idct_4x4's and jpeg_idct_2x2's definitions: jidctred.c's, every sum wrapping at 32 bits (there is no 16-bit one).
+static inline fn jpeg_reference_reduced4(const b16 address_to in, positive stride, p32 address_to out)
+{
+        b32 i0 = in[0], i1 = in[stride], i2 = in[2 * stride], i3 = in[3 * stride], i5 = in[5 * stride], i6 = in[6 * stride],
+            i7 = in[7 * stride];
+        p32 tmp0 = (p32)(i0 * 16384), tmp2 = (p32)(i2 * 15137) + (p32)(i6 * -6270);
+        p32 tmp10 = tmp0 + tmp2, tmp12 = tmp0 - tmp2;
+        p32 o0 = (p32)(i7 * -1730) + (p32)(i5 * 11893) + (p32)(i3 * -17799) + (p32)(i1 * 8697);
+        p32 o2 = (p32)(i7 * -4176) + (p32)(i5 * -4926) + (p32)(i3 * 7373) + (p32)(i1 * 20995);
+
+        out[0] = tmp10 + o2, out[3] = tmp10 - o2, out[1] = tmp12 + o0, out[2] = tmp12 - o0;
+}
+
+static fn jpeg_reference_idct_4x4(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
+{
+        b16 in[64], work[32];
+        p32 out[4];
+
+        for (int k = 0; k < 64; k++)
+                in[k] = jpeg_reference_dequantized(coefficients[k], quantization[k]);
+        for (int column = 0; column < 8; column++)
+        {
+                jpeg_reference_reduced4(in + column, 8, out);
+                for (int row = 0; row < 4; row++)
+                        work[row * 8 + column] = jpeg_reference_held16((b32)(out[row] + 2048u) >> 12);
+        }
+        for (int row = 0; row < 4; row++, into += pitch)
+        {
+                jpeg_reference_reduced4(work + row * 8, 1, out);
+                for (int column = 0; column < 4; column++)
+                        into[column] = jpeg_reference_sample(jpeg_reference_held16((b32)(out[column] + (1u << 18)) >> 19));
+        }
+}
+
+static inline fn jpeg_reference_reduced2(const b16 address_to in, positive stride, p32 address_to out)
+{
+        p32 even = (p32)(in[0] * 32768);
+        p32 odd = (p32)(in[7 * stride] * -5906) + (p32)(in[5 * stride] * 6967) + (p32)(in[3 * stride] * -10426) + (p32)(in[stride] * 29692);
+
+        out[0] = even + odd, out[1] = even - odd;
+}
+
+static fn jpeg_reference_idct_2x2(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
+{
+        b16 in[64], work[16];
+        p32 out[2];
+
+        for (int k = 0; k < 64; k++)
+                in[k] = jpeg_reference_dequantized(coefficients[k], quantization[k]);
+        for (int column = 0; column < 8; column++)
+        {
+                jpeg_reference_reduced2(in + column, 8, out);
+                work[column] = jpeg_reference_held16((b32)(out[0] + 4096u) >> 13);
+                work[8 + column] = jpeg_reference_held16((b32)(out[1] + 4096u) >> 13);
+        }
+        for (int row = 0; row < 2; row++, into += pitch)
+        {
+                jpeg_reference_reduced2(work + row * 8, 1, out);
+                into[0] = jpeg_reference_sample(jpeg_reference_held16((b32)(out[0] + (1u << 19)) >> 20));
+                into[1] = jpeg_reference_sample(jpeg_reference_held16((b32)(out[1] + (1u << 19)) >> 20));
+        }
+}
+
 /* ---- end of the references ---- */
 
 static unsigned long long jpeg_state = 0x2545f4914f6cdd1dull;
@@ -322,6 +385,29 @@ static positive jpeg_compare_samples(void)
         return wrong;
 }
 
+// The reduced inverse DCTs over the blocks jpeg_block_of makes, every kind, into rows at a pitch of 37 with sentinels about them.
+static positive jpeg_compare_reduced(positive blocks)
+{
+        static b16 c[64];
+        static p16 q[64];
+        static p8 want[4 * 37 + 16], got[4 * 37 + 16];
+        positive wrong = 0;
+
+        for (positive at = 0; at < blocks; at++)
+        {
+                jpeg_block_of(c, q, (p32)(at % 5));
+                memory_fill(want, 0x5a, sizeof(want)), memory_fill(got, 0x5a, sizeof(got));
+                jpeg_reference_idct_4x4(want + 5, 37, c, q);
+                jpeg_idct_4x4(got + 5, 37, c, q);
+                wrong += memory_compare(want, got, sizeof(want)) != 0;
+                memory_fill(want, 0x5a, sizeof(want)), memory_fill(got, 0x5a, sizeof(got));
+                jpeg_reference_idct_2x2(want + 5, 37, c, q);
+                jpeg_idct_2x2(got + 5, 37, c, q);
+                wrong += memory_compare(want, got, sizeof(want)) != 0;
+        }
+        return wrong;
+}
+
 /* ---- end of the comparisons ---- */
 
 /*
@@ -363,15 +449,19 @@ static positive jpeg_idct_8x8_wrong(positive blocks)
 static fn jpeg_tier(string_address tier)
 {
         positive wrong = jpeg_idct_8x8_wrong(400000), colour = jpeg_compare_colour(), to = jpeg_compare_to_ycbcr(), samples = jpeg_compare_samples();
+        positive reduced = jpeg_compare_reduced(400000);
 
-        string_format(log, "  %s: jpeg_idct_8x8 %p of 400000 blocks differ; colour %p, to YCbCr %p, samples %p cases differ\n", tier, wrong,
-                      colour, to, samples);
+        string_format(log, "  %s: jpeg_idct_8x8 %p of 400000 blocks differ; colour %p, to YCbCr %p, samples %p cases differ; the reduced "
+                      "%p of 800000\n", tier, wrong, colour, to, samples, reduced);
         check("jpeg_idct_8x8: any coefficients and quantizers, honest, extreme, large and smooth blocks, the reference's bytes and "
               "nothing outside its rows or past its arrays",
               wrong == 0);
         check("pixels_from_ycbcr, pixels_from_grey and pixels_from_planes: every input there is, every count to 70 and longer, the "
               "reference's words and nothing outside them",
               colour == 0);
+        check("jpeg_idct_4x4 and jpeg_idct_2x2: any coefficients and quantizers, honest, extreme, large and smooth blocks, the "
+              "reference's bytes and nothing outside their rows",
+              reduced == 0);
         check("pixels_to_ycbcr: every RGB there is (the alpha not read), counts to 70, the reference's bytes and nothing outside them", to == 0);
         check("samples_double, samples_double_rows and samples_blend_rows: every count to 70 and longer, random, extreme and ramp "
               "samples, every bias, the reference's bytes and nothing outside them",
@@ -402,7 +492,7 @@ b32 main()
 #ifdef BENCH_jpeg
 /*
         Each routine against its reference, the two in turn a round at a time after a round to warm them, the best of twelve:
-        jpeg_idct_8x8 over 4096 honest blocks (kind 1) and 4096 smooth ones (kind 4), in get_cpu_time's ticks (the time stamp
+        jpeg_idct_8x8 and the reduced ones over 4096 honest blocks (kind 1) and 4096 smooth ones (kind 4), in get_cpu_time's ticks (the time stamp
         counter on x86_64, the generic timer on arm64).
 */
 #define jpeg_now() ((p64)get_cpu_time())
@@ -413,7 +503,7 @@ static fn jpeg_bench_idct(p32 kind, string_address name)
         static b16 c[BLOCKS][64];
         static p16 q[64];
         static p8 out[BLOCKS][64];
-        p64 best_reference = ~0ull, best = ~0ull;
+        p64 best_reference = ~0ull, best = ~0ull, reduced2_reference = ~0ull, reduced2 = ~0ull;
 
         for (int at = 0; at < BLOCKS; at++)
                 jpeg_block_of(c[at], q, kind);
@@ -433,6 +523,32 @@ static fn jpeg_bench_idct(p32 kind, string_address name)
         }
         string_format(log, "  jpeg_idct_8x8 %s blocks: reference %p, lib.c %p (hundredths of a tick a block)\n", name,
                       (positive)(best_reference * 100 / BLOCKS), (positive)(best * 100 / BLOCKS));
+        best_reference = best = ~0ull;
+        for (int round = 0; round < 13; round++)
+        {
+                p64 t0 = jpeg_now();
+                for (int at = 0; at < BLOCKS; at++)
+                        jpeg_reference_idct_4x4(out[at], 8, c[at], q);
+                p64 t1 = jpeg_now();
+                for (int at = 0; at < BLOCKS; at++)
+                        jpeg_idct_4x4(out[at], 8, c[at], q);
+                p64 t2 = jpeg_now();
+                for (int at = 0; at < BLOCKS; at++)
+                        jpeg_reference_idct_2x2(out[at], 8, c[at], q);
+                p64 t3 = jpeg_now();
+                for (int at = 0; at < BLOCKS; at++)
+                        jpeg_idct_2x2(out[at], 8, c[at], q);
+                p64 t4 = jpeg_now();
+                if (round)
+                {
+                        best_reference = t1 - t0 < best_reference ? t1 - t0 : best_reference, best = t2 - t1 < best ? t2 - t1 : best;
+                        reduced2_reference = t3 - t2 < reduced2_reference ? t3 - t2 : reduced2_reference;
+                        reduced2 = t4 - t3 < reduced2 ? t4 - t3 : reduced2;
+                }
+        }
+        string_format(log, "  jpeg_idct_4x4 %s blocks: reference %p, lib.c %p; jpeg_idct_2x2: reference %p, lib.c %p (hundredths of a tick)\n",
+                      name, (positive)(best_reference * 100 / BLOCKS), (positive)(best * 100 / BLOCKS),
+                      (positive)(reduced2_reference * 100 / BLOCKS), (positive)(reduced2 * 100 / BLOCKS));
 }
 
 //      A row of 3840 samples (a 4K picture's) through each of the rest, the reference and the routine in turn; ticks a row.

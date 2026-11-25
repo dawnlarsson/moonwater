@@ -431,7 +431,7 @@ cover('folds_already', 'frames', 'memory_window_peaks',
 cover('folds_already', 'count', 'pixels_from_ycbcr pixels_from_grey pixels_from_planes pixels_to_ycbcr samples_double samples_double_rows samples_blend_rows',
       'a row of a picture, its width the picture\'s at run time; a literal would remove one compare a group of sixteen '
       'from a row of hundreds to thousands')
-cover('nothing_to_fold', None, 'jpeg_idct_8x8',
+cover('nothing_to_fold', None, 'jpeg_idct_8x8 jpeg_idct_4x4 jpeg_idct_2x2',
       'a block of a picture: the coefficients and quantizers are the file\'s and the pitch its plane\'s, none of them known '
       'where it is called; the work is fixed, 64 coefficients a call')
 cover('folds_already', 'width', 'conv3x3_f32',

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        533 routines (506 public, 27 local), 521 of them on all three and 12 local to one.
+        535 routines (508 public, 27 local), 523 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -210,6 +210,8 @@
           huffman_codes                  public  yes     yes     yes
           huffman_encode_back            public  yes     yes     yes
           huffman_lengths                public  yes     yes     yes
+          jpeg_idct_2x2                  public  yes     yes     yes
+          jpeg_idct_4x4                  public  yes     yes     yes
           jpeg_idct_8x8                  public  yes     yes     yes
           jump_mark                      public  yes     yes     yes
           jump_to_mark                   public  yes     yes     yes
@@ -60275,6 +60277,272 @@ __asm__(
 #undef PIXELS_RV_BYTE
 #endif
 #endif // KERNEL_MODE, pixels_from_ycbcr
+
+/*
+        The reduced inverse DCTs, for a decode at a half and a quarter straight from the coefficients (libjpeg's jidctred.c).
+
+        jpeg_idct_4x4(into, pitch, coefficients, quantization) makes a block 4 by 4: of the coefficients times their quantizers (16
+        bits, wrapping) the columns 0 to 3, 5, 6 and 7 of rows 0 to 3, 5, 6 and 7 (4 is not wanted at this size), tmp0 = in0 << 14,
+        tmp2 = 15137 in2 - 6270 in6, o0 = -1730 in7 + 11893 in5 - 17799 in3 + 8697 in1, o2 = -4176 in7 - 4926 in5 + 7373 in3 +
+        20995 in1, out 0 to 3 = tmp0 + tmp2 + o2, tmp0 - tmp2 + o0, tmp0 - tmp2 - o0, tmp0 + tmp2 - o2 (sums wrapping at 32 bits); the
+        columns' results plus 2048 shifted 12 and held to 16 bits, the rows' plus 1 << 18 shifted 19 and held to -128 to 127, lifted by
+        128 into 4 rows of 4 bytes, pitch apart. jpeg_idct_2x2 makes it 2 by 2 from columns and rows 0, 1, 3, 5 and 7: even = in0 << 15,
+        odd = -5906 in7 + 6967 in5 - 10426 in3 + 29692 in1, out = even + odd and even - odd; the columns' plus 4096 shifted 13 and held,
+        the rows' plus 1 << 19 shifted 20 and held to a byte. There is no 16-bit sum in either, so each pass is exactly its products.
+
+        x86_64: SSE2, the columns' pass over all eight columns in two halves (column 4, and 2 and 6 at a quarter, are made and never
+        read), its results transposed four rows by eight to the rows' inputs, the rows' pass on four lanes (two at a quarter, by
+        pmaddwd across a row), and the bytes transposed back. arm64: NEON, smlal2 taking the inputs the transpose leaves in the high
+        halves, st4 and st2 to single lanes writing the rows. riscv64: a column and a row at a time.
+*/
+#ifndef KERNEL_MODE
+fn jpeg_idct_4x4(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization);
+fn jpeg_idct_2x2(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization);
+#if X64
+//      One half of jpeg_idct_4x4's pass over inputs in xmm0 to xmm3 and xmm5 to xmm7 (rows or columns 0 to 3 and 5 to 7, words),
+//      UNPACK choosing the half; xmm15 zero. Out: O0 to O3 (32-bit), shifted by SHIFT. xmm8 to xmm13 spent.
+#define JPEG_REDUCED4_HALF(UNPACK, ROUND, SHIFT, O0, O1, O2, O3)                                                                        \
+    "movdqa %xmm15, %xmm8\n   " UNPACK " %xmm0, %xmm8\n   psrad $2, %xmm8\n   paddd " ROUND ", %xmm8\n"                            \
+    "movdqa %xmm2, %xmm9\n   " UNPACK " %xmm6, %xmm9\n   pmaddwd " ASM_LABEL(jred_k) "(%rip), %xmm9\n"                               \
+    "movdqa %xmm8, %xmm10\n   paddd %xmm9, %xmm8\n   psubd %xmm9, %xmm10\n"                                                          \
+    "movdqa %xmm7, %xmm9\n   " UNPACK " %xmm5, %xmm9\n   movdqa %xmm3, %xmm11\n   " UNPACK " %xmm1, %xmm11\n"                        \
+    "movdqa %xmm9, %xmm12\n   pmaddwd " ASM_LABEL(jred_k) "+16(%rip), %xmm12\n   movdqa %xmm11, %xmm13\n"                            \
+    "pmaddwd " ASM_LABEL(jred_k) "+32(%rip), %xmm13\n   paddd %xmm13, %xmm12\n"                                                      \
+    "pmaddwd " ASM_LABEL(jred_k) "+48(%rip), %xmm9\n   pmaddwd " ASM_LABEL(jred_k) "+64(%rip), %xmm11\n   paddd %xmm11, %xmm9\n"     \
+    "movdqa %xmm8, " O0 "\n   paddd %xmm9, " O0 "\n   psrad $" SHIFT ", " O0 "\n   psubd %xmm9, %xmm8\n   psrad $" SHIFT ", %xmm8\n" \
+    "movdqa %xmm8, " O3 "\n   movdqa %xmm10, " O1 "\n   paddd %xmm12, " O1 "\n   psrad $" SHIFT ", " O1 "\n   psubd %xmm12, %xmm10\n" \
+    "psrad $" SHIFT ", %xmm10\n   movdqa %xmm10, " O2 "\n"
+//      The rows dequantized: CHOSEN names which (as offsets of 16 bytes: x86's 0, 1, 2, 3, 5, 6, 7 for the 4x4).
+#define JPEG_REDUCED_LOAD(OFFSET, X)                                                                                                    \
+    "movdqu " OFFSET "(%rdx), %xmm" X "\n   movdqu " OFFSET "(%rcx), %xmm8\n   pmullw %xmm8, %xmm" X "\n"
+__asm__(
+    ASM_SECTION
+    //      jpeg_idct_4x4: rdi into, rsi pitch, rdx coefficients, rcx quantization. 64 bytes of stack: the upper half's results.
+    ASM_FUNC(jpeg_idct_4x4)
+    "mov %rsp, %r11\n   sub $64, %rsp\n   and $-16, %rsp\n"
+    JPEG_REDUCED_LOAD("0", "0") JPEG_REDUCED_LOAD("16", "1") JPEG_REDUCED_LOAD("32", "2") JPEG_REDUCED_LOAD("48", "3")
+    JPEG_REDUCED_LOAD("80", "5") JPEG_REDUCED_LOAD("96", "6") JPEG_REDUCED_LOAD("112", "7")
+    "pxor %xmm15, %xmm15\n"
+    JPEG_REDUCED4_HALF("punpckhwd", ASM_LABEL(jred_k) "+80(%rip)", "12", "%xmm4", "%xmm14", "%xmm13", "%xmm11")
+    "movdqa %xmm4, (%rsp)\n   movdqa %xmm14, 16(%rsp)\n   movdqa %xmm13, 32(%rsp)\n   movdqa %xmm11, 48(%rsp)\n"
+    JPEG_REDUCED4_HALF("punpcklwd", ASM_LABEL(jred_k) "+80(%rip)", "12", "%xmm4", "%xmm14", "%xmm13", "%xmm11")
+    "packssdw (%rsp), %xmm4\n   packssdw 16(%rsp), %xmm14\n   packssdw 32(%rsp), %xmm13\n   packssdw 48(%rsp), %xmm11\n"
+    //      Rows 0 to 3 of the columns' results (xmm4, xmm14, xmm13, xmm11) to the rows' inputs: [T0 | T1] in xmm0, [T2 | T3] in
+    //      xmm2, [T4 | T5] in xmm4, [T6 | T7] in xmm6, column k's four results T_k.
+    "movdqa %xmm4, %xmm8\n   punpcklwd %xmm14, %xmm8\n   punpckhwd %xmm14, %xmm4\n   movdqa %xmm13, %xmm9\n   punpcklwd %xmm11, %xmm9\n"
+    "punpckhwd %xmm11, %xmm13\n   movdqa %xmm8, %xmm0\n   punpckldq %xmm9, %xmm0\n   movdqa %xmm8, %xmm2\n   punpckhdq %xmm9, %xmm2\n"
+    "movdqa %xmm4, %xmm6\n   punpckhdq %xmm13, %xmm6\n   punpckldq %xmm13, %xmm4\n"
+    //      The rows' pass on four lanes: tmp0 from T0, (T2, T6), (T7, T5) and (T3, T1) for the pairs.
+    "movdqa %xmm15, %xmm8\n   punpcklwd %xmm0, %xmm8\n   psrad $2, %xmm8\n   paddd " ASM_LABEL(jred_k) "+96(%rip), %xmm8\n"
+    "movdqa %xmm2, %xmm9\n   punpcklwd %xmm6, %xmm9\n   pmaddwd " ASM_LABEL(jred_k) "(%rip), %xmm9\n"
+    "movdqa %xmm8, %xmm10\n   paddd %xmm9, %xmm8\n   psubd %xmm9, %xmm10\n"
+    "movdqa %xmm6, %xmm9\n   punpckhwd %xmm4, %xmm9\n   movdqa %xmm2, %xmm11\n   punpckhwd %xmm0, %xmm11\n"
+    "movdqa %xmm9, %xmm12\n   pmaddwd " ASM_LABEL(jred_k) "+16(%rip), %xmm12\n   movdqa %xmm11, %xmm13\n   pmaddwd " ASM_LABEL(jred_k) "+32(%rip), %xmm13\n"
+    "paddd %xmm13, %xmm12\n   pmaddwd " ASM_LABEL(jred_k) "+48(%rip), %xmm9\n   pmaddwd " ASM_LABEL(jred_k) "+64(%rip), %xmm11\n   paddd %xmm11, %xmm9\n"
+    "movdqa %xmm8, %xmm1\n   paddd %xmm9, %xmm1\n   psubd %xmm9, %xmm8\n   movdqa %xmm10, %xmm3\n   paddd %xmm12, %xmm3\n   psubd %xmm12, %xmm10\n"
+    "psrad $19, %xmm1\n   psrad $19, %xmm3\n   psrad $19, %xmm10\n   psrad $19, %xmm8\n"
+    //      out0 (xmm1), out1 (xmm3), out2 (xmm10), out3 (xmm8), each its four rows: held to bytes, lifted, and transposed by two
+    //      interleaves of a register with its halves exchanged.
+    "packssdw %xmm3, %xmm1\n   packssdw %xmm8, %xmm10\n   packsswb %xmm10, %xmm1\n   pxor " ASM_LABEL(jred_k) "+112(%rip), %xmm1\n"
+    "pshufd $0x4e, %xmm1, %xmm2\n   punpcklbw %xmm2, %xmm1\n   pshufd $0x4e, %xmm1, %xmm2\n   punpcklbw %xmm2, %xmm1\n"
+    "movd %xmm1, (%rdi)\n   psrldq $4, %xmm1\n   movd %xmm1, (%rdi,%rsi)\n   psrldq $4, %xmm1\n   movd %xmm1, (%rdi,%rsi,2)\n"
+    "lea (%rsi,%rsi,2), %rax\n   psrldq $4, %xmm1\n   movd %xmm1, (%rdi,%rax)\n"
+    "mov %r11, %rsp\n" ASM_RET
+    //      The pairs: (in2, in6) to tmp2, (in7, in5) and (in3, in1) to o0, then to o2; the roundings; 0x80; then the 2x2's: (in7,
+    //      in5) and (in3, in1) to odd, a row's odd across it, its roundings.
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(jred_k) ":\n   .rept 4\n   .short 15137, -6270\n   .endr\n   .rept 4\n   .short -1730, 11893\n   .endr\n"
+    "   .rept 4\n   .short -17799, 8697\n   .endr\n   .rept 4\n   .short -4176, -4926\n   .endr\n   .rept 4\n   .short 7373, 20995\n   .endr\n"
+    "   .rept 4\n   .long 2048\n   .endr\n   .rept 4\n   .long 262144\n   .endr\n   .rept 16\n   .byte 0x80\n   .endr\n"
+    "   .rept 4\n   .short -5906, 6967\n   .endr\n   .rept 4\n   .short -10426, 29692\n   .endr\n"
+    "   .short 0, 29692, 0, -10426, 0, 6967, 0, -5906\n   .rept 4\n   .long 4096\n   .endr\n   .rept 4\n   .long 524288\n   .endr\n"
+    ".popsection\n"
+    ASM_END(jpeg_idct_4x4)
+
+    //      jpeg_idct_2x2: rdi into, rsi pitch, rdx coefficients, rcx quantization. The columns' pass over eight columns, two
+    //      halves, into W0 and W1 (xmm4, xmm5); each row's odd by pmaddwd across it and two sums.
+    ASM_FUNC(jpeg_idct_2x2)
+    JPEG_REDUCED_LOAD("0", "0") JPEG_REDUCED_LOAD("16", "1") JPEG_REDUCED_LOAD("48", "3") JPEG_REDUCED_LOAD("80", "5")
+    JPEG_REDUCED_LOAD("112", "7")
+    "pxor %xmm15, %xmm15\n"
+#define JPEG_REDUCED2_HALF(UNPACK, E, O)                                                                                                \
+    "movdqa %xmm15, " E "\n   " UNPACK " %xmm0, " E "\n   psrad $1, " E "\n   paddd " ASM_LABEL(jred_k) "+176(%rip), " E "\n"          \
+    "movdqa %xmm7, %xmm9\n   " UNPACK " %xmm5, %xmm9\n   pmaddwd " ASM_LABEL(jred_k) "+128(%rip), %xmm9\n"                           \
+    "movdqa %xmm3, " O "\n   " UNPACK " %xmm1, " O "\n   pmaddwd " ASM_LABEL(jred_k) "+144(%rip), " O "\n   paddd %xmm9, " O "\n"
+    JPEG_REDUCED2_HALF("punpcklwd", "%xmm10", "%xmm11")
+    JPEG_REDUCED2_HALF("punpckhwd", "%xmm12", "%xmm13")
+#undef JPEG_REDUCED2_HALF
+    "movdqa %xmm10, %xmm4\n   paddd %xmm11, %xmm4\n   psubd %xmm11, %xmm10\n   movdqa %xmm12, %xmm6\n   paddd %xmm13, %xmm6\n   psubd %xmm13, %xmm12\n"
+    "psrad $13, %xmm4\n   psrad $13, %xmm10\n   psrad $13, %xmm6\n   psrad $13, %xmm12\n   packssdw %xmm6, %xmm4\n   packssdw %xmm12, %xmm10\n"
+    //      W0 in xmm4, W1 in xmm10: each row's odd summed across it, both rows' in one register's low lanes.
+    "movdqa %xmm4, %xmm0\n   pmaddwd " ASM_LABEL(jred_k) "+160(%rip), %xmm0\n   movdqa %xmm10, %xmm1\n   pmaddwd " ASM_LABEL(jred_k) "+160(%rip), %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   punpckldq %xmm1, %xmm0\n   punpckhdq %xmm1, %xmm2\n   paddd %xmm2, %xmm0\n   pshufd $0x4e, %xmm0, %xmm2\n"
+    "paddd %xmm2, %xmm0\n"
+    //      even of each row: its first word << 15, the two in the low lanes; then even + odd and even - odd in row order.
+    "movdqa %xmm4, %xmm2\n   punpcklwd %xmm10, %xmm2\n   movdqa %xmm15, %xmm3\n   punpcklwd %xmm2, %xmm3\n   psrad $1, %xmm3\n"
+    "paddd " ASM_LABEL(jred_k) "+192(%rip), %xmm3\n   movdqa %xmm3, %xmm1\n   paddd %xmm0, %xmm1\n   psubd %xmm0, %xmm3\n   punpckldq %xmm3, %xmm1\n"
+    "psrad $20, %xmm1\n   packssdw %xmm1, %xmm1\n   packsswb %xmm1, %xmm1\n   pxor " ASM_LABEL(jred_k) "+112(%rip), %xmm1\n   movd %xmm1, %eax\n"
+    "mov %ax, (%rdi)\n   shr $16, %eax\n   mov %ax, (%rdi,%rsi)\n" ASM_RET
+    ASM_END(jpeg_idct_2x2)
+);
+#undef JPEG_REDUCED4_HALF
+#undef JPEG_REDUCED_LOAD
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //      jpeg_idct_4x4: x0 into, x1 pitch, x2 coefficients, x3 quantization. v0 the constants by element; the columns' pass over
+    //      eight in v16 to v23 (row 4 loaded and not used), sqshrn by 12 holding its results.
+    ASM_FUNC(jpeg_idct_4x4)
+    "adrp x9, " ASM_PAGE_LABEL(jred_a) "\n   add x9, x9, " ASM_LO12_LABEL(jred_a) "\n   ld1 {v0.8h, v1.8h}, [x9]\n"
+    "ld1 {v16.8h, v17.8h, v18.8h, v19.8h}, [x2], #64\n   ld1 {v20.8h, v21.8h, v22.8h, v23.8h}, [x2]\n"
+    "ld1 {v24.8h, v25.8h, v26.8h, v27.8h}, [x3], #64\n   ld1 {v28.8h, v29.8h, v30.8h, v31.8h}, [x3]\n"
+    "mul v16.8h, v16.8h, v24.8h\n   mul v17.8h, v17.8h, v25.8h\n   mul v18.8h, v18.8h, v26.8h\n   mul v19.8h, v19.8h, v27.8h\n"
+    "mul v21.8h, v21.8h, v29.8h\n   mul v22.8h, v22.8h, v30.8h\n   mul v23.8h, v23.8h, v31.8h\n   movi v31.4s, #8, lsl #8\n"
+#define JPEG_REDUCED4_NEON(HI, HALF, W0, W1, W2, W3)                                                                                   \
+    "sshll" HI " v2.4s, v16." HALF ", #14\n   add v2.4s, v2.4s, v31.4s\n"                                                           \
+    "smull" HI " v3.4s, v18." HALF ", v0.h[0]\n   smlal" HI " v3.4s, v22." HALF ", v0.h[1]\n"                                         \
+    "add v4.4s, v2.4s, v3.4s\n   sub v5.4s, v2.4s, v3.4s\n"                                                                          \
+    "smull" HI " v6.4s, v23." HALF ", v0.h[2]\n   smlal" HI " v6.4s, v21." HALF ", v0.h[3]\n   smlal" HI " v6.4s, v19." HALF ", v0.h[4]\n" \
+    "smlal" HI " v6.4s, v17." HALF ", v0.h[5]\n"                                                                                      \
+    "smull" HI " v7.4s, v23." HALF ", v0.h[6]\n   smlal" HI " v7.4s, v21." HALF ", v0.h[7]\n   smlal" HI " v7.4s, v19." HALF ", v1.h[0]\n" \
+    "smlal" HI " v7.4s, v17." HALF ", v1.h[1]\n"                                                                                      \
+    "add v24.4s, v4.4s, v7.4s\n   sqshrn" HI " " W0 ", v24.4s, #12\n   sub v24.4s, v4.4s, v7.4s\n   sqshrn" HI " " W3 ", v24.4s, #12\n" \
+    "add v24.4s, v5.4s, v6.4s\n   sqshrn" HI " " W1 ", v24.4s, #12\n   sub v24.4s, v5.4s, v6.4s\n   sqshrn" HI " " W2 ", v24.4s, #12\n"
+    JPEG_REDUCED4_NEON("", "4h", "v25.4h", "v26.4h", "v27.4h", "v28.4h")
+    JPEG_REDUCED4_NEON("2", "8h", "v25.8h", "v26.8h", "v27.8h", "v28.8h")
+#undef JPEG_REDUCED4_NEON
+    //      W0 to W3 (v25 to v28) to the rows' inputs: [T0 | T4] v16, [T2 | T6] v17, [T1 | T5] v18, [T3 | T7] v19.
+    "trn1 v20.8h, v25.8h, v26.8h\n   trn2 v21.8h, v25.8h, v26.8h\n   trn1 v22.8h, v27.8h, v28.8h\n   trn2 v23.8h, v27.8h, v28.8h\n"
+    "trn1 v16.4s, v20.4s, v22.4s\n   trn2 v17.4s, v20.4s, v22.4s\n   trn1 v18.4s, v21.4s, v23.4s\n   trn2 v19.4s, v21.4s, v23.4s\n"
+    //      The rows' pass on four lanes, rounding 1 << 18; each output narrowed by 16 and then 3 into a byte (the two floors are
+    //      one of 19), lifted, and the rows written a byte of each output a row by st4 to single lanes.
+    "movi v31.4s, #4, lsl #16\n   sshll v2.4s, v16.4h, #14\n   add v2.4s, v2.4s, v31.4s\n"
+    "smull v3.4s, v17.4h, v0.h[0]\n   smlal2 v3.4s, v17.8h, v0.h[1]\n   add v4.4s, v2.4s, v3.4s\n   sub v5.4s, v2.4s, v3.4s\n"
+    "smull v6.4s, v19.4h, v0.h[4]\n   smlal2 v6.4s, v19.8h, v0.h[2]\n   smlal v6.4s, v18.4h, v0.h[5]\n   smlal2 v6.4s, v18.8h, v0.h[3]\n"
+    "smull v7.4s, v19.4h, v1.h[0]\n   smlal2 v7.4s, v19.8h, v0.h[6]\n   smlal v7.4s, v18.4h, v1.h[1]\n   smlal2 v7.4s, v18.8h, v0.h[7]\n"
+    "movi v30.8b, #0x80\n"
+    "add v20.4s, v4.4s, v7.4s\n   sqshrn v20.4h, v20.4s, #16\n   sqshrn v24.8b, v20.8h, #3\n   eor v24.8b, v24.8b, v30.8b\n"
+    "add v20.4s, v5.4s, v6.4s\n   sqshrn v20.4h, v20.4s, #16\n   sqshrn v25.8b, v20.8h, #3\n   eor v25.8b, v25.8b, v30.8b\n"
+    "sub v20.4s, v5.4s, v6.4s\n   sqshrn v20.4h, v20.4s, #16\n   sqshrn v26.8b, v20.8h, #3\n   eor v26.8b, v26.8b, v30.8b\n"
+    "sub v20.4s, v4.4s, v7.4s\n   sqshrn v20.4h, v20.4s, #16\n   sqshrn v27.8b, v20.8h, #3\n   eor v27.8b, v27.8b, v30.8b\n"
+    "st4 {v24.b, v25.b, v26.b, v27.b}[0], [x0], x1\n   st4 {v24.b, v25.b, v26.b, v27.b}[1], [x0], x1\n"
+    "st4 {v24.b, v25.b, v26.b, v27.b}[2], [x0], x1\n   st4 {v24.b, v25.b, v26.b, v27.b}[3], [x0]\n"
+    ASM_RET
+    //      v0: tmp2's (in2, in6), o0's (in7, in5, in3, in1), o2's in7 and in5; v1: o2's in3 and in1, then the 2x2's odd.
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(jred_a) ":\n   .short 15137, -6270, -1730, 11893, -17799, 8697, -4176, -4926\n"
+    "   .short 7373, 20995, -5906, 6967, -10426, 29692, 0, 0\n"
+    ".popsection\n"
+    ASM_END(jpeg_idct_4x4)
+
+    //      jpeg_idct_2x2: x0 into, x1 pitch, x2 coefficients, x3 quantization. The columns' pass over eight (rows 0, 1, 3, 5, 7),
+    //      W0 and W1; each row's odd across it by smull of W's halves and addv.
+    ASM_FUNC(jpeg_idct_2x2)
+    "adrp x9, " ASM_PAGE_LABEL(jred_a) "\n   add x9, x9, " ASM_LO12_LABEL(jred_a) "\n   ld1 {v0.8h, v1.8h}, [x9]\n"
+    "ldr q16, [x2]\n   ldr q17, [x2, #16]\n   ldr q19, [x2, #48]\n   ldr q21, [x2, #80]\n   ldr q23, [x2, #112]\n"
+    "ldr q24, [x3]\n   ldr q25, [x3, #16]\n   ldr q26, [x3, #48]\n   ldr q27, [x3, #80]\n   ldr q28, [x3, #112]\n"
+    "mul v16.8h, v16.8h, v24.8h\n   mul v17.8h, v17.8h, v25.8h\n   mul v19.8h, v19.8h, v26.8h\n   mul v21.8h, v21.8h, v27.8h\n"
+    "mul v23.8h, v23.8h, v28.8h\n   movi v31.4s, #16, lsl #8\n"
+#define JPEG_REDUCED2_NEON(HI, HALF, W0, W1)                                                                                           \
+    "sshll" HI " v2.4s, v16." HALF ", #15\n   add v2.4s, v2.4s, v31.4s\n"                                                           \
+    "smull" HI " v3.4s, v23." HALF ", v1.h[2]\n   smlal" HI " v3.4s, v21." HALF ", v1.h[3]\n   smlal" HI " v3.4s, v19." HALF ", v1.h[4]\n" \
+    "smlal" HI " v3.4s, v17." HALF ", v1.h[5]\n   add v4.4s, v2.4s, v3.4s\n   sub v5.4s, v2.4s, v3.4s\n"                               \
+    "sqshrn" HI " " W0 ", v4.4s, #13\n   sqshrn" HI " " W1 ", v5.4s, #13\n"
+    JPEG_REDUCED2_NEON("", "4h", "v24.4h", "v25.4h")
+    JPEG_REDUCED2_NEON("2", "8h", "v24.8h", "v25.8h")
+#undef JPEG_REDUCED2_NEON
+    //      A row's odd: its words 1, 3, 5, 7 against 29692, -10426, 6967, -5906 (v2's halfwords, the rest zero) summed across.
+    "adrp x9, " ASM_PAGE_LABEL(jred_b) "\n   add x9, x9, " ASM_LO12_LABEL(jred_b) "\n   ldr q2, [x9]\n"
+    "smull v3.4s, v24.4h, v2.4h\n   smlal2 v3.4s, v24.8h, v2.8h\n   addv s3, v3.4s\n   smull v4.4s, v25.4h, v2.4h\n   smlal2 v4.4s, v25.8h, v2.8h\n"
+    "addv s4, v4.4s\n   fmov w5, s3\n   fmov w6, s4\n   smov w7, v24.h[0]\n   smov w8, v25.h[0]\n   lsl w7, w7, #15\n   lsl w8, w8, #15\n"
+    "mov w9, #524288\n   add w7, w7, w9\n   add w8, w8, w9\n"
+    //      The four outputs held to -128..127 and lifted, a row of two bytes each.
+#define JPEG_REDUCED2_BYTE(OUT, A, OP, B) OP " " OUT ", " A ", " B "\n   asr " OUT ", " OUT ", #20\n   mov w10, #127\n   cmp " OUT ", w10\n" \
+    "csel " OUT ", w10, " OUT ", gt\n   mov w10, #-128\n   cmp " OUT ", w10\n   csel " OUT ", w10, " OUT ", lt\n   add " OUT ", " OUT ", #128\n"
+    JPEG_REDUCED2_BYTE("w11", "w7", "add", "w5") JPEG_REDUCED2_BYTE("w12", "w7", "sub", "w5")
+    JPEG_REDUCED2_BYTE("w13", "w8", "add", "w6") JPEG_REDUCED2_BYTE("w14", "w8", "sub", "w6")
+#undef JPEG_REDUCED2_BYTE
+    "strb w11, [x0]\n   strb w12, [x0, #1]\n   add x0, x0, x1\n   strb w13, [x0]\n   strb w14, [x0, #1]\n"
+    ASM_RET
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(jred_b) ":\n   .short 0, 29692, 0, -10426, 0, 6967, 0, -5906\n"
+    ".popsection\n"
+    ASM_END(jpeg_idct_2x2)
+);
+#elif RISCV64
+//      A value in R shifted by N and held to 16 bits (t6 spent).
+#define JPEG_REDUCED_RV_HOLD16(R, N, TAG)                                                                                                \
+    "sraiw " R ", " R ", " N "\n   slli t6, " R ", 48\n   srai t6, t6, 48\n   beq t6, " R ", 1" TAG "f\n   li t6, 32767\n"         \
+    "bgt " R ", t6, 2" TAG "f\n   li t6, -32768\n2" TAG ":  mv " R ", t6\n1" TAG ":\n"
+//      A value in R shifted by N, held to -128..127 and lifted, stored at OFFSET(a4) (t6 spent).
+#define JPEG_REDUCED_RV_BYTE(R, N, OFFSET, TAG)                                                                                          \
+    "sraiw " R ", " R ", " N "\n   addiw " R ", " R ", 128\n   li t6, 255\n   bleu " R ", t6, 3" TAG "f\n   slt " R ", zero, " R "\n"     \
+    "neg " R ", " R "\n3" TAG ":  sb " R ", " OFFSET "(a4)\n"
+__asm__(
+    ASM_SECTION
+    //      jpeg_idct_4x4: a0 into, a1 pitch, a2 coefficients, a3 quantization. 64 bytes of stack: the columns' 4 by 8 results.
+    //      The pass is one macro over seven loads by a stride: a column's (16 bytes) or a row's (2 bytes) of the workspace.
+#define JPEG_REDUCED4_RV(LOAD0, LOAD1, LOAD2, LOAD3, LOAD5, LOAD6, LOAD7)                                                               \
+    LOAD0 LOAD1 LOAD2 LOAD3 LOAD5 LOAD6 LOAD7                                                                                          \
+    "slliw t0, t0, 14\n   addw t0, t0, s1\n   li a7, 15137\n   mulw t2, t2, a7\n   li a7, -6270\n   mulw t5, t5, a7\n   addw t2, t2, t5\n" \
+    "addw a5, t0, t2\n   subw a6, t0, t2\n"                                                                                         \
+    "li a7, -1730\n   mulw t5, t6, a7\n   li a7, 11893\n   mulw a7, t4, a7\n   addw t5, t5, a7\n   li a7, -17799\n   mulw a7, t3, a7\n"    \
+    "addw t5, t5, a7\n   li a7, 8697\n   mulw a7, t1, a7\n   addw t5, t5, a7\n"                                                         \
+    "li a7, -4176\n   mulw t6, t6, a7\n   li a7, -4926\n   mulw t4, t4, a7\n   addw t6, t6, t4\n   li a7, 7373\n   mulw t3, t3, a7\n"     \
+    "addw t6, t6, t3\n   li a7, 20995\n   mulw t1, t1, a7\n   addw t6, t6, t1\n"                                                        \
+    "addw t0, a5, t6\n   subw t3, a5, t6\n   addw t1, a6, t5\n   subw t2, a6, t5\n"
+    ASM_FUNC(jpeg_idct_4x4)
+    "addi sp, sp, -80\n   sd s0, 64(sp)\n   sd s1, 72(sp)\n   li s1, 2048\n   li s0, 0\n"
+#define JPEG_RV_DQ(R, ROW) "lh " R ", " ROW "(t6)\n   lhu a7, " ROW "(a4)\n   mulw " R ", " R ", a7\n   slli " R ", " R ", 48\n   srai " R ", " R ", 48\n"
+    "1:  slli t6, s0, 1\n   add a4, a3, t6\n   add t6, a2, t6\n"
+    JPEG_REDUCED4_RV(JPEG_RV_DQ("t0", "0"), JPEG_RV_DQ("t1", "16"), JPEG_RV_DQ("t2", "32"), JPEG_RV_DQ("t3", "48"), JPEG_RV_DQ("t4", "80"),
+                     JPEG_RV_DQ("t5", "96"), JPEG_RV_DQ("t6", "112"))
+    "slli a4, s0, 1\n   add a4, a4, sp\n"
+    JPEG_REDUCED_RV_HOLD16("t0", "12", "0") "sh t0, 0(a4)\n" JPEG_REDUCED_RV_HOLD16("t1", "12", "1") "sh t1, 16(a4)\n"
+    JPEG_REDUCED_RV_HOLD16("t2", "12", "2") "sh t2, 32(a4)\n" JPEG_REDUCED_RV_HOLD16("t3", "12", "3") "sh t3, 48(a4)\n"
+    "addi s0, s0, 1\n   li t0, 8\n   bltu s0, t0, 1b\n"
+    "li s1, 262144\n   li s0, 0\n"
+#define JPEG_RV_WS(R, COLUMN) "lh " R ", " COLUMN "(t6)\n"
+    "2:  slli t6, s0, 4\n   add t6, t6, sp\n"
+    JPEG_REDUCED4_RV(JPEG_RV_WS("t0", "0"), JPEG_RV_WS("t1", "2"), JPEG_RV_WS("t2", "4"), JPEG_RV_WS("t3", "6"), JPEG_RV_WS("t4", "10"),
+                     JPEG_RV_WS("t5", "12"), JPEG_RV_WS("t6", "14"))
+    "mul a4, s0, a1\n   add a4, a4, a0\n"
+    JPEG_REDUCED_RV_BYTE("t0", "19", "0", "0") JPEG_REDUCED_RV_BYTE("t1", "19", "1", "1") JPEG_REDUCED_RV_BYTE("t2", "19", "2", "2")
+    JPEG_REDUCED_RV_BYTE("t3", "19", "3", "3")
+    "addi s0, s0, 1\n   li t0, 4\n   bltu s0, t0, 2b\n"
+    "ld s0, 64(sp)\n   ld s1, 72(sp)\n   addi sp, sp, 80\n" ASM_RET
+    ASM_END(jpeg_idct_4x4)
+#undef JPEG_REDUCED4_RV
+
+    //      jpeg_idct_2x2: a0 into, a1 pitch, a2 coefficients, a3 quantization. 32 bytes of stack: the columns' 2 by 8 results.
+#define JPEG_REDUCED2_RV(LOAD0, LOAD1, LOAD3, LOAD5, LOAD7)                                                                             \
+    LOAD0 LOAD1 LOAD3 LOAD5 LOAD7                                                                                                      \
+    "slliw t0, t0, 15\n   addw t0, t0, s1\n   li a7, -5906\n   mulw t5, t6, a7\n   li a7, 6967\n   mulw a7, t4, a7\n   addw t5, t5, a7\n" \
+    "li a7, -10426\n   mulw a7, t3, a7\n   addw t5, t5, a7\n   li a7, 29692\n   mulw a7, t1, a7\n   addw t5, t5, a7\n"                 \
+    "addw t1, t0, t5\n   subw t2, t0, t5\n"
+    ASM_FUNC(jpeg_idct_2x2)
+    "addi sp, sp, -48\n   sd s0, 32(sp)\n   sd s1, 40(sp)\n   li s1, 4096\n   li s0, 0\n"
+    "1:  slli t6, s0, 1\n   add a4, a3, t6\n   add t6, a2, t6\n"
+    JPEG_REDUCED2_RV(JPEG_RV_DQ("t0", "0"), JPEG_RV_DQ("t1", "16"), JPEG_RV_DQ("t3", "48"), JPEG_RV_DQ("t4", "80"), JPEG_RV_DQ("t6", "112"))
+    "slli a4, s0, 1\n   add a4, a4, sp\n"
+    JPEG_REDUCED_RV_HOLD16("t1", "13", "0") "sh t1, 0(a4)\n" JPEG_REDUCED_RV_HOLD16("t2", "13", "1") "sh t2, 16(a4)\n"
+    "addi s0, s0, 1\n   li t0, 8\n   bltu s0, t0, 1b\n"
+    "li s1, 524288\n   li s0, 0\n"
+    "2:  slli t6, s0, 4\n   add t6, t6, sp\n"
+    JPEG_REDUCED2_RV(JPEG_RV_WS("t0", "0"), JPEG_RV_WS("t1", "2"), JPEG_RV_WS("t3", "6"), JPEG_RV_WS("t4", "10"), JPEG_RV_WS("t6", "14"))
+    "mul a4, s0, a1\n   add a4, a4, a0\n"
+    JPEG_REDUCED_RV_BYTE("t1", "20", "0", "0") JPEG_REDUCED_RV_BYTE("t2", "20", "1", "1")
+    "addi s0, s0, 1\n   li t0, 2\n   bltu s0, t0, 2b\n"
+    "ld s0, 32(sp)\n   ld s1, 40(sp)\n   addi sp, sp, 48\n" ASM_RET
+    ASM_END(jpeg_idct_2x2)
+#undef JPEG_REDUCED2_RV
+#undef JPEG_RV_DQ
+#undef JPEG_RV_WS
+);
+#undef JPEG_REDUCED_RV_HOLD16
+#undef JPEG_REDUCED_RV_BYTE
+#endif
+#endif // KERNEL_MODE, jpeg_idct_4x4
 
 /*
         What this processor turned out to have.

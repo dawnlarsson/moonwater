@@ -22192,24 +22192,8 @@ static const p8 ui_jpeg_natural[64 + 16] = {
         35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
         63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63};
 
-/* ---- the kernels: lib.c's jpeg_idct_8x8, pixels_* and samples_* do the blocks, the colour and the upsampling; the reduced IDCTs
-   are C until their lib.c routines land ---- */
-
-// libjpeg's constants for the reduced inverse DCTs (jidctred.c), at CONST_BITS 13: FIX(x) is x * 8192 rounded.
-#define UI_JPEG_F0765 6270
-#define UI_JPEG_F0899 7373
-#define UI_JPEG_F1847 15137
-#define UI_JPEG_F2562 20995
-#define UI_JPEG_F0211 1730
-#define UI_JPEG_F0509 4176
-#define UI_JPEG_F0601 4926
-#define UI_JPEG_F0720 5906
-#define UI_JPEG_F0850 6967
-#define UI_JPEG_F1061 8697
-#define UI_JPEG_F1272 10426
-#define UI_JPEG_F1451 11893
-#define UI_JPEG_F2172 17799
-#define UI_JPEG_F3624 29692
+/* ---- the kernels: lib.c's jpeg_idct_8x8, jpeg_idct_4x4 and jpeg_idct_2x2 make the blocks, its pixels_* and samples_* the colour and
+   the upsampling; what is left here is an eighth's DC and the holds the driver's own shortcuts take ---- */
 
 static inline INLINE CONST b16 ui_jpeg_held16(b32 value)
 {
@@ -22225,78 +22209,6 @@ static inline INLINE CONST p8 ui_jpeg_sample(b32 value)
 static inline INLINE CONST b16 ui_jpeg_dequantized(b16 coefficient, p16 quantizer)
 {
         return (b16)(p16)((p32)(p16)coefficient * quantizer);
-}
-
-/*
-        The same block made 4 by 4 (libjpeg's jidctred.c jpeg_idct_4x4, for a decode at a half): the coefficients of rows
-        and columns 0 to 3, 5, 6 and 7 (4 is not wanted at this size), columns descaled by 12 bits and held to 16, rows by 19.
-*/
-static inline INLINE fn ui_jpeg_reduced4(const b16 address_to in, positive stride, p32 address_to out)
-{
-        b32 i0 = in[0], i1 = in[stride], i2 = in[2 * stride], i3 = in[3 * stride], i5 = in[5 * stride], i6 = in[6 * stride],
-            i7 = in[7 * stride];
-        p32 tmp0 = (p32)(i0 * 16384), tmp2 = (p32)(i2 * UI_JPEG_F1847) + (p32)(i6 * -UI_JPEG_F0765);
-        p32 tmp10 = tmp0 + tmp2, tmp12 = tmp0 - tmp2;
-        p32 o0 = (p32)(i7 * -UI_JPEG_F0211) + (p32)(i5 * UI_JPEG_F1451) + (p32)(i3 * -UI_JPEG_F2172) + (p32)(i1 * UI_JPEG_F1061);
-        p32 o2 = (p32)(i7 * -UI_JPEG_F0509) + (p32)(i5 * -UI_JPEG_F0601) + (p32)(i3 * UI_JPEG_F0899) + (p32)(i1 * UI_JPEG_F2562);
-        out[0] = tmp10 + o2, out[3] = tmp10 - o2, out[1] = tmp12 + o0, out[2] = tmp12 - o0;
-}
-
-static fn ui_jpeg_idct_4x4(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
-{
-        b16 in[64], work[32];
-        p32 out[4];
-
-        for (int k = 0; k < 64; k++)
-                in[k] = ui_jpeg_dequantized(coefficients[k], quantization[k]);
-        for (int column = 0; column < 8; column++)
-        {
-                if (column == 4)
-                        continue;
-                ui_jpeg_reduced4(in + column, 8, out);
-                for (int row = 0; row < 4; row++)
-                        work[row * 8 + column] = ui_jpeg_held16((b32)(out[row] + 2048u) >> 12);
-        }
-        for (int row = 0; row < 4; row++, into += pitch)
-        {
-                ui_jpeg_reduced4(work + row * 8, 1, out);
-                for (int column = 0; column < 4; column++)
-                        into[column] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[column] + (1u << 18)) >> 19));
-        }
-}
-
-// jpeg_idct_2x2: made 2 by 2 (jidctred.c's jpeg_idct_2x2, for a quarter) from rows and columns 0, 1, 3, 5 and 7; columns by 13 bits
-// held to 16, rows by 20.
-static inline INLINE fn ui_jpeg_reduced2(const b16 address_to in, positive stride, p32 address_to out)
-{
-        p32 even = (p32)(in[0] * 32768);
-        p32 odd = (p32)(in[7 * stride] * -UI_JPEG_F0720) + (p32)(in[5 * stride] * UI_JPEG_F0850) + (p32)(in[3 * stride] * -UI_JPEG_F1272) +
-                  (p32)(in[stride] * UI_JPEG_F3624);
-        out[0] = even + odd, out[1] = even - odd;
-}
-
-static fn ui_jpeg_idct_2x2(p8 address_to into, positive pitch, const b16 address_to coefficients, const p16 address_to quantization)
-{
-        b16 in[64], work[16];
-        p32 out[2];
-
-        for (int k = 0; k < 64; k++)
-                in[k] = ui_jpeg_dequantized(coefficients[k], quantization[k]);
-        memory_zero(work, sizeof(work));
-        for (int column = 0; column < 8; column++)
-        {
-                if (column == 2 || column == 4 || column == 6)
-                        continue;
-                ui_jpeg_reduced2(in + column, 8, out);
-                work[column] = ui_jpeg_held16((b32)(out[0] + 4096u) >> 13);
-                work[8 + column] = ui_jpeg_held16((b32)(out[1] + 4096u) >> 13);
-        }
-        for (int row = 0; row < 2; row++, into += pitch)
-        {
-                ui_jpeg_reduced2(work + row * 8, 1, out);
-                into[0] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[0] + (1u << 19)) >> 20));
-                into[1] = ui_jpeg_sample(ui_jpeg_held16((b32)(out[1] + (1u << 19)) >> 20));
-        }
 }
 
 // jpeg_idct_1x1: the DC alone, for an eighth: (DC times its quantizer + 4) >> 3, held and lifted.
@@ -22577,9 +22489,9 @@ static fn ui_jpeg_put(struct ui_jpeg_component address_to c, positive bx, positi
                 if (scale == 8)
                         jpeg_idct_8x8(into, c->pitch, block, c->quantization);
                 else if (scale == 4)
-                        ui_jpeg_idct_4x4(into, c->pitch, block, c->quantization);
+                        jpeg_idct_4x4(into, c->pitch, block, c->quantization);
                 else if (scale == 2)
-                        ui_jpeg_idct_2x2(into, c->pitch, block, c->quantization);
+                        jpeg_idct_2x2(into, c->pitch, block, c->quantization);
                 else
                         ui_jpeg_idct_1x1(into, c->pitch, block, c->quantization);
                 return;
