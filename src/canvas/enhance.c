@@ -772,7 +772,7 @@ static p32 address_to enhance_wallpaper_picture(const enhance_model address_to m
                         memory_free(made, pw * ph * 4);
         }
         for (int times = 0; up && times < 2 && (pw * (positive)screen_h < (positive)screen_w * ph ? pw < (positive)screen_w : ph < (positive)screen_h) &&
-                            pw * ph * 4 <= 64 * 1024 * 1024; times++)
+                            pw * ph * 16 <= 128 * 1024 * 1024; times++) // the doubled picture at most 128 MB
         {
                 p32 address_to made = (p32 address_to)memory_checked(pw * ph * 16);
 
