@@ -22372,7 +22372,7 @@ refused:
 */
 #define UI_JPEG_SIDE_MOST 16384u // libjpeg's JPEG_MAX_DIMENSION is 65500; nothing here is larger than the PNG's bound
 #define UI_JPEG_PASSES 32u       // block visits a block at the most, over all the scans
-#define UI_JPEG_LOOKAHEAD 9      // bits a Huffman code is looked up by at once; longer codes are walked
+#define UI_JPEG_LOOKAHEAD 10     // bits a Huffman code is looked up by at once; longer codes are walked
 
 // The coefficients of a block in the order a scan sends them (zigzag), as their place in the block, and 16 more of 63 for the run
 // a broken block may take past its end (libjpeg's jpeg_natural_order, which absorbs the same overrun the same way).
@@ -22696,13 +22696,14 @@ static fn ui_jpeg_put(struct ui_jpeg_component address_to c, positive bx, positi
 }
 
 /*
-        One block of a scan, by its mode, into block (a sequential scan's, zeroed before) or the component's coefficients (a progressive
-        one's): the index of the last coefficient it set (0 for a DC alone) for a sequential scan, else 0. Each mode is T.81's (G.1.2 for
+        One block of a scan, by its mode, from the bits b (the scan loop's own copy of j->bits, so that the stores of coefficients are no
+        stores to the reader and it stays in registers) into block (a sequential scan's, zeroed before) or the component's coefficients
+        (a progressive one's): the index of the last coefficient it set (0 for a DC alone) for a sequential scan, else 0. Each mode is T.81's (G.1.2 for
         the progressive ones) as libjpeg's jdhuff.c and jdphuff.c decode it, its loops bounded by the band whatever the data says.
 */
-static inline INLINE unsigned int ui_jpeg_block(struct ui_jpeg address_to j, struct ui_jpeg_component address_to c, b16 address_to block, unsigned int mode)
+static inline INLINE unsigned int ui_jpeg_block(struct ui_jpeg address_to j, struct ui_jpeg_bits address_to b, struct ui_jpeg_component address_to c,
+                                               b16 address_to block, unsigned int mode)
 {
-        struct ui_jpeg_bits address_to b = &j->bits;
         unsigned int last = 0, s, r;
 
         if (mode == UI_JPEG_SEQUENTIAL || mode == UI_JPEG_DC_FIRST)
@@ -22841,6 +22842,7 @@ static fn ui_jpeg_scan_data(struct ui_jpeg address_to j, unsigned int mode)
         positive left = 0;
         b32 dry = false;
         b16 block[64];
+        struct ui_jpeg_bits bits = j->bits;
 
         for (positive m = 0; m < total; m++)
         {
@@ -22853,6 +22855,7 @@ static fn ui_jpeg_scan_data(struct ui_jpeg address_to j, unsigned int mode)
                         else
                         {
                                 ui_jpeg_segment(j);
+                                bits = j->bits;
                                 dry = false;
                         }
                         for (unsigned int each = 0; each < j->scan_count; each++)
@@ -22861,7 +22864,7 @@ static fn ui_jpeg_scan_data(struct ui_jpeg address_to j, unsigned int mode)
                         left = j->restart ? j->restart : total;
                 }
                 left--;
-                dry = dry || ui_jpeg_spent(&j->bits);
+                dry = dry || ui_jpeg_spent(&bits);
                 if (dry && mode != UI_JPEG_SEQUENTIAL && !j->restart)
                         break;
                 for (unsigned int each = 0; each < j->scan_count; each++)
@@ -22881,10 +22884,10 @@ static fn ui_jpeg_scan_data(struct ui_jpeg address_to j, unsigned int mode)
                                                 continue;
                                         }
                                         memory_zero(block, sizeof(block));
-                                        ui_jpeg_put(c, bx, by, block, ui_jpeg_block(j, c, block, mode));
+                                        ui_jpeg_put(c, bx, by, block, ui_jpeg_block(j, &bits, c, block, mode));
                                 }
                                 else if (!dry)
-                                        ui_jpeg_block(j, c, c->coefficients + (by * c->grid_w + bx) * 64, mode);
+                                        ui_jpeg_block(j, &bits, c, c->coefficients + (by * c->grid_w + bx) * 64, mode);
                         }
                 }
                 j->decoded = true;
