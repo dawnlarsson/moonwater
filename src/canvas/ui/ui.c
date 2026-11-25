@@ -22855,7 +22855,9 @@ static unsigned int ui_jpeg_orientation(const p8 address_to tiff, positive size)
         if (UI_JPEG_TIFF16(tiff + 2) != 42 || (ifd = UI_JPEG_TIFF32(tiff + 4)) > size - 2)
                 return 1;
         count = UI_JPEG_TIFF16(tiff + ifd);
-        for (positive each = 0; each < count && ifd + 2 + each * 12 <= size - 12; each++)
+        // Each entry whole inside the block: added up, never size less 12 (a block of 8 to 11 bytes had that wrap, and the entries
+        // were read past its end: the fuzz campaign's second finding).
+        for (positive each = 0; each < count && ifd + 2 + each * 12 + 12 <= size; each++)
         {
                 const p8 address_to entry = tiff + ifd + 2 + each * 12;
                 unsigned int value = UI_JPEG_TIFF16(entry + 8);

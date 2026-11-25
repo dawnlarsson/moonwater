@@ -47506,8 +47506,14 @@ def harness_jpeg_fuzz(argv):
     corpus = Path(corpus_dir).resolve() if corpus_dir else work / "corpus"
     for path in (seed_dir, stats, corpus):
         path.mkdir(parents=True, exist_ok=True)
+    #   A finding of an earlier run is kept beside the corpus (found/), never cleared with the counts.
+    found_dir = corpus.parent / "found"
+    found_dir.mkdir(parents=True, exist_ok=True)
     for old in stats.iterdir():
-        old.unlink()
+        if old.name.startswith(("crash-", "hang-")):
+            old.rename(found_dir / ("%d-%s" % (int(time.time()), old.name)))
+        else:
+            old.unlink()
     for name, data in seeds.items():
         (seed_dir / (name + ".jpg")).write_bytes(data)
     (work / "unit.c").write_text(jpeg_fuzz_source() + "\nint jpeg_fuzz_entry(const unsigned char *d, unsigned long n) { return jpeg_fuzz_one(d, n); }\n")

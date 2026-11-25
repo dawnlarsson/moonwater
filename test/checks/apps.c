@@ -6049,6 +6049,23 @@ static fn check_apps_jpeg(void)
                                 string_format(log, "  the EXIF orientation that is not turned: %p%s\n", (positive)o, little ? (string_address) " (little-endian)" : (string_address) "");
                 }
                 check("apps: a JPEG's EXIF orientation 1 to 8 (big- or little-endian, among other tags) turns and mirrors it to stand", turned);
+                {
+                        // TIFF blocks of 8 to 11 bytes whose IFD says it has entries: none is read, nothing past the block.
+                        static const p8 short_tiff[12] = {'M', 'M', 0, 42, 0, 0, 0, 8, 0, 9, 1, 0x12};
+                        b32 inside = true;
+
+                        for (positive size = 8; size < 12; size++)
+                        {
+                                p8 address_to block = (p8 address_to)memory_checked(4096);
+
+                                if (!block)
+                                        break;
+                                memory_fill(block, 0x6, 4096), memory_copy(block + 4096 - size, short_tiff, size);
+                                inside &= ui_jpeg_orientation(block + 4096 - size, size) == 1;
+                                memory_free(block, 4096);
+                        }
+                        check("apps: an EXIF block too short for the entries it claims is no orientation, and nothing past it is read", inside);
+                }
                 check("apps: and a picture's size is measured from its header as it will stand, before anything is decoded",
                       measured && ui_image_measure(apps_png_rgba, sizeof(apps_png_rgba), 64, 0, 0, &w, &h) && w == 4 && h == 5 &&
                           ui_image_measure(apps_jpeg_s420, sizeof(apps_jpeg_s420), 64, 10, 7, &w, &h) && w == 10 && h == 7 &&
