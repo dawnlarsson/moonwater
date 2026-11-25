@@ -6398,6 +6398,21 @@ static bipolar wls_poll_wait(system_poll_descriptor address_to descriptors,
 #include "../../src/sh/shell.c"
 #undef system_poll_wait
 #undef system_call_3
+//      The utility build leaves out the sound server and the audio modem (shell.c), whose three names the link's modem
+//      paths call: here the modem is never ready, and a send over it fails.
+static int audio_test_page(struct audio_state *copy)
+{
+        (void)copy;
+        return 0;
+}
+static void link_modem_streams_say(void)
+{
+}
+static b32 modem_send_file(string_address path)
+{
+        (void)path;
+        return 1;
+}
 
 /*      The audio modem's half of the link (the send section of modem.c) is
         built with the sound server, which the utilities alone have not: here
