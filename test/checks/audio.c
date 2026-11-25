@@ -11997,31 +11997,34 @@ static void sv_test_graph_service(void)
                 "a program that records the combiner hears the program wired into it: %f", p->source[mic_source].bus[0][255]);
         SVCHECK(fabsf(g->bus[2 * output][255] - 0.25f) < 1e-6f && p->stream[stream].routed, "the program plays on the output straight, not through Main: %f", g->bus[2 * output][255]);
         SVCHECK(fabsf(p->sink[audio_service.sink].mix.mix[0][255]) < 1e-9f, "and Main, which it is cut from, has nothing of it");
-        // The microphone to the output: an impulse put on its resampler comes out a block and the filter's half later.
+        // The microphone to the output: an impulse put on its resampler comes out the pulled block, the slack and the filter's half later, at
+        // pulls of the output's low-latency period (64), its period (128) and a block of 256.
+        for (int size = 64; size <= 256; size *= 2)
         {
                 float in[2][AUDIO_BLOCK], out[2][256];
-                long put_at = 100, found = -1, pulled = 0, held = 0;
+                long put_at = 40, found = -1, pulled = 0;
 
                 slot = g->slot[capture];
+                audio_rs_reset(audio_service.input[slot].fifo);
+                audio_service.input[slot].fifo_error = 0;
                 memset(in, 0, sizeof(in));
                 in[0][put_at] = in[1][put_at] = 1.0f;
-                audio_input_put(slot, in[0], in[1], 256);
-                for (int block = 0; block < 12 && found < 0; block++)
+                audio_input_put(slot, in[0], in[1], size);
+                for (int block = 0; block < 24 && found < 0; block++)
                 {
                         memset(in, 0, sizeof(in));
                         if (block)
-                                audio_input_put(slot, in[0], in[1], 256);
-                        held = audio_service.input[slot].fifo->have - audio_service.input[slot].fifo->table->taps;
-                        audio_input_pull(slot, out[0], out[1], 256);
-                        for (int i = 0; i < 256 && found < 0; i++)
+                                audio_input_put(slot, in[0], in[1], size);
+                        audio_input_pull(slot, out[0], out[1], size);
+                        for (int i = 0; i < size && found < 0; i++)
                                 if (fabsf(out[0][i]) > 0.5f)
                                         found = pulled + i;
-                        pulled += 256;
+                        pulled += size;
                 }
-                printf("  graph: a microphone wired to an output: an impulse put at frame %ld comes out at frame %ld (the resampler held %ld frames beyond its %ld taps when it was pulled)\n",
-                       put_at, found, held, audio_service.input[slot].fifo_table->taps);
-                SVCHECK(found >= 0 && found - put_at <= 256 + AUDIO_CAPTURE_SLACK + audio_service.input[slot].fifo_table->taps / 2 + 2,
-                        "a microphone's frames reach the output within the block, the slack and the filter's half: %ld frames late", found - put_at);
+                printf("  graph: a microphone wired to an output, pulled %d frames at a time at 48 kHz: an impulse comes out %ld frames (%.2f ms) after it went in\n", size,
+                       found - put_at, (double)(found - put_at) / 48.0);
+                SVCHECK(found >= 0 && found - put_at <= size + AUDIO_CAPTURE_SLACK + audio_service.input[slot].fifo_table->taps / 2 + 2,
+                        "a microphone's frames reach the output within the block, the slack and the filter's half: %ld frames late at %d", found - put_at, size);
         }
         (void)right;
 }
