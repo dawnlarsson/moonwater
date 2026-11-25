@@ -25177,4 +25177,383 @@ b32 main(void)
 }
 #endif /* CHECK_ipp */
 
+#ifdef CHECK_cups_shim
+#include "../../src/lib.util.c"
+#include "../../src/net/net.c"
+#include "../../src/net/ipp.c"
+#include "../../src/net/cups_shim.c"
+
+#define SHARED_counted
+#include "../checks.c"
+#undef SHARED_counted
+
+typedef struct
+{
+        positive forward_calls;
+        positive cancel_calls;
+        p8 last_printer[64];
+        p8 last_job_name[64];
+        p8 last_mime[64];
+        b32 last_copies;
+        bool last_duplex;
+        p8 last_doc[64];
+        positive last_doc_len;
+        b32 last_canceled_remote_id;
+} check_cups_mock;
+
+static bipolar check_cups_mock_forward(address_any ctx,
+                                       const ipp_printer address_to printer,
+                                       const ipp_job_request address_to req,
+                                       const p8 address_to doc,
+                                       positive doc_len,
+                                       ipp_job_result address_to res)
+{
+        check_cups_mock address_to m = (check_cups_mock address_to)ctx;
+
+        m->forward_calls++;
+        cups_copy_field(printer->name, string_length(printer->name),
+                        m->last_printer, sizeof(m->last_printer));
+        if (req->job_name)
+                cups_copy_field((const p8 address_to)req->job_name,
+                                string_length(req->job_name), m->last_job_name,
+                                sizeof(m->last_job_name));
+        if (req->mime_type)
+                cups_copy_field((const p8 address_to)req->mime_type,
+                                string_length(req->mime_type), m->last_mime,
+                                sizeof(m->last_mime));
+        m->last_copies = req->copies;
+        m->last_duplex = req->duplex;
+        m->last_doc_len = doc_len < sizeof(m->last_doc) ? doc_len
+                                                        : sizeof(m->last_doc);
+        if (doc && m->last_doc_len)
+                memory_copy(m->last_doc, doc, m->last_doc_len);
+        res->ipp_status = IPP_STATUS_OK;
+        res->job_id = 77;
+        res->job_state = IPP_JOB_PROCESSING;
+        return IPP_OK;
+}
+
+static bipolar check_cups_mock_cancel(address_any ctx,
+                                      const ipp_printer address_to printer,
+                                      b32 remote_job_id)
+{
+        check_cups_mock address_to m = (check_cups_mock address_to)ctx;
+
+        (void)printer;
+        m->cancel_calls++;
+        m->last_canceled_remote_id = remote_job_id;
+        return IPP_OK;
+}
+
+b32 main(void)
+{
+        static const string_address p_path = (string_address)"/tmp/mw_test_printers";
+        static const string_address d_path = (string_address)"/tmp/mw_test_printer_default";
+
+        // 1. Store save / load / default round-trip
+        {
+                ipp_printer save_list[2];
+                ipp_printer load_list[4];
+                p8 def_name[64];
+                positive n;
+
+                memory_zero(save_list, sizeof(save_list));
+                memory_copy(save_list[0].name, "Studio", 7);
+                memory_copy(save_list[0].uri, "ipp://192.168.1.50:631/ipp/print", 33);
+                memory_copy(save_list[0].make_model, "Brother HL-L2350DW", 19);
+                memory_copy(save_list[0].location, "Desk", 5);
+                save_list[0].caps = IPP_CAP_PDF | IPP_CAP_DUPLEX;
+
+                memory_copy(save_list[1].name, "Office", 7);
+                memory_copy(save_list[1].uri, "ipps://192.168.1.60:631/ipp/print", 34);
+                memory_copy(save_list[1].make_model, "HP Color LaserJet", 18);
+                memory_copy(save_list[1].location, "Hall", 5);
+                save_list[1].caps = IPP_CAP_PDF | IPP_CAP_COLOR | IPP_CAP_DUPLEX;
+
+                check("store save succeeds",
+                      cups_store_save(p_path, save_list, 2));
+                check("store set default succeeds",
+                      cups_store_set_default(d_path, (string_address)"Office"));
+                n = cups_store_load(p_path, d_path, load_list, 4, def_name,
+                                    sizeof(def_name));
+                check("store load restored 2 printers and default",
+                      n == 2 &&
+                          string_equals(def_name, (string_address)"Office") &&
+                          string_equals(load_list[0].name, (string_address)"Studio") &&
+                          string_equals(load_list[1].name, (string_address)"Office") &&
+                          load_list[1].tls &&
+                          (load_list[1].caps & IPP_CAP_COLOR) &&
+                          (load_list[0].caps & IPP_CAP_DUPLEX));
+                check("store rejects tab/control injection in default",
+                      !cups_store_set_default(d_path, (string_address)"Bad\tName"));
+        }
+
+        // 2. Direct IPP operations: CUPS-Get-Printers, CUPS-Get-Default,
+        //    Get-Printer-Attributes, Create-Job, Send-Document, Get-Jobs, Cancel-Job
+        {
+                cups_shim_state st;
+                check_cups_mock mock;
+                p8 req[1024], resp[8192];
+                ipp_writer w;
+                ipp_reader r;
+                ipp_attr a;
+                positive qlen, rlen;
+                b32 created_job_id = 0;
+
+                memory_zero(address_of mock, sizeof(mock));
+                cups_shim_init(address_of st, p_path, d_path);
+                st.forward_fn = check_cups_mock_forward;
+                st.cancel_fn = check_cups_mock_cancel;
+                st.forward_ctx = address_of mock;
+
+                // CUPS-Get-Printers
+                ipp_write_begin(address_of w, req, sizeof(req), 2, 0,
+                                IPP_OP_CUPS_GET_PRINTERS, 10);
+                ipp_write_op_header(address_of w, 2, 0,
+                                    IPP_OP_CUPS_GET_PRINTERS, 10, null);
+                qlen = ipp_write_end(address_of w);
+                rlen = cups_shim_handle_ipp(address_of st, req, qlen, resp,
+                                            sizeof(resp));
+                {
+                        positive pcount = 0;
+
+                        check("CUPS-Get-Printers returns OK",
+                              rlen > 0 && ipp_read_open(address_of r, resp, rlen) &&
+                                  r.op_or_status == IPP_STATUS_OK &&
+                                  r.request_id == 10);
+                        while (ipp_read_next(address_of r, address_of a))
+                                if (a.group == IPP_TAG_PRINTER &&
+                                    ipp_attr_is(address_of a, (string_address)"printer-name"))
+                                        pcount++;
+                        check("CUPS-Get-Printers listed both printers", pcount == 2);
+                }
+
+                // CUPS-Get-Default
+                ipp_write_begin(address_of w, req, sizeof(req), 2, 0,
+                                IPP_OP_CUPS_GET_DEFAULT, 11);
+                ipp_write_op_header(address_of w, 2, 0, IPP_OP_CUPS_GET_DEFAULT,
+                                    11, null);
+                qlen = ipp_write_end(address_of w);
+                rlen = cups_shim_handle_ipp(address_of st, req, qlen, resp,
+                                            sizeof(resp));
+                {
+                        p8 def_seen[64] = {0};
+
+                        check("CUPS-Get-Default returns OK",
+                              rlen > 0 && ipp_read_open(address_of r, resp, rlen) &&
+                                  r.op_or_status == IPP_STATUS_OK);
+                        while (ipp_read_next(address_of r, address_of a))
+                                if (ipp_attr_is(address_of a, (string_address)"printer-name"))
+                                        ipp_attr_copy_str(address_of a, def_seen,
+                                                          sizeof(def_seen));
+                        check("CUPS-Get-Default returned Office",
+                              string_equals(def_seen, (string_address)"Office"));
+                }
+
+                // Create-Job on Studio with copies=3, duplex
+                ipp_write_begin(address_of w, req, sizeof(req), 2, 0,
+                                IPP_OP_CREATE_JOB, 12);
+                ipp_write_op_header(address_of w, 2, 0, IPP_OP_CREATE_JOB, 12,
+                                    (string_address)"ipp://localhost/printers/Studio");
+                ipp_write_cstr(address_of w, IPP_TAG_NAME,
+                               (string_address)"job-name",
+                               (string_address)"invoice.pdf");
+                ipp_write_cstr(address_of w, IPP_TAG_NAME,
+                               (string_address)"requesting-user-name",
+                               (string_address)"dawn");
+                ipp_write_group(address_of w, IPP_TAG_JOB);
+                ipp_write_int(address_of w, IPP_TAG_INTEGER,
+                              (string_address)"copies", 3);
+                ipp_write_cstr(address_of w, IPP_TAG_KEYWORD,
+                               (string_address)"sides",
+                               (string_address)"two-sided-long-edge");
+                qlen = ipp_write_end(address_of w);
+                rlen = cups_shim_handle_ipp(address_of st, req, qlen, resp,
+                                            sizeof(resp));
+                check("Create-Job returns OK and job-id",
+                      rlen > 0 && ipp_read_open(address_of r, resp, rlen) &&
+                          r.op_or_status == IPP_STATUS_OK);
+                while (ipp_read_next(address_of r, address_of a))
+                        if (ipp_attr_is(address_of a, (string_address)"job-id"))
+                                (void)ipp_attr_i32(address_of a,
+                                                   address_of created_job_id);
+                check("Create-Job assigned job-id=1", created_job_id == 1);
+
+                // Send-Document with PDF bytes
+                ipp_write_begin(address_of w, req, sizeof(req), 2, 0,
+                                IPP_OP_SEND_DOCUMENT, 13);
+                ipp_write_op_header(address_of w, 2, 0, IPP_OP_SEND_DOCUMENT, 13,
+                                    (string_address)"ipp://localhost/printers/Studio");
+                ipp_write_int(address_of w, IPP_TAG_INTEGER,
+                              (string_address)"job-id", created_job_id);
+                ipp_write_cstr(address_of w, IPP_TAG_MIMETYPE,
+                               (string_address)"document-format",
+                               (string_address)"application/pdf");
+                ipp_write_bool(address_of w, (string_address)"last-document", true);
+                qlen = ipp_write_end(address_of w);
+                memory_copy(req + qlen, "%PDF-1.7\n%%EOF", 14);
+                rlen = cups_shim_handle_ipp(address_of st, req, qlen + 14, resp,
+                                            sizeof(resp));
+                check("Send-Document returns OK and forwarded PDF to Studio",
+                      rlen > 0 && ipp_read_open(address_of r, resp, rlen) &&
+                          r.op_or_status == IPP_STATUS_OK &&
+                          mock.forward_calls == 1 &&
+                          string_equals(mock.last_printer, (string_address)"Studio") &&
+                          string_equals(mock.last_job_name, (string_address)"invoice.pdf") &&
+                          string_equals(mock.last_mime, (string_address)"application/pdf") &&
+                          mock.last_copies == 3 && mock.last_duplex &&
+                          mock.last_doc_len == 14 &&
+                          !memory_compare(mock.last_doc, "%PDF-1.7\n%%EOF", 14));
+
+                // Get-Jobs sees active job #1
+                ipp_write_begin(address_of w, req, sizeof(req), 2, 0,
+                                IPP_OP_GET_JOBS, 14);
+                ipp_write_op_header(address_of w, 2, 0, IPP_OP_GET_JOBS, 14,
+                                    (string_address)"ipp://localhost/printers/Studio");
+                qlen = ipp_write_end(address_of w);
+                rlen = cups_shim_handle_ipp(address_of st, req, qlen, resp,
+                                            sizeof(resp));
+                {
+                        b32 seen_id = 0;
+
+                        check("Get-Jobs returns OK",
+                              rlen > 0 && ipp_read_open(address_of r, resp, rlen) &&
+                                  r.op_or_status == IPP_STATUS_OK);
+                        while (ipp_read_next(address_of r, address_of a))
+                                if (ipp_attr_is(address_of a, (string_address)"job-id"))
+                                        (void)ipp_attr_i32(address_of a,
+                                                           address_of seen_id);
+                        check("Get-Jobs listed job #1", seen_id == 1);
+                }
+
+                // Cancel-Job forwards cancel of remote_job_id=77
+                ipp_write_begin(address_of w, req, sizeof(req), 2, 0,
+                                IPP_OP_CANCEL_JOB, 15);
+                ipp_write_op_header(address_of w, 2, 0, IPP_OP_CANCEL_JOB, 15,
+                                    (string_address)"ipp://localhost/printers/Studio");
+                ipp_write_int(address_of w, IPP_TAG_INTEGER,
+                              (string_address)"job-id", created_job_id);
+                qlen = ipp_write_end(address_of w);
+                rlen = cups_shim_handle_ipp(address_of st, req, qlen, resp,
+                                            sizeof(resp));
+                check("Cancel-Job returns OK and canceled remote job #77",
+                      rlen > 0 && ipp_read_open(address_of r, resp, rlen) &&
+                          r.op_or_status == IPP_STATUS_OK &&
+                          mock.cancel_calls == 1 &&
+                          mock.last_canceled_remote_id == 77);
+        }
+
+        // 3. Live Unix-socket HTTP/1.1 + Expect: 100-continue + chunked Print-Job
+        {
+                b32 sv[2];
+                bipolar sp = system_call_4(syscall(socketpair), AF_UNIX,
+                                           SOCK_STREAM | SOCK_CLOEXEC, 0,
+                                           (positive)sv);
+                if (sp == 0)
+                {
+                        bipolar pid = system_call_2(syscall(clone), SIGCHLD, 0);
+                        if (pid == 0)
+                        {
+                                cups_shim_state st;
+                                check_cups_mock mock;
+
+                                socket_close(sv[0]);
+                                memory_zero(address_of mock, sizeof(mock));
+                                cups_shim_init(address_of st, p_path, d_path);
+                                st.forward_fn = check_cups_mock_forward;
+                                st.forward_ctx = address_of mock;
+                                cups_shim_serve_client(address_of st, sv[1]);
+                                socket_close(sv[1]);
+                                system_call_1(syscall(exit_group), 0);
+                        }
+                        else if (pid > 0)
+                        {
+                                p8 ipp_req[512];
+                                ipp_writer w;
+                                positive qlen;
+                                p8 http_req[1024];
+                                p8 hexlen[16];
+                                positive hlen, p = 0;
+                                p8 resp[2048];
+                                positive got = 0;
+                                b32 st_wait = 0;
+                                static const string_address hdr =
+                                    "POST /printers/Office HTTP/1.1\r\n"
+                                    "Host: localhost\r\n"
+                                    "Content-Type: application/ipp\r\n"
+                                    "Expect: 100-continue\r\n"
+                                    "Transfer-Encoding: chunked\r\n\r\n";
+
+                                socket_close(sv[1]);
+                                ipp_write_begin(address_of w, ipp_req, sizeof(ipp_req),
+                                                2, 0, IPP_OP_PRINT_JOB, 99);
+                                ipp_write_op_header(address_of w, 2, 0,
+                                                    IPP_OP_PRINT_JOB, 99,
+                                                    (string_address)"ipp://localhost/printers/Office");
+                                ipp_write_cstr(address_of w, IPP_TAG_NAME,
+                                               (string_address)"job-name",
+                                               (string_address)"photo.png");
+                                qlen = ipp_write_end(address_of w);
+                                ipp_req[qlen++] = 0x89;
+                                ipp_req[qlen++] = 'P';
+                                ipp_req[qlen++] = 'N';
+                                ipp_req[qlen++] = 'G';
+
+                                // Send headers first, verify 100 Continue, then chunked body
+                                (void)network_stream_send_all_for(
+                                    sv[0], (p8 address_to)hdr, string_length(hdr), 5, 0);
+                                {
+                                        p8 cont[64];
+                                        bipolar cr = network_stream_read_some_for(
+                                            sv[0], cont, sizeof(cont), 5, 0);
+                                        check("shim answers HTTP/1.1 100 Continue",
+                                              cr >= 12 &&
+                                                  !memory_compare(cont, "HTTP/1.1 100", 12));
+                                }
+
+                                hlen = positive_into_base(hexlen, qlen, 16, false);
+                                memory_copy(http_req + p, hexlen, hlen);
+                                p += hlen;
+                                http_req[p++] = '\r';
+                                http_req[p++] = '\n';
+                                memory_copy(http_req + p, ipp_req, qlen);
+                                p += qlen;
+                                memory_copy(http_req + p, "\r\n0\r\n\r\n", 7);
+                                p += 7;
+                                (void)network_stream_send_all_for(sv[0], http_req, p, 5, 0);
+
+                                while (got < sizeof(resp))
+                                {
+                                        bipolar r = system_read_once(sv[0], resp + got,
+                                                                     sizeof(resp) - got);
+                                        if (r <= 0)
+                                                break;
+                                        got += (positive)r;
+                                }
+                                socket_close(sv[0]);
+                                (void)system_wait4_retry((b32)pid, address_of st_wait, 0, null);
+
+                                {
+                                        bipolar hend = http_header_end(resp, got);
+                                        ipp_reader ir;
+
+                                        check("live Unix-socket chunked Print-Job returned HTTP 200 + IPP OK",
+                                              hend > 0 &&
+                                                  !memory_compare(resp, "HTTP/1.1 200 OK", 15) &&
+                                                  ipp_read_open(address_of ir,
+                                                                resp + hend,
+                                                                got - (positive)hend) &&
+                                                  ir.op_or_status == IPP_STATUS_OK &&
+                                                  ir.request_id == 99);
+                                }
+                        }
+                }
+        }
+
+        (void)system_call_3(syscall(unlinkat), AT_FDCWD, (positive)p_path, 0);
+        (void)system_call_3(syscall(unlinkat), AT_FDCWD, (positive)d_path, 0);
+        return test_report(null);
+}
+#endif /* CHECK_cups_shim */
+
 

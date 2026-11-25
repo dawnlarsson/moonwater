@@ -177,6 +177,7 @@ static const host_row host_rows[] = {
     {null, "@language", null, 'r'},
     {null, "@dns", null, 'r'},
     {null, "network", "the network as one page: each interface with its kind and its addresses, the name servers in their order, and what discovery may look up", 'b'},
+    {null, "print [list|discover|add URI|FILE|jobs|cancel ID|serve]", "native IPP Everywhere printing, LAN discovery, and local CUPS socket shim", 'b'},
     {null, "@network", null, 'r'},
     {null, "security [trust|block|SWITCH ...]", "keys TLS trusts and refuses besides the built-in ones, and the switches of TLS and bowls", 'm'},
     {null, "security", "the built-in trust, and what was added to it or taken from it", 'f'},

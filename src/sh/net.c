@@ -15,6 +15,8 @@
 #include "../net/net.c"
 #include "../net/feed.c"      // the signed feeds of MWFD_BASE_URL: verified and decoded, and fetched (canvas wallpaper curated's)
 #include "../net/discovery.c" // how this machine is reached; it brings host_words.h, the state words read below
+#include "../net/ipp.c"       // native IPP Everywhere client and mDNS _ipp._tcp / _ipps._tcp printer discovery
+#include "../net/cups_shim.c" // lightweight local CUPS Unix-socket shim (/run/moonwater/cups.sock)
 
 #define NET_STATE_DIR "/run/moonwater"
 #define NET_WAKE_PATH NET_STATE_DIR "/net.wake"

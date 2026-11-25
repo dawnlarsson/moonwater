@@ -3877,6 +3877,20 @@ static bool bowl_sound_offered(void)
         return system_access_at(AT_FDCWD, (string_address)BOWL_SOUND_SOCKET, 0) >= 0;
 }
 
+/*
+        Moonwater's local CUPS Unix-socket IPP shim (src/net/cups_shim.c) at
+        /run/moonwater/cups.sock. libcups clients (Chromium, Firefox, GTK, Qt,
+        LibreOffice, lp/lpr) honor CUPS_SERVER and speak IPP over this socket
+        without cupsd, PPDs, or Ghostscript.
+*/
+#define BOWL_CUPS_VARIABLE "CUPS_SERVER"
+#define BOWL_CUPS_SOCKET "/run/moonwater/cups.sock"
+
+static bool bowl_cups_offered(void)
+{
+        return system_access_at(AT_FDCWD, (string_address)BOWL_CUPS_SOCKET, 0) >= 0;
+}
+
 #define BOWL_WAYLAND_VARIABLE "WAYLAND_DISPLAY"
 #define BOWL_WAYLAND_SOCKET "/run/moonwater/wayland-0"
 
@@ -4038,6 +4052,7 @@ enum
 {
         BOWL_OPT_BUS,
         BOWL_OPT_SOUND,
+        BOWL_OPT_CUPS,
         BOWL_OPT_WAYLAND,
         BOWL_OPT_LANGUAGE,
         BOWL_OPT_MAILBOX,
@@ -4063,6 +4078,9 @@ static string_address address_to bowl_environment(
             {BOWL_SOUND_VARIABLE,
              BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET,
              BOWL_OPT_SOUND, false},
+            {BOWL_CUPS_VARIABLE,
+             BOWL_CUPS_VARIABLE "=" BOWL_CUPS_SOCKET,
+             BOWL_OPT_CUPS, false},
             {BOWL_WAYLAND_VARIABLE,
              BOWL_WAYLAND_VARIABLE "=" BOWL_WAYLAND_SOCKET,
              BOWL_OPT_WAYLAND, false},
@@ -4104,6 +4122,7 @@ static string_address address_to bowl_environment(
         language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
         offer[BOWL_OPT_BUS] = bowl_session_bus_offered();
         offer[BOWL_OPT_SOUND] = bowl_sound_offered();
+        offer[BOWL_OPT_CUPS] = bowl_cups_offered();
         offer[BOWL_OPT_WAYLAND] = bowl_wayland_offered();
         offer[BOWL_OPT_LANGUAGE] = language != null;
         offer[BOWL_OPT_MAILBOX] = bowl_wa_mailbox;

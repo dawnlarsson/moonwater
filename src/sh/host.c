@@ -357,6 +357,7 @@ static long host_windows_map(bool writable);
 #include "host/desktop.c" // the verb desktop: the desktop a machine starts, and which one
 #include "host/security.c" // the verbs dns, security and bind
 #include "host/network.c" // the verb network: the interfaces, the name servers and discovery as one page, and discovery's switches
+#include "host/print.c"   // the verb print: IPP Everywhere printing, mDNS discovery, and local CUPS Unix-socket shim
 #include "host/page.c" // the verbs setup (install, update, update usb, rollback, use, live, removable), status, help, wipe, machine, boot and ask: the page of verbs and its rows, the sticks and an update from one, a rollback, a wipe
 #include "host/install.c" // the verb install: the installer's drives, the one this started from, an update or an overwrite of one and what it wrote read back
 #include "host/apps.c" // the verb apps: the apps of the bowls, searched for, installed, removed and updated through each one's package manager or Flatpak, and the bowls themselves set up and taken away
@@ -1088,6 +1089,7 @@ static b32 host_main()
             {"name", host_name, true},
             {"dns", host_dns, false, true},
             {"network", host_network, false, true},
+            {"print", host_print, false, true},
             {"security", host_security, false, true},
             {"workarounds", host_workarounds, false, true},
             {"link", link_main, false},
