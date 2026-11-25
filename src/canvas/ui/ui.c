@@ -20403,9 +20403,7 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
                            {UI_ICON_LINE, 11, 33, 37, 33, 0}},
         // Its arms are boxes a sixth of a side thick round the middle: a stroke on the middle line falls between two pixels at 16, all edge.
         [UI_ICON_PLUS] = {{UI_ICON_BOX, 21, 10, 27, 38, 1}, {UI_ICON_BOX, 10, 21, 38, 27, 1}},
-        // The cross's middle and the grip's dots are square and three pixels across at 16 (nine of the grid's 48), so each has pixels that
-        // are the ink whole however small it is drawn.
-        [UI_ICON_REMOVE] = {{UI_ICON_LINE, 14, 14, 34, 34, 0}, {UI_ICON_LINE, 34, 14, 14, 34, 0}, {UI_ICON_BOX, 20, 20, 28, 28, 0}},
+        [UI_ICON_REMOVE] = {{UI_ICON_LINE, 12, 12, 36, 36, 0}, {UI_ICON_LINE, 36, 12, 12, 36, 0}},
         [UI_ICON_GRIP] = {{UI_ICON_BOX, 12, 7, 21, 16, 1}, {UI_ICON_BOX, 27, 7, 36, 16, 1}, {UI_ICON_BOX, 12, 19, 21, 28, 1},
                           {UI_ICON_BOX, 27, 19, 36, 28, 1}, {UI_ICON_BOX, 12, 31, 21, 40, 1}, {UI_ICON_BOX, 27, 31, 36, 40, 1}},
         [UI_ICON_STOP] = {{UI_ICON_BOX, 13, 13, 35, 35, 3}},
@@ -20425,8 +20423,8 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_HOME] = {{UI_ICON_LINE, 6, 24, 24, 8, 0}, {UI_ICON_LINE, 24, 8, 42, 24, 0}, {UI_ICON_LINE, 12, 22, 12, 40, 0},
                           {UI_ICON_LINE, 36, 22, 36, 40, 0}, {UI_ICON_LINE, 12, 40, 36, 40, 0}, {UI_ICON_LINE, 21, 40, 21, 30, 0}, {UI_ICON_LINE, 27, 40, 27, 30, 0}},
         [UI_ICON_NEW_FOLDER] = {{UI_ICON_RING, 6, 12, 42, 38, 4}, {UI_ICON_LINE, 24, 20, 24, 30, 0}, {UI_ICON_LINE, 19, 25, 29, 25, 0}},
-        // The handle from the top right, the ferrule across its end, the tuft round below it and its point to the bottom left.
-        [UI_ICON_BRUSH] = {{UI_ICON_LINE, 41, 7, 26, 22, 0}, {UI_ICON_LINE, 22, 20, 28, 26, 0}, {UI_ICON_BOX, 12, 24, 24, 36, 6}, {UI_ICON_LINE, 15, 33, 8, 40, 0}},
+        // Drawn analytically in ui_icon_brush (tapered diagonal handle, clean ferrule gap, teardrop bristle tuft).
+        [UI_ICON_BRUSH] = {{0}},
 };
 
 static void ui_brush_mark_card_draw(unsigned int *pixels, unsigned long pitch, int side, int scale, unsigned int theme, unsigned int accent, int lifted,
@@ -20498,6 +20496,121 @@ static fn ui_icon_refresh(struct ui address_to ui, int left, int top, int size, 
         ui_kit_fill(ui, &(struct ui_box){ax - half, by, ax - half + thick, ay - half + thick, 0, 0}, argb, null);
 }
 
+// A diagonal (or general) icon stroke from (ax, ay) to (bx, by) in Q8 device pixels, clipped to [left, left+size) x [top, top+size).
+static fn ui_icon_line(struct ui address_to ui, int left, int top, int size, b32 ax, b32 ay, b32 bx, b32 by, b32 thick, unsigned int argb)
+{
+        f64 x0 = (f64)ax / 256.0, y0 = (f64)ay / 256.0, x1 = (f64)bx / 256.0, y1 = (f64)by / 256.0;
+        f64 dx = x1 - x0, dy = y1 - y0, len = square_root(dx * dx + dy * dy);
+        f64 hw = (f64)thick / 512.0, ux, uy;
+        int r0, r1;
+        if (len < 1e-6 || size <= 0)
+                return;
+        ux = dx / len, uy = dy / len;
+        r0 = (int)((y0 < y1 ? y0 : y1) - hw * 1.45 - 1.0);
+        r1 = (int)((y0 > y1 ? y0 : y1) + hw * 1.45 + 1.0);
+        if (r0 < top)
+                r0 = top;
+        if (r1 > top + size - 1)
+                r1 = top + size - 1;
+        for (int row = r0; row <= r1; row++)
+        {
+                f64 py = (f64)row + 0.5, lo = (f64)left, hi = (f64)(left + size), a, b;
+                if (uy > 1e-6 || uy < -1e-6)
+                {
+                        f64 c = x0 + (py - y0) * ux / uy, s = hw / (uy < 0.0 ? -uy : uy);
+                        a = c - s, b = c + s;
+                        if (a > lo)
+                                lo = a;
+                        if (b < hi)
+                                hi = b;
+                }
+                else if ((py - y0) * ux < -hw || (py - y0) * ux > hw)
+                        continue;
+                if (ux > 1e-6 || ux < -1e-6)
+                {
+                        f64 off = (py - y0) * uy;
+                        f64 e0 = x0 + (-hw - off) / ux, e1 = x0 + (len + hw - off) / ux;
+                        a = e0 < e1 ? e0 : e1, b = e0 > e1 ? e0 : e1;
+                        if (a > lo)
+                                lo = a;
+                        if (b < hi)
+                                hi = b;
+                }
+                else if ((py - y0) * uy < -hw || (py - y0) * uy > len + hw)
+                        continue;
+                if (hi > lo)
+                        ui_kit_fill(ui, &(struct ui_box){(b32)(lo * 256.0), (b32)(row * 256), (b32)(hi * 256.0), (b32)((row + 1) * 256), 0, 0}, argb, null);
+        }
+}
+
+// A paintbrush: tapered diagonal handle from top-right to ferrule, crisp gap, and teardrop bristle tuft pointing to bottom-left.
+static fn ui_icon_brush(struct ui address_to ui, int left, int top, int size, unsigned int argb)
+{
+        f64 s = (f64)size / 48.0;
+        for (int row = 0; row < size; row++)
+        {
+                f64 v = ((f64)row + 0.5) / s;
+                b32 y = (b32)((top + row) * 256);
+                // Handle: centerline u + v = 48 from (41, 7) to ferrule cut u - v = 1 at (24.5, 23.5), rounded top cap r = 3.2.
+                if (v >= 3.8 && v <= 26.5)
+                {
+                        f64 t = (v - 7.0) / 16.5;
+                        f64 tc = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                        f64 hw = 3.2 - 1.2 * tc, du = hw * 1.41421356;
+                        f64 lo = 48.0 - v - du, hi = 48.0 - v + du;
+                        f64 cut = v + 1.0;
+                        if (lo < cut)
+                                lo = cut;
+                        if (v < 7.0 + 3.2 * 0.70710678)
+                        {
+                                f64 dy = v - 7.0;
+                                if (dy * dy < 3.2 * 3.2)
+                                {
+                                        f64 cx = square_root(3.2 * 3.2 - dy * dy);
+                                        if (v < 7.0 && lo < 41.0 - cx)
+                                                lo = 41.0 - cx;
+                                        if (hi > 41.0 + cx)
+                                                hi = 41.0 + cx;
+                                }
+                                else if (v < 7.0)
+                                        hi = lo;
+                        }
+                        if (lo < 0.0)
+                                lo = 0.0;
+                        if (hi > 48.0)
+                                hi = 48.0;
+                        if (hi > lo)
+                                ui_kit_fill(ui, &(struct ui_box){(b32)(((f64)left + lo * s) * 256.0), y, (b32)(((f64)left + hi * s) * 256.0), y + 256, 0, 0}, argb, null);
+                }
+                // Bristle teardrop: rounded upper bulb centered at (17.5, 30.5) r = 6.5, curving smoothly to a sharp point at (6.5, 41.5).
+                if (v >= 24.0 && v <= 41.5)
+                {
+                        f64 lo = 0.0, hi = 0.0;
+                        if (v < 30.5)
+                        {
+                                f64 dy = v - 30.5;
+                                if (dy * dy < 6.5 * 6.5)
+                                {
+                                        f64 dx = square_root(6.5 * 6.5 - dy * dy);
+                                        lo = 17.5 - dx, hi = 17.5 + dx;
+                                }
+                        }
+                        else
+                        {
+                                f64 t = (v - 30.5) / 11.0;
+                                lo = 11.0 - 4.5 * t * t;
+                                hi = 6.5 + 17.5 * (1.0 - t * t);
+                        }
+                        if (lo < 0.0)
+                                lo = 0.0;
+                        if (hi > 48.0)
+                                hi = 48.0;
+                        if (hi > lo)
+                                ui_kit_fill(ui, &(struct ui_box){(b32)(((f64)left + lo * s) * 256.0), y, (b32)(((f64)left + hi * s) * 256.0), y + 256, 0, 0}, argb, null);
+                }
+        }
+}
+
 static fn ui_icon(struct ui address_to ui, int which, int left, int top, int size, int value, unsigned int argb)
 {
         b32 thick = ui_icon_stroke(size);
@@ -20506,6 +20619,11 @@ static fn ui_icon(struct ui address_to ui, int which, int left, int top, int siz
         if (which == UI_ICON_REFRESH)
         {
                 ui_icon_refresh(ui, left, top, size, thick, argb);
+                return;
+        }
+        if (which == UI_ICON_BRUSH)
+        {
+                ui_icon_brush(ui, left, top, size, argb);
                 return;
         }
         if (which == UI_ICON_NETWORK)
@@ -20555,7 +20673,7 @@ static fn ui_icon_draw_parts_styled(struct ui address_to ui, const struct ui_ico
                                 ui_kit_fill(ui, &(struct ui_box){x0 - half, y0 - cap, x0 - half + thick, y1 - cap + span, 0, 0}, argb, null);
                 }
                 else
-                        ui_chevron_stroke(ui, box.x0 - thick / 2, box.y0 - thick / 2, box.x1 - thick / 2, box.y1 - thick / 2, thick, argb);
+                        ui_icon_line(ui, left, top, size, box.x0, box.y0, box.x1, box.y1, thick, argb);
         }
 }
 

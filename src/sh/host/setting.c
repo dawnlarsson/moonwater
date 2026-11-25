@@ -1166,15 +1166,18 @@ static bipolar locale_curated_stream(string_address url, p32 bytes, const p8 add
                                          facts.size != (positive)bytes ? MWFD_FETCH_UNVERIFIED : 0;
                 handle = status ? -1 : system_open_at(AT_FDCWD, part, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
                 status = status ? status : handle < 0 ? handle : 0;
-                if (!status && byte_store_reserve(body, (positive)bytes + 1, 0))
+                if (!status && byte_store_reserve(body, (positive)bytes + 1, (positive)bytes + 1))
+                {
                         while (body->used < (positive)bytes)
                         {
-                                bipolar got = system_read_once(handle, body->bytes + body->used, (positive)bytes - body->used);
+                                bipolar got = system_read_retry((positive)handle, body->bytes + body->used, (positive)bytes - body->used);
 
                                 if (got <= 0)
                                         break;
                                 body->used += (positive)got;
                         }
+                        body->bytes[body->used] = end;
+                }
                 else if (!status)
                         status = -ENOMEM;
                 if (handle >= 0)

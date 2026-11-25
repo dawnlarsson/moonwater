@@ -911,6 +911,8 @@ static p32 software_menu_flags(int id) { (void)id; return UI_LIST_MENU_HAS_COPY 
 static const char address_to software_copy(int id) { return (const char address_to)software_field(software.page.chosen, id, 1); }
 static const struct ui_list_menu software_menu = {.flags = software_menu_flags, .copy = software_copy};
 
+static fn software_changed(int top, int bottom) { ui_page_damage(&software.page, top, bottom); }
+
 static int software_open(void)
 {
         struct windows address_to t = software.own.table;
@@ -919,7 +921,7 @@ static int software_open(void)
 
         if (ui_lift_other(&software.own, (string_address) "software", false))
                 return 0;
-        software.list.describe = software_describe, software.list.wrap = true, software.list.menu = &software_menu;
+        software.list.describe = software_describe, software.list.damaged = software_changed, software.list.wrap = true, software.list.menu = &software_menu;
         software.list.hover = software.list.down = software.list.focus = -1;
         software.page.chosen = SOFTWARE_INSTALLED, software.page.menu_row = -1, software.page.pane = 1, software.choosing = -1;
         software_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
