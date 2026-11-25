@@ -973,7 +973,11 @@ static void check_compositor_scenes_brush(void)
              b[0] + b[2] == c[0] + c[2] - 6 && b[1] + b[3] == c[1] + c[3] - 6 && compositor_scenes_brush(0, compositor.scenes.card[0], scale, other);
     plus_none = !compositor_scenes_brush(2, compositor.scenes.card[2], scale, other);
     hit = placed && compositor_scenes_brush_at(b[0] + b[2] / 2, b[1] + b[3] / 2) == 1 && compositor_scenes_brush_at(c[0] + 4, c[1] + 4) == -1;
-    reach = placed && compositor_scenes_brush_at(b[0] - 8, b[1] + b[3] / 2) == 1 && compositor_scenes_brush_at(b[0] - 12, b[1] + b[3] / 2) == -1;
+    // A pointer's reach is the mark and 4 px round it; a finger's the kit's least target (48 round a mark of 28: 10 each side).
+    reach = placed && compositor_scenes_brush_at(b[0] - 3, b[1] + b[3] / 2) == 1 && compositor_scenes_brush_at(b[0] - 6, b[1] + b[3] / 2) == -1;
+    compositor.touching = 1;
+    reach = reach && compositor_scenes_brush_at(b[0] - 8, b[1] + b[3] / 2) == 1 && compositor_scenes_brush_at(b[0] - 12, b[1] + b[3] / 2) == -1;
+    compositor.touching = 0;
     rest = scenes_brush_glass(frames, compositor_scenes_frames(frames, rows, 0, 64), b);
     compositor.pointer_x = b[0] + b[2] / 2, compositor.pointer_y = b[1] + b[3] / 2;
     compositor_scenes_hover();
@@ -998,6 +1002,39 @@ static void check_compositor_scenes_brush(void)
                   (bipolar)first, (bipolar)second, (bipolar)compositor.scenes.open, (bipolar)compositor_spaces_active_index(0), (bipolar)compositor_wall_editing(),
                   (bipolar)c[0], (bipolar)c[1], (bipolar)c[2], (bipolar)c[3], (bipolar)b[0], (bipolar)b[1]);
     compositor_wall_edit(-1, 0), compositor_wall_editor.shown = 0;
+    // The brush with the keys whose Scene goes (the cards move past it): it has them no more, and Enter presses nothing.
+    {
+        b32 stale;
+
+        compositor_space_switch_index(0, 0);
+        compositor_scenes_open(0);
+        compositor_key(0, CK_KEY_TAB, 1, 0), compositor_key(0, CK_KEY_TAB, 0, 0);
+        compositor_key(0, CK_KEY_TAB, 1, 0), compositor_key(0, CK_KEY_TAB, 0, 0);
+        compositor_space_remove_index(0, 0);
+        compositor_scenes_relayout();
+        compositor_key(0, 28, 1, 0), compositor_key(0, 28, 0, 0);
+        stale = compositor_scenes_kept.key_brush == -1 && compositor.scenes.open && !compositor_wall_editing() && compositor.scenes.cards == 2;
+        check("scenes brush: a brush with the keys whose card is gone after the overview is laid out again has them no more, and Enter presses nothing", stale);
+        compositor_wall_edit(-1, 0), compositor_wall_editor.shown = 0;
+        compositor_space_add_id(0, 0);
+        compositor_scenes_close();
+    }
+    // A pointer at rest over a brush when the overview opens lifts it, though it never moved.
+    {
+        int here[4];
+
+        compositor_scenes_open(0);
+        if (compositor_scenes_brush(1, compositor.scenes.card[1], scale, here))
+        {
+            compositor.pointer_x = here[0] + here[2] / 2, compositor.pointer_y = here[1] + here[3] / 2;
+            compositor_scenes_hover();
+            compositor_scenes_close();
+            compositor_scenes_open(0);
+            compositor_scenes_hover();
+        }
+        check("scenes brush: a pointer at rest over a brush when the overview opens lifts it", compositor_scenes_kept.hover_brush == 1);
+        compositor_scenes_close();
+    }
     // Reading from the right: the foot's start corner.
     compositor_scenes_open(0);
     language.rtl = 1;
@@ -1008,7 +1045,7 @@ static void check_compositor_scenes_brush(void)
     check("scenes brush: a desktop Scene's card has the glass brush in its foot's end corner, the mark's side across", placed);
     check("scenes brush: the \"+\" card has none", plus_none);
     check("scenes brush: a point on it is its card's, and the card's top start corner is not", hit);
-    check("scenes brush: its hit is the kit's least target round it, and no further", reach);
+    check("scenes brush: a pointer's hit is the mark and 4 px round it, a finger's the kit's least target round it, and no further", reach);
     check("scenes brush: drawn, its glass is under half opaque at rest and lifted under the hand", drawn);
     check("scenes brush: a press on it goes to that Scene and opens the wallpaper's editor over it", pressed);
     check("scenes brush: Tab goes to each brush in turn and Enter presses it", keyed);

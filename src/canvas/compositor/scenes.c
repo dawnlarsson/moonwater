@@ -206,6 +206,9 @@ static void compositor_scenes_damage(void)
                 compositor_damage(screens[screen][0], screens[screen][1], screens[screen][2], screens[screen][3]);
 }
 
+static int compositor_scenes_brush(int card, const int c[4], int scale, int out[4]);
+static int compositor_scenes_scale(void);
+
 static void compositor_scenes_relayout(void)
 {
         unsigned int count = 0;
@@ -262,6 +265,16 @@ static void compositor_scenes_relayout(void)
                         }
         memory_copy(compositor_scenes_kept.size, sizes, (positive)n * sizeof(sizes[0]));
         compositor.scenes.windows = compositor_scenes_grid((const int (*)[2])sizes, n, win, gap, compositor.scenes.rect);
+        // What is under a pointer that has not moved is asked again (compositor_scenes_hover skips a pointer at rest), and a brush with
+        // the keys that is no brush any more (its Scene gone, or the cards moved past it) has them no more.
+        compositor_scenes_kept.at_x = compositor_scenes_kept.at_y = -(1 << 30);
+        {
+                int at = compositor_scenes_kept.key_brush, b[4];
+
+                if (at >= 0 && ((unsigned int)at + 1 >= compositor.scenes.cards ||
+                                !compositor_scenes_brush(at, compositor.scenes.card[at], compositor_scenes_scale(), b)))
+                        compositor_scenes_kept.key_brush = -1;
+        }
 }
 
 // The Scene card or window rect under (x, y). A window is an index into rect, a card an index into card; -1 is none.
@@ -361,14 +374,22 @@ static int compositor_scenes_brush(int card, const int c[4], int scale, int out[
         return 1;
 }
 
-// The card whose brush a point is on (its hit the kit's least target round the mark, UI_TARGET, as every small control's is), or -1.
+/*
+        The card whose brush a point is on, or -1. Its hit is sized by what points: a finger (compositor.touching, which input.c's
+        compositor_touch_button sets round the press and the release it hands on, and compositor_touch_motion round a move) gets the
+        kit's least target round the mark (UI_TARGET, as every small control's is); a pointer gets the mark and
+        COMPOSITOR_SCENES_BRUSH_REACH logical pixels round it, so a click by the card's foot is still the card's (its switch, or a
+        miniature's drag).
+*/
+#define COMPOSITOR_SCENES_BRUSH_REACH 4
 static int compositor_scenes_brush_at(int x, int y)
 {
         int scale = compositor_scenes_scale(), b[4];
 
         for (unsigned int card = 0; card + 1 < compositor.scenes.cards; card++)
                 if (compositor_scenes_brush((int)card, compositor.scenes.card[card], scale, b) &&
-                    ui_reach_hit(1, UI_TARGET * scale / 100, x, y, b[0], b[1], b[2], b[3]))
+                    ui_reach_hit(1, compositor.touching ? UI_TARGET * scale / 100 : b[2] + 2 * (COMPOSITOR_SCENES_BRUSH_REACH * scale / 100), x, y, b[0], b[1],
+                                 b[2], b[3]))
                         return (int)card;
         return -1;
 }
@@ -501,7 +522,7 @@ static int compositor_scenes_key(unsigned int code, int value, unsigned int mods
                 compositor_scenes_kept.key_brush = at >= 0 && at < n ? at : -1;
                 compositor_scenes_damage();
         }
-        else if ((code == 28 || code == 96 || code == 57) && !mods4 && at >= 0)
+        else if ((code == 28 || code == 96 || code == 57) && !mods4 && at >= 0 && at < n && compositor_scenes_brush(at, compositor.scenes.card[at], compositor_scenes_scale(), b))
         {
                 if (value == 1)
                         compositor_scenes_brush_press(at);
@@ -1135,14 +1156,18 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                                 frames[at].pitch = compositor_whole_lines(b[2]), frames[at].blend = 1;
                                 at++;
                         }
-                        int plate = lifted && t == UI_ONE ? compositor_scenes_plate_of(&compositor_scenes_kept.tip, ui_brush_name(), c[2], b[3], screen) : 0;
+                        // The name stays inside its own card: the room from the brush to the card's start edge, less the brush's own inset,
+                        // and the kit's painter ends it with an ellipsis where it is longer.
+                        int inset = c[1] + c[3] - (b[1] + b[3]); // the brush's own, from the card's foot
+                        int roomy = language_rtl() ? c[0] + c[2] - inset - (b[0] + b[2] + gap / 2) : b[0] - gap / 2 - (c[0] + inset);
+                        int plate = lifted && t == UI_ONE && roomy > b[3] ? compositor_scenes_plate_of(&compositor_scenes_kept.tip, ui_brush_name(), roomy, b[3], screen) : 0;
                         int tip[4] = {language_rtl() ? b[0] + b[2] + gap / 2 : b[0] - gap / 2 - plate, b[1], plate, b[3]};
 
                         if (plate > 0 && compositor_scenes_plain(frames, rows, at, room, filler, tip, clip, scale))
                         {
-                                frames[at].pixels = compositor_scenes_kept.tip.pixels + (unsigned long)(frames[at].y - tip[1]) * compositor_whole_lines(c[2]) +
+                                frames[at].pixels = compositor_scenes_kept.tip.pixels + (unsigned long)(frames[at].y - tip[1]) * compositor_whole_lines(roomy) +
                                                     (frames[at].x - tip[0]);
-                                frames[at].pitch = compositor_whole_lines(c[2]), frames[at].radius = b[3] / 2;
+                                frames[at].pitch = compositor_whole_lines(roomy), frames[at].radius = b[3] / 2;
                                 at++;
                         }
                 }
