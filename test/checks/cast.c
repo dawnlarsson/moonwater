@@ -521,3 +521,126 @@ int main(void)
         return cn_failures != 0;
 }
 #endif /* CHECK_cast */
+
+#ifdef CHECK_cast_encode
+/*
+        CHECK_cast_encode: the encoder (src/cast/encode.c) alone, on the box's card: ffmpeg in the Arch bowl coding H.264 on
+        VA-API, fed frames of a moving picture at 60 a second, each stamped as it is put; the time from a frame's stamp to its
+        last RTP packet here is its latency, said as the mean, the median, the 95th percentile and the worst, with the bytes a
+        frame. NOT RUN without the bowl, its ffmpeg or a render node.
+
+            cc -std=gnu11 -O2 -D_GNU_SOURCE -static -DCHECK_cast_encode test/checks.c && ./a.out [WIDTH HEIGHT SECONDS]
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+
+#define CAST_CALL(n, a, b, c, d, e, f) syscall((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), (long)(f))
+#define CAST_SYS(name) SYS_##name
+#include "../../src/cast/encode.c"
+
+static unsigned long long ce_now(void)
+{
+        struct timespec t;
+
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        return (unsigned long long)t.tv_sec * 1000000000ull + (unsigned long long)t.tv_nsec;
+}
+
+static int ce_order(const void *a, const void *b)
+{
+        unsigned long long x = *(const unsigned long long *)a, y = *(const unsigned long long *)b;
+
+        return x < y ? -1 : x > y;
+}
+
+static int ce_run(unsigned int width, unsigned int height, unsigned int seconds)
+{
+        struct cast_encoder e;
+        unsigned int frames = 60 * seconds, said = 0;
+        unsigned char *pixels = malloc((size_t)width * height * 4), packet[CAST_ENCODE_PACKET];
+        unsigned long long *late = calloc(frames + 8, sizeof(*late)), start, next;
+        long started;
+
+        if (access(CAST_ENCODE_BOWL CAST_ENCODE_FFMPEG, X_OK) || access(CAST_ENCODE_DEVICE, R_OK))
+        {
+                printf("CHECK_cast_encode: NOT RUN -- no %s%s or no %s\n", CAST_ENCODE_BOWL, CAST_ENCODE_FFMPEG, CAST_ENCODE_DEVICE);
+                return 0;
+        }
+        started = cast_encoder_start(&e, width, height, 60, 8000000);
+        if (started < 0 || !pixels || !late)
+        {
+                printf("CHECK_cast_encode: FAIL the coder did not start (%ld)\n", started);
+                return 1;
+        }
+        start = next = ce_now();
+        for (unsigned int f = 0; f < frames; f++)
+        {
+                // A picture that moves: a bar a frame across, over a gradient, so the coder has work every frame.
+                for (unsigned int y = 0; y < height; y++)
+                {
+                        unsigned int *row = (unsigned int *)(pixels + (size_t)y * width * 4);
+
+                        for (unsigned int x = 0; x < width; x++)
+                                row[x] = 0xff000000u | ((x + f * 7) & 255) << 16 | ((y + f * 3) & 255) << 8 | ((x ^ y) & 255);
+                        for (unsigned int x = (f * 16) % width, k = 0; k < 64 && x + k < width; k++)
+                                row[x + k] = 0xffffffffu;
+                }
+                while (ce_now() < next)
+                        ;
+                if (cast_encoder_put(&e, pixels, (unsigned long)width * 4, ce_now()) < 0)
+                        break;
+                next += getenv("CE_PACE_NS") ? strtoull(getenv("CE_PACE_NS"), 0, 10) : 16666667ull; // a faster pace: is the wait frames or time
+                for (;;)
+                {
+                        unsigned long long stamp;
+                        int last;
+                        long got = cast_encoder_take(&e, packet, &stamp, &last);
+
+                        if (got <= 0)
+                                break;
+                        if (last && stamp && said < frames)
+                                late[said++] = ce_now() - stamp;
+                }
+        }
+        // What is still in the coder, a second at most.
+        for (unsigned long long until = ce_now() + 1000000000ull; ce_now() < until && e.whole < e.put;)
+        {
+                unsigned long long stamp;
+                int last;
+
+                if (cast_encoder_take(&e, packet, &stamp, &last) > 0 && last && stamp && said < frames)
+                        late[said++] = ce_now() - stamp;
+        }
+        cast_encoder_stop(&e);
+        if (said < 10)
+        {
+                printf("CHECK_cast_encode: FAIL %ux%u: %u frames put, %u came out whole (%llu packets)\n", width, height, (unsigned)e.put, said, e.packets);
+                return 1;
+        }
+        {
+                unsigned long long sum = 0;
+
+                for (unsigned int k = 0; k < said; k++)
+                        sum += late[k];
+                qsort(late, said, sizeof(*late), ce_order);
+                printf("CHECK_cast_encode: %ux%u at 60 Hz, 8 Mb/s, %u s: %u of %llu frames whole, stamp to last packet mean %.2f ms, median %.2f, "
+                       "p95 %.2f, worst %.2f; %.0f bytes a frame, %.1f packets a frame, %llu dropped\n",
+                       width, height, seconds, said, e.put, (double)sum / said / 1e6, late[said / 2] / 1e6, late[said * 95 / 100] / 1e6,
+                       late[said - 1] / 1e6, (double)e.bytes / said, (double)e.packets / said, e.dropped);
+                (void)start;
+        }
+        free(pixels), free(late);
+        return said + 3 < frames ? (printf("CHECK_cast_encode: FAIL frames lost\n"), 1) : 0;
+}
+
+int main(int argc, char **argv)
+{
+        if (argc > 3)
+                return ce_run((unsigned)atoi(argv[1]), (unsigned)atoi(argv[2]), (unsigned)atoi(argv[3]));
+        return ce_run(1280, 720, 5) | ce_run(1920, 1080, 5);
+}
+#endif /* CHECK_cast_encode */
