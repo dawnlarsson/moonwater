@@ -1,7 +1,7 @@
 /*
-        moonwater on a Mac: the link verb, and nothing else.
+        moonwater / waterlink on a Mac: the link verb, and nothing else.
 
-                moonwater link ...      as on a machine (src/waterlink/command.c)
+                waterlink ...           or: moonwater link ... (src/waterlink/command.c)
 
         The same link a machine runs, built for macOS on arm64: the keys,
         machines and groups are the user's, in ~/Library/Application Support/
@@ -14,7 +14,7 @@
 
             /opt/homebrew/opt/llvm/bin/clang -isysroot "$(xcrun --show-sdk-path)" \
                 -O2 -w -fdefer-ts -fno-stack-protector -e _start \
-                -o moonwater src/waterlink/mac.c
+                -o waterlink src/waterlink/mac.c
 
         Linux never builds this file; the link there is a verb of the shell
         (src/sh/host.c).
@@ -62,25 +62,64 @@ static b32 modem_send_file(string_address path)
         return 1;
 }
 
+static bool mac_invoked_as_waterlink(string_address argv0)
+{
+        string_address base = argv0;
+
+        if (!argv0)
+                return false;
+        for (string_address walk = argv0; *walk; walk++)
+                if (*walk == '/')
+                        base = walk + 1;
+        return string_equals(base, "waterlink");
+}
+
 b32 main(void)
 {
         string_address address_to words = program_argument_list();
         positive count = (positive)program_argument_count();
+        b32 answer;
 
         //      A Linux-only call answers ENOSYS here, not SIGSYS (lib.c's
         //      table names them Darwin's nosys).
         (void)system_signal_install(SIGSYS, (positive)SIG_IGN, 0, 0, null);
 
-        if (count < 2 || !string_equals(words[1], "link"))
+        if (count >= 2 && string_equals(words[1], "link"))
+                answer = link_main(words, count);
+        else if (count >= 1 && mac_invoked_as_waterlink(words[0]))
         {
-                string_format(log_error, "moonwater on a Mac has the link verb alone: moonwater link ...\n");
+                string_address shifted[128];
+                positive room = count + 1;
+
+                if (room >= array_count(shifted))
+                {
+                        string_format(log_error, "waterlink: too many arguments\n");
+                        log_flush();
+                        return 2;
+                }
+                shifted[0] = words[0];
+                shifted[1] = (string_address) "link";
+                for (positive at = 1; at < count; at++)
+                        shifted[at + 1] = words[at];
+                if (count == 2 && string_equals(words[1], "help"))
+                        shifted[2] = (string_address) "--help";
+                shifted[room] = null;
+                answer = link_main(shifted, room);
+        }
+        else if (count < 2 || string_equals(words[1], "help") || string_equals(words[1], "-h") || string_equals(words[1], "--help"))
+        {
+                string_address help_words[4] = {count ? words[0] : (string_address) "moonwater", (string_address) "link", (string_address) "--help", null};
+
+                answer = link_main(help_words, 3);
+        }
+        else
+        {
+                string_format(log_error, "moonwater on a Mac has the link verb alone: moonwater link ... (or: waterlink ...)\n");
                 log_flush();
                 return 2;
         }
         //      lib.c's _start exits as main returns, with no C library exit
         //      in between, so what the log holds is written here.
-        b32 answer = link_main(words, count);
-
         log_flush();
         return answer;
 }
