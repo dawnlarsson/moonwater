@@ -476,7 +476,7 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         moment.
 */
 #define LOCALE_WALLPAPER_MOST (64ul << 20)
-#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE, forget NAME, curated [fetch|get HEX] or sharpen [PERCENT|default]\n"
+#define LOCALE_WALLPAPER_USAGE "canvas wallpaper is bare, edit [on|off], scene N CHOICE [SCREEN], picture FILE, forget NAME, curated [fetch|get HEX], sharpen [PERCENT|default] or enhance [off|PERCENT]\n"
 
 #ifndef SHELL_UTILITY_PROGRAM
 static unsigned int ui_image_kind(const p8 address_to file, positive size);
@@ -1059,6 +1059,50 @@ static b32 locale_curated_fetch(void)
 }
 #include "../../canvas/enhance.c" // the wallpaper enhancer's model fetch (enhance_model_fetch); its stage runs in the compositor
 
+/*
+        canvas wallpaper enhance [off|PERCENT]: the wallpaper enhancer's switch (src/canvas/enhance.c, kept in
+        SETTING_WALLPAPER_DIR/enhance). Bare, whether it is on, its creative licence and whether its model is here; off, or
+        on with the colour grade's creative licence in percent (0 cleans up and grades nothing), its model fetched if it
+        is not here, and the wallpaper made again.
+*/
+static b32 locale_wallpaper_enhance(string_address word)
+{
+        enhance_model m;
+        bipolar licence = enhance_wallpaper_licence();
+        positive used = 0, number = 0, at;
+        p8 text[8];
+        bool off = word && string_equals(word, "off");
+
+        if (!word)
+        {
+                bool here = enhance_model_load(&m);
+
+                if (here)
+                        enhance_model_drop(&m);
+                if (licence < 0)
+                        host_say(log, host_label "the wallpaper enhancer is off%s\n", (string_address)(here ? " (its model is here)" : ""));
+                else
+                        host_say(log, host_label "the wallpaper enhancer is on at a creative licence of %p percent, its model %s\n", (positive)licence,
+                                 (string_address)(here ? "here" : "not here yet (fetched with the next curated wallpaper)"));
+                return 0;
+        }
+        if (!off)
+        {
+                number = string_digits_max(word, 3, address_of used);
+                if (!used || word[used] || number > 100)
+                        return host_refuse("canvas wallpaper enhance is off or a percent from 0 to 100, not %s\n", word);
+        }
+        host_need_root();
+        at = off ? (memory_copy(text, "off", 3), 3) : positive_into_string(text, number);
+        text[at++] = '\n';
+        if (host_make_directory((string_address)SETTING_WALLPAPER_DIR, 0755, false) < 0 ||
+            host_write_file((string_address)SETTING_WALLPAPER_DIR "/enhance", text, at, 0644, true) < 0)
+                return host_refuse("the wallpaper enhancer's switch could not be kept in %s\n", (string_address)SETTING_WALLPAPER_DIR);
+        if (!off)
+                (void)enhance_model_fetch();
+        return locale_wallpaper_ask((string_address) "made\n");
+}
+
 // canvas wallpaper curated get HEX: the picture of the feed's wallpaper whose digest is HEX, fetched and checked, then made the wallpaper.
 static b32 locale_curated_get(string_address want)
 {
@@ -1251,6 +1295,8 @@ static b32 locale_canvas_wallpaper(string_address address_to arguments, positive
                 return locale_curated_fetch();
         if (string_equals(form, "curated") && count == 6 && string_equals(arguments[4], "get"))
                 return locale_curated_get(arguments[5]);
+        if (string_equals(form, "enhance") && (count == 4 || count == 5))
+                return locale_wallpaper_enhance(count == 5 ? arguments[4] : null);
         if (string_equals(form, "scene") && (count == 6 || count == 7))
         {
                 positive used = 0, number = string_digits_max(arguments[4], 4, address_of used), length = string_length(arguments[5]);

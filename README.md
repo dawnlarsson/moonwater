@@ -71,6 +71,7 @@ moonwater canvas wallpaper picture FILE  remember a picture (a PNG or a JPEG) an
 moonwater canvas wallpaper forget NAME  remember a picture no more; a Scene that had it has the moon
 moonwater canvas wallpaper curated [fetch|get HEX]  the feed's curated wallpapers: those kept, fetched and verified anew, or one's picture by its digest
 moonwater canvas wallpaper sharpen [PERCENT|default]  how much a picture wallpaper is sharpened once made the screen's size, 0 to 100 percent [35]
+moonwater canvas wallpaper enhance [off|PERCENT]  the learned clean-up of a wallpaper's picture and its colour grade: off, or on with a creative licence of 0 to 100 percent
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 
