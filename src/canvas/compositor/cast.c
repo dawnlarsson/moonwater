@@ -350,12 +350,17 @@ static void compositor_cast_present(const struct compositor_frame *frames, unsig
                 if (!c->ticket || row->ticket != c->ticket || __atomic_load_n(&row->state, __ATOMIC_ACQUIRE) != WINDOWS_CAST_LIVE)
                         continue;
                 // a window moved: its frames are drawn at its new corner, and all of it is stale
-                if (c->kind == WINDOWS_CAST_WINDOW && compositor_cast_where(row, &x, &y, &w, &h) && (x != c->x || y != c->y))
+                if (c->kind == WINDOWS_CAST_WINDOW)
                 {
-                        int whole[4] = {x, y, x + c->width, y + c->height};
+                        if (!compositor_cast_where(row, &x, &y, &w, &h))
+                                continue;
+                        if (x != c->x || y != c->y)
+                        {
+                                int whole[4] = {x, y, x + c->width, y + c->height};
 
-                        c->x = x, c->y = y;
-                        compositor_cast_stale(c, whole);
+                                c->x = x, c->y = y;
+                                compositor_cast_stale(c, whole);
+                        }
                 }
                 for (unsigned int d = 0; d < damages; d++)
                 {

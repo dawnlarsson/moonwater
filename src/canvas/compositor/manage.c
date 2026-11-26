@@ -1930,10 +1930,17 @@ static void compositor_list_count(struct windows *table, unsigned int why)
         table->list_why[why] = ++compositor_list_counts[why];
 }
 
+static unsigned char *compositor_list_of(int row)
+{
+        if (!compositor.table || row < 0 || (unsigned int)row >= compositor_rows_room)
+                return 0;
+        return (unsigned char *)compositor.table + WINDOWS_LISTS_AT(compositor.buffer, compositor_rows_room) + (unsigned long)row * WINDOW_LIST_BYTES;
+}
+
 static int compositor_lists_take(int row, unsigned int width, unsigned int height, int *damage)
 {
         struct windows *table = compositor.table;
-        unsigned char *list = window_list_of(table, row);
+        unsigned char *list = compositor_list_of(row);
         struct ui_draw_view view;
         unsigned int gen, invalid, seen_before;
 
@@ -2045,6 +2052,7 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         compositor.asking[row] = 0, compositor.front[row] = front;
         compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
         compositor_close_count(row, 0);
+        compositor.close_at[row] = 0;
         table->state[row] = compositor.state[row];
         compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.edges[row] = 0;
         compositor.row_space[row] = compositor.row_space_prev[row] = 0;
@@ -2214,7 +2222,8 @@ static void compositor_take(int row)
         if (compositor.asking[row] && width == table->want_width[row] && height == table->want_height[row])
         {
                 compositor.asking[row] = 0;
-                if (compositor.resize != row && compositor.shared_row != row)
+                if (compositor.resize != row &&
+                    !(compositor.shared_row >= 0 && (rows_has(&compositor.shared_lo_set, row) || rows_has(&compositor.shared_hi_set, row))))
                         compositor.edges[row] = 0;
         }
         if (!compositor.asking[row] && (width != compositor.w[row] || height != compositor.h[row]))
@@ -2341,6 +2350,7 @@ static void compositor_leave(int row)
         }
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
         compositor_close_count(row, 0);
+        compositor.close_at[row] = 0;
         compositor.landing[row] = compositor.glide[row] = compositor.asking[row] = compositor.asks[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = compositor.picture_w[row] = compositor.picture_h[row] = 0;
         compositor.arranged[row] = compositor.fullscreen_was[row] = COMPOSITOR_FLOATING;
@@ -2729,12 +2739,14 @@ static int compositor_space_activate(int screen, unsigned int sid)
                         p++;
                 }
         screens = compositor_screens(&count);
-        // Both Scenes roll across the screen, the new one in at the side of the way the person went (compositor_roll).
+        old_sp = compositor_space_find(old_id);
+        // Both Scenes roll across the screen in 2.5D parallax (wallpaper + windows + fullscreen apps).
         if (compositor_glides() && count == 1 && (unsigned int)screen < count)
-                compositor_roll_begin(screen, old_id, sid, new_pos >= old_pos ? 1 : -1, screens[screen][2]);
+                compositor_roll_begin(screen, old_id, sid, new_pos >= old_pos ? 1 : -1, screens[screen],
+                                      old_sp && old_sp->kind == COMPOSITOR_SPACE_FULLSCREEN,
+                                      target->kind == COMPOSITOR_SPACE_FULLSCREEN);
         compositor_grab_end(COMPOSITOR_GRAB_CANCEL, COMPOSITOR_NONE);
         compositor_popups_close(-1, -1);
-        old_sp = compositor_space_find(old_id);
         focus_on_screen = compositor.focus < 0 ||
                           (compositor.focus >= 0 && compositor.row_space[compositor.focus] == old_id) ||
                           (compositor.focus >= 0 && compositor_screen_of(compositor.focus) == screen);
@@ -3410,14 +3422,45 @@ static void compositor_put_away(int row)
         rows_add(&compositor.woken, row);
 }
 
+#define COMPOSITOR_CLOSE_KILL_NS 1500000000ull
+
+static void compositor_row_release(int row);
+#ifdef CONFIG_MOONWATER_WAYLAND
+static long wayland_row_owner(long row);
+#endif
+
 static void compositor_close(int row)
 {
+        positive now;
+
         if (row < 0 || !compositor.showing[row] || (compositor_popup_parent[row] >= 0 && (compositor.state[row] & WINDOW_CLOSING)))
                 return;
         if (compositor.asks[row] & WINDOW_RESIDENT)
         {
                 compositor_put_away(row);
                 return;
+        }
+        now = clock_monotonic_nanoseconds();
+        if (!compositor.close_at[row])
+                compositor.close_at[row] = now;
+        else if (compositor.close_asks[row] >= 2 && now - compositor.close_at[row] >= COMPOSITOR_CLOSE_KILL_NS)
+        {
+                int foreign = 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                foreign = wayland_row_owner(row) >= 0;
+#endif
+                if (!foreign && compositor.table)
+                {
+                        unsigned int pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+                        unsigned int self = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+
+                        if (pid > 1 && pid != compositor_clip_self && pid != self && windows_owner_ok(&windows_owner_held[row], pid))
+                        {
+                                compositor_call(syscall(kill), (positive)pid, 9, 0, 0, 0, 0);
+                                compositor_row_release(row);
+                                return;
+                        }
+                }
         }
         compositor_close_count(row, compositor.close_asks[row] == 255 ? 1u : compositor.close_asks[row] + 1u);
         compositor.state[row] |= WINDOW_CLOSING;
@@ -3708,19 +3751,20 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned long l
 static void compositor_osk_read(int row)
 {
         struct windows address_to table = compositor.table;
-        unsigned int head;
+        unsigned int head, tail;
         positive now;
 
         if (row < 0 || row >= COMPOSITOR_ROWS || !(compositor.asks[row] & WINDOW_KEYBOARD))
                 return;
         head = __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE);
+        tail = __atomic_load_n(&table->osk_tail[row], __ATOMIC_RELAXED);
         now = clock_monotonic_nanoseconds();
         // The head is the client's: a ring it has run past is kept to its newest WINDOWS_OSK keys, not drained whole.
-        if (head - table->osk_tail[row] > WINDOWS_OSK)
-                __atomic_store_n(&table->osk_tail[row], head - WINDOWS_OSK, __ATOMIC_RELEASE);
-        while (table->osk_tail[row] != head)
+        if (head - tail > WINDOWS_OSK)
+                tail = head - WINDOWS_OSK;
+        while (tail != head)
         {
-                unsigned int at = table->osk_tail[row] % WINDOWS_OSK;
+                unsigned int at = tail % WINDOWS_OSK;
                 int target = compositor.focus >= 0 ? compositor_popup_top(compositor.focus) : -1;
 
                 if ((compositor_osk_held[row] || now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS) && target >= 0 && target != row)
@@ -3728,8 +3772,9 @@ static void compositor_osk_read(int row)
                                         table->osk_flags[row][at] & (WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT |
                                                                      WINDOW_KEY_ALTGR | WINDOW_KEY_SUPER | WINDOW_KEY_REPEAT),
                                         table->osk_code[row][at], table->osk_character[row][at]);
-                __atomic_store_n(&table->osk_tail[row], table->osk_tail[row] + 1, __ATOMIC_RELEASE);
+                tail++;
         }
+        __atomic_store_n(&table->osk_tail[row], tail, __ATOMIC_RELEASE);
 }
 
 /* ---- protocol-neutral drag-and-drop ---- */
@@ -4582,6 +4627,16 @@ static b32 compositor_popup_first(int row)
         // A parent that is the row, or one of its own popups, would make a cycle in the chain every walk follows.
         if (parent < 0 || parent == row || !compositor.showing[parent] || compositor_popup_in_chain(parent, row))
                 return false;
+        {
+                int foreign = 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                foreign = wayland_row_owner(row) >= 0;
+#endif
+                if (!foreign && windows_owner_held[parent].pid > 1 &&
+                    (!windows_owner_held[row].pid || windows_owner_held[row].pid != windows_owner_held[parent].pid ||
+                     !windows_owner_ok(&windows_owner_held[row], windows_owner_held[row].pid)))
+                        return false;
+        }
         compositor_popup_parent[row] = parent;
         ax = compositor.x[parent] + compositor_fit(table->popup_x[row], -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST);
         ay = compositor.y[parent] + compositor_fit(table->popup_y[row], -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST);
@@ -4599,14 +4654,18 @@ static b32 compositor_popup_first(int row)
 
 static void compositor_popup_leave(int row)
 {
+        struct compositor_rows drop = {0};
+
         compositor_popup_parent[row] = -1;
         for (int child = 0; child < (int)compositor_rows_in_use; child++)
                 if (compositor_popup_in_chain(compositor_popup_parent[child], row))
-                {
-                        if (compositor.showing[child] && !compositor_row_xoverride(child))
-                                compositor_close(child);
-                        compositor_popup_parent[child] = -1;
-                }
+                        rows_add(&drop, child);
+        for (int child = rows_next(&drop, 0); child >= 0; child = rows_next(&drop, child + 1))
+        {
+                if (compositor.showing[child] && !compositor_row_xoverride(child))
+                        compositor_close(child);
+                compositor_popup_parent[child] = -1;
+        }
 }
 
 /* ---- external row allocation and doors ---- */
@@ -4640,7 +4699,7 @@ static int compositor_row_open_external(const struct compositor_row_spec *spec)
 
                 if (!__atomic_compare_exchange_n(&table->pid[row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
                         continue;
-                windows_reset_row(table, (unsigned int)row);
+                windows_reset_row_with_list(table, (unsigned int)row, compositor_list_of(row));
                 compositor_controls[row] = (struct compositor_controls_row){0, 0, 0, 0};
                 table->glass[row] = spec->glass, table->asked[row] = spec->asked ? 1u : 0u;
                 compositor_owner[row] = (spec->kind == COMPOSITOR_ROW_TOPLEVEL || spec->kind == COMPOSITOR_ROW_PLACED) &&

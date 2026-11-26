@@ -2045,8 +2045,8 @@ static struct windows *windows_scratch_fresh(struct windows **at)
 #define WINDOW_TRACE_CAP 1048576l
 enum
 {
-        WINDOW_TRACE_TEXT = 320, WINDOW_TRACE_APPEND = 0x1 | 0x400 | 0x40 | 0x80000,
-        WINDOW_TRACE_NEW = 0x1 | 0x200 | 0x40 | 0x80000, WINDOW_TRACE_READ = 0x80000
+        WINDOW_TRACE_TEXT = 320, WINDOW_TRACE_APPEND = 0x1 | 0x400 | 0x40 | 0x80000 | 0x20000 | 0x800,
+        WINDOW_TRACE_NEW = 0x1 | 0x200 | 0x40 | 0x80000 | 0x20000 | 0x800, WINDOW_TRACE_READ = 0x80000 | 0x20000 | 0x800
 };
 
 static b32 window_trace_live;
@@ -3186,8 +3186,11 @@ static struct windows *windows_board_trusted(void)
         while (n < 15 && link[6 + n] >= '0' && link[6 + n] <= '9')
                 pid[n] = link[6 + n], n++;
         pid[n] = 0;
-        if (!n || memory_compare(link + 6 + n, "/fd/", 4))
+        if (!n || memory_compare(link + 6 + n, "/fd/", 4) || 10 + n >= got)
                 return null;
+        for (long at = 10 + n; at < got; at++)
+                if (link[at] < '0' || link[at] > '9')
+                        return null;
         memory_copy(path, "/proc/", 7);
         string_append_bounded((string_address)path, (string_address)pid, sizeof path);
         string_append_bounded((string_address)path, (string_address) "/comm", sizeof path);

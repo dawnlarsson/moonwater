@@ -687,6 +687,7 @@ static struct
         int *x, *y;
         unsigned int *w, *h, *front, *state;
         unsigned char *close_asks;
+        positive *close_at;
         unsigned int *picture_w, *picture_h, *asking, *arranged;
         unsigned char *fullscreen, *fullscreen_was;
         unsigned int *row_space, *row_space_prev;
@@ -1692,7 +1693,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor.glide, COMPOSITOR_ROWS_ROW) X(compositor.glide_from, COMPOSITOR_ROWS_ROW) X(compositor.glide_at, COMPOSITOR_ROWS_ROW) \
         X(compositor.glide_base, COMPOSITOR_ROWS_ROW) X(compositor.made, COMPOSITOR_ROWS_ROW) X(compositor.x, COMPOSITOR_ROWS_ROW) \
         X(compositor.y, COMPOSITOR_ROWS_ROW) X(compositor.w, COMPOSITOR_ROWS_ROW) X(compositor.h, COMPOSITOR_ROWS_ROW) \
-        X(compositor.front, COMPOSITOR_ROWS_ROW) X(compositor.state, COMPOSITOR_ROWS_ROW) X(compositor.close_asks, COMPOSITOR_ROWS_ROW) \
+        X(compositor.front, COMPOSITOR_ROWS_ROW) X(compositor.state, COMPOSITOR_ROWS_ROW) X(compositor.close_asks, COMPOSITOR_ROWS_ROW) X(compositor.close_at, COMPOSITOR_ROWS_ROW) \
         X(compositor.picture_w, COMPOSITOR_ROWS_ROW) X(compositor.picture_h, COMPOSITOR_ROWS_ROW) X(compositor.asking, COMPOSITOR_ROWS_ROW) \
         X(compositor.arranged, COMPOSITOR_ROWS_ROW) X(compositor.fullscreen, COMPOSITOR_ROWS_ROW) X(compositor.fullscreen_was, COMPOSITOR_ROWS_ROW) \
         X(compositor.row_space, COMPOSITOR_ROWS_ROW) X(compositor.row_space_prev, COMPOSITOR_ROWS_ROW) \

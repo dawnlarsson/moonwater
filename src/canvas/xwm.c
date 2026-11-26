@@ -3689,7 +3689,7 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                 unsigned int at = (xwm_get16(in + 2) + 0x10000u - COMPOSITOR_XWM_ATOM_FIRST_SEQ) & 0xffffu;
                 if (at >= COMPOSITOR_XWM_ATOMS || x->atoms_seen >= COMPOSITOR_XWM_ATOMS)
                         return;
-                if (xwm_parse_atom_reply(in, (unsigned long)size, &atom) != XWM_OK)
+                if (xwm_parse_atom_reply(in, (unsigned long)size, &atom) != XWM_OK || !atom.atom)
                 {
                         x->broken = 1;
                         return;
