@@ -62,7 +62,10 @@ static inline int ui_draw_list_open(unsigned char address_to base, unsigned long
         version = __atomic_load_n(&head[UI_DRAW_LIST_VERSION_AT], __ATOMIC_RELAXED);
         flags = __atomic_load_n(&head[UI_DRAW_LIST_FLAGS], __ATOMIC_RELAXED);
         if (magic != UI_DRAW_LIST_MAGIC || version != UI_DRAW_LIST_VERSION || (flags & 1))
-                return -1;
+        {
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                return __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED) != gen ? 0 : -1;
+        }
         half_index = __atomic_load_n(&head[UI_DRAW_LIST_HALF], __ATOMIC_RELAXED);
         room = __atomic_load_n(&head[UI_DRAW_LIST_ROOM], __ATOMIC_RELAXED);
         count = __atomic_load_n(&head[UI_DRAW_LIST_COUNT], __ATOMIC_RELAXED);
@@ -71,10 +74,16 @@ static inline int ui_draw_list_open(unsigned char address_to base, unsigned long
         half = (bytes - UI_DRAW_LIST_HEADER) / 2 & ~15ul;
         ops = (unsigned long)room * UI_DRAW_LIST_OP;
         if (half_index > 1 || !room || half <= ops + 16 || count > room)
-                return -1;
+        {
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                return __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED) != gen ? 0 : -1;
+        }
         at = UI_DRAW_LIST_HEADER + (unsigned long)half_index * half;
         if ((unsigned long)cover_at != at + ops || (unsigned long)cover_used > half - ops)
-                return -1;
+        {
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                return __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED) != gen ? 0 : -1;
+        }
         view->ops = (const unsigned int address_to)(base + at);
         view->cover = base + at + ops;
         view->count = count, view->room = room, view->gen = gen, view->half = half_index;
@@ -13486,10 +13495,14 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
         if (type == WINDOW_EVENT_MOTION)
         {
                 struct ui_control address_to c = ui_kit_held;
-                if (c && !ui_control_live(c))
-                        return ui_kit_let_go_held(c), null;
                 if (c)
+                {
+                        if (count <= 0 || c < controls || c >= controls + count)
+                                return null;
+                        if (!ui_control_live(c))
+                                return ui_kit_let_go_held(c), null;
                         return ui_kit_pointer_drag(ui, c, x, y);
+                }
                 for (int k = 0; k < count; k++)
                 {
                         struct ui_control address_to ctl = &controls[k];
@@ -17074,6 +17087,8 @@ static b32 ui_popmenu_open(struct ui_popup address_to p, const struct window_row
         // A popup takes the pointer from its parent: no parent button stays seen as held once the menu is up. A menu is no table's columns'
         // until the one that has them says so after it is open (ui_columns_menu_open, ui_list_menu_open).
         ui_kit.buttons = 0;
+        if (ui_kit_held)
+                ui_kit_let_go_held(ui_kit_held);
         p->columns = null;
         if (p->open)
                 windows_leave(&p->own);
@@ -17126,13 +17141,14 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
                 ui_event_context(&event);
                 // What the picture shows: the hot item, the menu's scroll (a wheel, the keys or the bar moves it) and the bar's own lit state.
                 int hot = p->menu.hot, scroll = p->menu.tree.node[0].offset;
-                b32 lit = p->menu.scroll.hover, held = p->menu.scroll.held;
+                b32 lit = p->menu.scroll.hover, held = p->menu.scroll.held, ripple = p->menu.ripple.live;
                 if (event.type == WINDOW_EVENT_MOTION)
                         p->x = event.a, p->y = event.b;
                 answer = ui_popmenu_event(&p->ui, &p->menu, &event, p->x, p->y);
                 if (answer == UI_MENU_OPEN)
                         answer = UI_MENU_NOTHING;
-                if (p->menu.hot != hot || p->menu.tree.node[0].offset != scroll || p->menu.scroll.hover != lit || p->menu.scroll.held != held)
+                if (p->menu.hot != hot || p->menu.tree.node[0].offset != scroll || p->menu.scroll.hover != lit || p->menu.scroll.held != held ||
+                    p->menu.ripple.live != ripple)
                         ui_popmenu_present(p);
         }
         ui_kit.pointer_x = owner_x, ui_kit.pointer_y = owner_y, ui_kit_shape = owner_shape;
@@ -32686,6 +32702,11 @@ static long ui_job_tick(struct ui_job address_to j, long timeout, long address_t
         {
                 if (ui_job_reap(j))
                         return 0;
+                if (j->ending == 1 && j->timeout_ns && (positive)ui_kit.now >= j->began + j->timeout_ns)
+                {
+                        ui_job_finish(j, true);
+                        return j->child <= 0 ? 0 : ui_timeout_min(timeout, (long)UI_JOB_REAP_NS);
+                }
                 if (j->ending == 2 && (positive)ui_kit.now >= j->began + UI_JOB_LEFT_NS)
                 {
                         ui_job_leave(j);
@@ -32880,6 +32901,8 @@ static int ui_app_run(struct ui_app address_to app)
                                 ui_kit.buttons = 0;
                                 if (app->view)
                                         ui_view_cancel(app->ui, app->view);
+                                else if (ui_kit_held)
+                                        ui_kit_let_go_held(ui_kit_held);
                         }
                         ui_app_changed(app);
                         running &= ui_app_keys(app, *app->focused);
@@ -33170,6 +33193,9 @@ static b32 ui_lift_row(const struct window_row address_to own, string_address na
                 char door_name[48];
                 bipolar door;
                 if (row == own->row || !pid || (!shown && row > own->row) || !ui_is_program(pid, name))
+                        continue;
+                if ((table->glass[row] & (WINDOW_DISMISS | WINDOW_NO_TAB)) ||
+                    (table->name[row][0] && !string_equals((string_address)table->name[row], name)))
                         continue;
                 if (put_away)
                 {

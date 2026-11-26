@@ -469,9 +469,9 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         int sp_add = sp > 0 && sp < TASKBAR_SPACE_MAX ? 1 : 0;
                         int xt = taskbar_tray_items_count();
                         if (xt > TASKBAR_TRAY_ITEM_MAX) xt = TASKBAR_TRAY_ITEM_MAX;
-                        int items = (taskbar.share_item != 0) + (taskbar.notices_item != 0) + (taskbar.mic_item != 0) + (taskbar.volume_item != 0) +
-                                    (taskbar.battery_item && !taskbar.tray_custom) + (taskbar.tray_custom != 0) + (taskbar.clock_tray != 0) +
-                                    sp + sp_add + (xt > 0 ? xt : 0);
+                        int items = (taskbar.share_item != 0) + (taskbar.keyboard_item != 0) + (taskbar.notices_item != 0) + (taskbar.mic_item != 0) +
+                                    (taskbar.volume_item != 0) + (taskbar.battery_item && !taskbar.tray_custom) + (taskbar.tray_custom != 0) +
+                                    (taskbar.clock_tray && !taskbar.clock_tab && !taskbar.tray_custom) + sp + sp_add + (xt > 0 ? xt : 0);
                         M.square = M.cell = M.text_w = M.clocked = items ? most / items : 0;
                 }
                 for (int b = 0; b < 2; b++)
