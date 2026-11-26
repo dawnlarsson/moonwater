@@ -96,7 +96,7 @@ static struct
         int width, height, shown;
         unsigned int ground;
         b32 focused, dirty, have, connected, listed, recording, capture_off, outputs;
-        b64 next_poll, seen_at;
+        b64 next_poll, seen_at, connect_again;
         b32 quick;                           // the tray's popup (-q)
         struct ui_rect strips_box;           // what the tree gave the strips
         const char address_to note;          // what the window's foot says of the output that plays, or null: nothing is plugged into it
@@ -415,9 +415,16 @@ static fn mixer_flush(void)
                 if (!big->send[k])
                         continue;
                 if (!mixer.connected)
+                {
+                        if (ui_kit.now < mixer.connect_again)
+                                break;
                         mixer.connected = ctl_connect(&big->ctl, mixer.socket_path) == 0;
-                if (!mixer.connected)
-                        break;
+                        if (!mixer.connected)
+                        {
+                                mixer.connect_again = ui_kit.now + 500000000ll;
+                                break;
+                        }
+                }
                 if (strip->master && !mixer.recording)
                 {
                         if (big->send[k] & 1)
@@ -425,7 +432,11 @@ static fn mixer_flush(void)
                         if (answer >= 0 && (big->send[k] & 2))
                                 answer = ctl_set_sink_mute(&big->ctl, big->sink, strip->muted);
                         if (answer >= 0 && (big->send[k] & 1) && !strip->muted && strip->percent > 0)
+                        {
                                 canvas_jingle_play(&big->ctl, &mixer.jingle, mixer.socket_path, CANVAS_JINGLE_VOLUME, CTL_NONE, (long)(ui_kit.now / 1000000ll), 60);
+                                if (!big->ctl.open)
+                                        mixer.connected = false;
+                        }
                 }
                 else if (strip->master)
                 {
@@ -679,6 +690,7 @@ static int mixer_open(void)
                 return 0;
         if (!(mixer.big = ui_app_map(&mixer_app, sizeof(struct mixer_big))))
                 return 1;
+        mixer_app.view = &mixer.big->view;
         // The page is read first: the popup is as wide as the strips it shows come to in the kit's row (ui_strips_tree), the output's one, or on the
         // Recording page the microphone and up to three programs (room for a line beside one at least).
         mixer_poll((b64)ui_kit.now);
@@ -695,6 +707,12 @@ static fn mixer_asked(unsigned int page)
                 mixer_page(page == 1);
 }
 
+static fn mixer_close(void)
+{
+        mixer_disconnect();
+        mixer_unmap();
+}
+
 static struct ui_app mixer_app = {
         .own = &mixer.own,
         .ui = &mixer.ui,
@@ -709,6 +727,7 @@ static struct ui_app mixer_app = {
         .open = mixer_open,
         .event = mixer_event,
         .tick = mixer_tick,
+        .close = mixer_close,
         .page = mixer_asked,
         .width = &mixer.width,
         .height = &mixer.height,
