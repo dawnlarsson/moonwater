@@ -247,25 +247,26 @@ static inline unsigned long compositor_whole_lines(int width)
 }
 
 static int compositor_space_all_fullscreen(void);
+static int compositor_roll_active(void);
 
-// The ground at a point of the space: solid black on Fullscreen Spaces, else the wallpaper's pixel or colour.
+// The ground at a point of the space: solid black on Fullscreen Spaces (and behind rolling 2.5D wallpaper planes), else the wallpaper's pixel or colour.
 static inline unsigned int compositor_ground_at(int x, int y)
 {
-        if (compositor_space_all_fullscreen())
+        if (compositor_space_all_fullscreen() || compositor_roll_active())
                 return 0xff000000u;
         return compositor_wall && x >= 0 && y >= 0 && x < compositor_wall_w && y < compositor_wall_h
                        ? compositor_wall[(long)y * compositor_wall_pitch + x]
                        : compositor_ground;
 }
 
-// The ground over a rectangle of the target: solid black on Fullscreen Spaces, else the wallpaper or colour.
+// The ground over a rectangle of the target: solid black on Fullscreen Spaces (and behind rolling 2.5D wallpaper planes), else the wallpaper or colour.
 static void compositor_ground_fill(const struct compositor_target *t, int x, int y, int width, int height)
 {
         int x1, y1, x2, y2;
 
         if (!target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
-        if (compositor_space_all_fullscreen())
+        if (compositor_space_all_fullscreen() || compositor_roll_active())
         {
                 compositor_fill(t, x1, y1, x2 - x1, y2 - y1, 0xff000000u);
                 return;
@@ -333,7 +334,7 @@ HOT static void compositor_over_ground(unsigned int *restrict into, unsigned lon
         fn (*over)(p32 address_to, positive, const p32 address_to, positive, const p32 address_to, positive, positive, positive) =
             out ? memory_over_under_out_u32_rect : memory_over_under_u32_rect;
 
-        int fs = compositor_space_all_fullscreen();
+        int fs = compositor_space_all_fullscreen() || compositor_roll_active();
         unsigned int fill = fs ? 0xff000000u : compositor_ground;
 
         // Over the wallpaper: its rows under the picture's, where the space has them.
@@ -1958,7 +1959,7 @@ static void canvas_gpu_contents(void *ctx, const struct compositor_frame *f, uns
                 compositor_gpu_rect(f->blend ? 11 : 4, x, y, x + w, y + h, 0, f, 0, 0);
 }
 
-static void compositor_glass_settle_rect(int row, const int *c); // glass.c: a glass row's composed picture made over a rectangle
+static void compositor_glass_settle_frame_rect(int row, int fx, int fy, const int *c); // glass.c: a glass row's composed picture made over a frame rectangle
 static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, int corner, int r, int b, int ri,
                                    int cx, int cy, int sx1, int sy1, int sx2, int sy2, unsigned int edge, unsigned int tab)
 {
@@ -1978,7 +1979,7 @@ static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, 
                 // hundred pixels, and read as any window's.
                 int square[4] = {sx1, sy1, sx2, sy2};
 
-                compositor_glass_settle_rect(f->row_plus1 - 1, square);
+                compositor_glass_settle_frame_rect(f->row_plus1 - 1, f->x, f->y, square);
         }
         if (picture && ri && sx2 > sx1 && sy2 > sy1)
                 compositor_gpu_rect(f->blend ? 12 : 13, sx1, sy1, sx2, sy2, f->builtin ? tab : f->fill,
@@ -2066,7 +2067,7 @@ static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, in
 static b32 compositor_gpu_wall_frame(struct compositor_frame *wall)
 {
         memory_zero(wall, sizeof(*wall));
-        if (compositor_space_all_fullscreen() || !compositor_wall ||
+        if (compositor_space_all_fullscreen() || compositor_roll_active() || !compositor_wall ||
             compositor_wall_w < (int)compositor_gscene.width || compositor_wall_h < (int)compositor_gscene.height)
                 return false;
         wall->pixels = compositor_wall, wall->pitch = (unsigned long)compositor_wall_pitch, wall->width = compositor_wall_w, wall->height = compositor_wall_h;

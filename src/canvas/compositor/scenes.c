@@ -901,6 +901,13 @@ static unsigned int compositor_scenes_put(struct compositor_frame *span, unsigne
                                 compositor_wl_straight_settle(row, 0, (long)compositor.h[row]);
                         f.tiled_kind = 0;
                 }
+                if (f.glass_under)
+                {
+                        if (row >= 0)
+                                compositor_glass_settle(row);
+                        f.glass_under = f.glass_over = 0;
+                        f.glass_over_pitch = 0;
+                }
                 f.runs = 0;
                 f.close = f.minimize = 0, f.lit = 0, f.row_plus1 = 0, f.layer = 1;
                 f.preview[2] = f.preview[3] = 0, f.preview_under = 0, f.mark[2] = f.mark[3] = 0;

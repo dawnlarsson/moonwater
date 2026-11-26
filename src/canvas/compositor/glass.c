@@ -983,20 +983,32 @@ static void compositor_glass_settle_rect(int row, const int *c)
         // carries WINDOW_GLASS today, so this is the guard, not a fix of a reachable read).
         unsigned long picture_pitch = (unsigned long)compositor_stride();
         const unsigned int *picture = compositor_lent_pixels(row, &picture_pitch), *ground = compositor_glass_ground(row);
-        int width = c[2] - c[0];
+        int x0 = c[0] > compositor.x[row] ? c[0] : compositor.x[row];
+        int y0 = c[1] > compositor.y[row] ? c[1] : compositor.y[row];
+        int x1 = c[2] < compositor.x[row] + (int)compositor.w[row] ? c[2] : compositor.x[row] + (int)compositor.w[row];
+        int y1 = c[3] < compositor.y[row] + (int)compositor.h[row] ? c[3] : compositor.y[row] + (int)compositor.h[row];
+        int width = x1 - x0;
 
-        if (!ground || width <= 0 || c[3] <= c[1])
+        if (!ground || width <= 0 || y1 <= y0)
                 return;
         if (!picture)
                 picture = compositor_pixels(row), picture_pitch = (unsigned long)compositor_stride();
-        for (int y = c[1]; y < c[3]; y++)
+        for (int y = y0; y < y1; y++)
         {
-                unsigned long at = (unsigned long)(y - compositor.y[row]) * compositor_glass_pitch(row) + (unsigned long)(c[0] - compositor.x[row]);
+                unsigned long at = (unsigned long)(y - compositor.y[row]) * compositor_glass_pitch(row) + (unsigned long)(x0 - compositor.x[row]);
 
-                memory_glass_over_u32(compositor.composed[row] + at, picture + (unsigned long)(y - compositor.y[row]) * picture_pitch + (unsigned long)(c[0] - compositor.x[row]),
+                memory_glass_over_u32(compositor.composed[row] + at, picture + (unsigned long)(y - compositor.y[row]) * picture_pitch + (unsigned long)(x0 - compositor.x[row]),
                                       ground + at, (positive)width, plain);
         }
-        compositor.recomposed += (positive)width * (positive)(c[3] - c[1]);
+        compositor.recomposed += (positive)width * (positive)(y1 - y0);
+}
+
+static void compositor_glass_settle_frame_rect(int row, int fx, int fy, const int *c)
+{
+        int dx = compositor.x[row] - fx, dy = compositor.y[row] - fy;
+        int box[4] = {c[0] + dx, c[1] + dy, c[2] + dx, c[3] + dy};
+
+        compositor_glass_settle_rect(row, box);
 }
 
 // A row's composed picture made where it is not yet (compositor.unsettled: what the program drew, or the ground under it changed, since).
@@ -1104,9 +1116,13 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
 
         for (unsigned int at = 0; at < count; at++)
         {
-                int row = rows[at], box[4], *made = compositor.glass_made[row], *blocks, *stale = compositor.stale[row];
-                int place[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+                int row = (int)rows[at], box[4], *made, *blocks, *stale, place[4];
                 int moved = 0, deferred = 0;
+
+                if (row < 0 || row >= COMPOSITOR_ROWS)
+                        continue;
+                made = compositor.glass_made[row], stale = compositor.stale[row];
+                place[0] = compositor.x[row], place[1] = compositor.y[row], place[2] = (int)compositor.w[row], place[3] = (int)compositor.h[row];
 
                 if (!compositor.glassy[row] || frames[at].layer || (!frames[at].builtin && !frames[at].pixels))
                         continue;
@@ -1238,10 +1254,12 @@ static int compositor_close_mean_read(struct compositor_frame *frame)
         if (frame->glass_under && frame->row_plus1 && !compositor_scaled(frame))
         {
                 // (a glass window's pixels under the button are its composed picture's: made for the button's square alone)
+                int r = frame->row_plus1 - 1, dx = compositor.x[r] - frame->x, dy = compositor.y[r] - frame->y;
                 int box[4] = {bx, by, bx + side, by + side}, inside[4] = {frame->x, frame->y, frame->x + frame->width, frame->y + frame->height};
 
                 compositor_meet(box, inside);
-                compositor_glass_settle_rect(frame->row_plus1 - 1, box);
+                box[0] += dx, box[1] += dy, box[2] += dx, box[3] += dy;
+                compositor_glass_settle_rect(r, box);
         }
         picture = compositor_scaled(frame) ? 0 : frame->pixels;
         // Stride by 4 when reading write-combined client dma-bufs to cut uncached PCIe reads 16x with identical lightness mean.

@@ -1258,6 +1258,22 @@ static void compositor_wall_editor_bands_free(void)
                 compositor_wall_editor.band[at].pixels = 0;
         }
         compositor_wall_editor.bands = 0;
+        for (unsigned int at = 0; at < compositor_wall_editor.strips; at++)
+        {
+                void *p = compositor_wall_editor.strip[at].pixels;
+
+                if (p)
+                        mem_buf_free(&p, &compositor_wall_editor.strip[at].bytes, MEM_BUF_GPU_FORGET);
+                compositor_wall_editor.strip[at].pixels = 0;
+        }
+        compositor_wall_editor.strips = 0;
+        if (compositor_wall_editor.note.pixels)
+        {
+                void *p = compositor_wall_editor.note.pixels;
+
+                mem_buf_free(&p, &compositor_wall_editor.note.bytes, MEM_BUF_GPU_FORGET);
+                compositor_wall_editor.note.pixels = 0;
+        }
 }
 
 static int compositor_wall_start_program(string_address *argv);
@@ -2204,7 +2220,9 @@ static void compositor_wall_editor_tick(positive now)
 {
         if (compositor_walls.unwritten && !compositor_wall_editor.wheel_held && now - compositor_walls.changed >= COMPOSITOR_WALL_SETTLE)
                 compositor_walls_flush();
-        if (!compositor_wall_editor.open && !compositor_wall_editor.shown && !compositor_wall_editor.veil)
+        if (!compositor_wall_editor.open && !compositor_wall_editor.shown && !compositor_wall_editor.veil &&
+            !compositor_wall_editor.pill && !compositor_wall_editor.bands && !compositor_wall_editor.strips &&
+            !compositor_wall_editor.note.pixels && !compositor_wall_editor.wheel_px)
                 return;
         compositor_wall_editor_step(now);
         if (compositor_wall_editor.open)

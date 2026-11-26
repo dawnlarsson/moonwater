@@ -711,20 +711,56 @@ static void compositor_glide_frame(int row, struct compositor_frame *frame)
         start, only drawn on their way. One screen only: a window rolled off it would be drawn on the next.
 */
 #define COMPOSITOR_ROLL_NS (UI_WINDOW_NS * 2)
-#define COMPOSITOR_ROLL_DEPTH 250 // thousandths of the screen's width
+#define COMPOSITOR_ROLL_DEPTH 250       // thousandths of the screen's width: extra travel for top windows over bottom ones
+#define COMPOSITOR_ROLL_WALL_TRAVEL 920 // thousandths of the screen's width: wallpaper parallax travel (slower than windows)
+#define COMPOSITOR_ROLL_PERSP_WALL 90   // thousandths: 2.5D perspective recession on outgoing/incoming wallpapers
+#define COMPOSITOR_ROLL_PERSP_WIN 55    // thousandths: 2.5D perspective recession on outgoing/incoming windows & fullscreen apps
 
 static struct
 {
         unsigned int from, to; // the Scene rolled out and the one rolled in
         int screen, dir, width; // its screen; 1 the new Scene comes in at the right, -1 at the left; the screen's width
+        int rect[4];           // the rolling screen's rectangle (x, y, w, h)
+        unsigned char from_fs, to_fs; // whether the outgoing / incoming Scene is a Fullscreen Space
         positive at;           // the roll's first present, 0 before it
         unsigned char on;
+        unsigned int *old_wall; // outgoing Scene's wallpaper if compositor_wall was replaced mid-roll
+        unsigned long old_wall_bytes;
+        int old_wall_w, old_wall_h, old_wall_pitch;
 } compositor_roll;
 
-static void compositor_roll_begin(int screen, unsigned int from, unsigned int to, int dir, int width)
+static int compositor_roll_active(void)
 {
+        return compositor_roll.on != 0;
+}
+
+static int compositor_card_holds(void);
+
+static void compositor_roll_wall_drop(void)
+{
+        void *p = compositor_roll.old_wall;
+
+        if (!p || compositor_card_holds())
+                return;
+        mem_buf_free(&p, &compositor_roll.old_wall_bytes, MEM_BUF_GPU_FORGET);
+        compositor_roll.old_wall = null;
+        compositor_roll.old_wall_bytes = 0;
+        compositor_roll.old_wall_w = compositor_roll.old_wall_h = compositor_roll.old_wall_pitch = 0;
+}
+
+static void compositor_roll_begin(int screen, unsigned int from, unsigned int to, int dir, const int rect[4], int from_fs, int to_fs)
+{
+        compositor_roll_wall_drop();
         compositor_roll.from = from, compositor_roll.to = to, compositor_roll.screen = screen;
-        compositor_roll.dir = dir < 0 ? -1 : 1, compositor_roll.width = width, compositor_roll.at = 0, compositor_roll.on = 1;
+        compositor_roll.dir = dir < 0 ? -1 : 1, compositor_roll.width = rect[2];
+        memory_copy(compositor_roll.rect, rect, sizeof(compositor_roll.rect));
+        compositor_roll.from_fs = from_fs ? 1 : 0, compositor_roll.to_fs = to_fs ? 1 : 0;
+        compositor_roll.at = 0, compositor_roll.on = 1;
+}
+
+static b64 compositor_roll_done(void)
+{
+        return compositor_roll.on ? canvas_tween_ease(compositor_roll.at, clock_monotonic_nanoseconds(), COMPOSITOR_ROLL_NS) : UI_ONE;
 }
 
 // The old Scene's windows on the roll's screen, drawn while it goes.
@@ -760,9 +796,114 @@ static int compositor_roll_dx(int row)
                         above++;
         }
         travel = (long long)compositor_roll.width * (1000 + (all > 1 ? (long long)COMPOSITOR_ROLL_DEPTH * (all - 1 - above) / (all - 1) : COMPOSITOR_ROLL_DEPTH)) / 1000;
-        done = canvas_tween_ease(compositor_roll.at, clock_monotonic_nanoseconds(), COMPOSITOR_ROLL_NS);
+        done = compositor_roll_done();
         return scene == compositor_roll.to ? (int)(compositor_roll.dir * travel * (long long)(UI_ONE - done) / (long long)UI_ONE)
                                            : (int)(-compositor_roll.dir * travel * (long long)done / (long long)UI_ONE);
+}
+
+// Applies 2.5D parallax translation and subtle perspective recession to a rolling window or fullscreen app frame.
+static void compositor_roll_frame(int row, struct compositor_frame *frame)
+{
+        unsigned int scene;
+        b64 done, recess;
+        int dx, shrink;
+
+        if (!compositor_roll.on || !compositor.row_space || row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        scene = compositor.row_space[row];
+        if (scene != compositor_roll.from && scene != compositor_roll.to)
+                return;
+        dx = compositor_roll_dx(row);
+        frame->x += dx;
+        if (compositor.glassy[row] || frame->glass_under || frame->shaped || frame->builtin || frame->width <= 16 || frame->height <= 16)
+                return;
+        done = compositor_roll_done();
+        recess = scene == compositor_roll.to ? (UI_ONE - done) : done;
+        shrink = (int)((long long)COMPOSITOR_ROLL_PERSP_WIN * (long long)recess / (long long)UI_ONE);
+        if (shrink > 0)
+        {
+                int sw = frame->source_w ? frame->source_w : frame->width;
+                int sh = frame->source_h ? frame->source_h : frame->height;
+                int nw = (int)((long long)frame->width * (1000 - shrink) / 1000);
+                int nh = (int)((long long)frame->height * (1000 - shrink) / 1000);
+
+                if (nw > 0 && nh > 0 && (nw != frame->width || nh != frame->height))
+                {
+                        frame->x += (frame->width - nw) / 2;
+                        frame->y += (frame->height - nh) / 2;
+                        frame->width = nw, frame->height = nh;
+                        if (frame->pixels)
+                                frame->source_w = sw, frame->source_h = sh;
+                        frame->runs = 0;
+                        if (compositor.fullscreen[row] && !frame->radius)
+                                frame->radius = UI_RADIUS * frame->scale / 100;
+                }
+        }
+}
+
+static int compositor_output_scale(int at);
+
+// Emits the outgoing and incoming 2.5D parallax wallpaper frames at the bottom of the stack during a Scene roll.
+static unsigned int compositor_roll_wall_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room)
+{
+        unsigned int added = 0;
+        b64 done;
+        int sx = compositor_roll.rect[0], sy = compositor_roll.rect[1];
+        int sw = compositor_roll.rect[2], sh = compositor_roll.rect[3];
+        int scale;
+
+        if (!compositor_roll.on || sw <= 0 || sh <= 0)
+                return 0;
+        done = compositor_roll_done();
+        scale = compositor_output_scale(compositor_roll.screen) > 0 ? compositor_output_scale(compositor_roll.screen) : compositor.scale;
+        for (int pass = 0; pass < 2; pass++)
+        {
+                int incoming = pass == 1;
+                unsigned int *wall;
+                int ww, wh, wp;
+                b64 recess;
+                int dx, shrink, nw, nh;
+                struct compositor_frame *f;
+
+                if ((!incoming && compositor_roll.from_fs) || (incoming && compositor_roll.to_fs))
+                        continue;
+                if (at + added >= room)
+                        break;
+                if (!incoming && compositor_roll.old_wall)
+                        wall = compositor_roll.old_wall, ww = compositor_roll.old_wall_w, wh = compositor_roll.old_wall_h, wp = compositor_roll.old_wall_pitch;
+                else
+                        wall = compositor_wall, ww = compositor_wall_w, wh = compositor_wall_h, wp = compositor_wall_pitch;
+                recess = incoming ? (UI_ONE - done) : done;
+                if (incoming)
+                        dx = (int)(compositor_roll.dir * (long long)sw * (long long)(UI_ONE - done) / (long long)UI_ONE);
+                else
+                        dx = (int)(-compositor_roll.dir * ((long long)sw * COMPOSITOR_ROLL_WALL_TRAVEL / 1000) * (long long)done / (long long)UI_ONE);
+                shrink = (int)((long long)COMPOSITOR_ROLL_PERSP_WALL * (long long)recess / (long long)UI_ONE);
+                nw = (int)((long long)sw * (1000 - shrink) / 1000);
+                nh = (int)((long long)sh * (1000 - shrink) / 1000);
+                if (nw <= 0 || nh <= 0)
+                        continue;
+                f = &frames[at + added];
+                memory_zero(f, sizeof(*f));
+                f->x = sx + dx + (sw - nw) / 2;
+                f->y = sy + (sh - nh) / 2;
+                f->width = nw, f->height = nh;
+                f->scale = scale;
+                f->layer = 1;
+                f->radius = shrink > 0 ? UI_RADIUS * scale / 100 : 0;
+                if (wall && sx >= 0 && sy >= 0 && sx + sw <= ww && sy + sh <= wh)
+                {
+                        f->pixels = wall + (long)sy * wp + sx;
+                        f->pitch = (unsigned long)wp;
+                        if (nw != sw || nh != sh)
+                                f->source_w = sw, f->source_h = sh;
+                }
+                else
+                        f->fill = compositor_ground;
+                rows[at + added] = COMPOSITOR_ROWS;
+                added++;
+        }
+        return added;
 }
 
 // After a present: the roll's screen drawn again while it rolls, and once more when it ends, without the old Scene.
@@ -773,12 +914,18 @@ static void compositor_roll_keep(void)
         positive now;
 
         if (!compositor_roll.on)
+        {
+                compositor_roll_wall_drop();
                 return;
+        }
         now = clock_monotonic_nanoseconds();
         if (!compositor_roll.at)
                 compositor_roll.at = now;
         if (now - compositor_roll.at >= (positive)ui_paced(COMPOSITOR_ROLL_NS) || !compositor_glides())
+        {
                 compositor_roll.on = 0;
+                compositor_roll_wall_drop();
+        }
         screens = compositor_screens(&count);
         if ((unsigned int)compositor_roll.screen < count)
                 compositor_damage(screens[compositor_roll.screen][0], screens[compositor_roll.screen][1], screens[compositor_roll.screen][2],
@@ -1304,11 +1451,11 @@ static void compositor_runs_note(struct compositor_frame *frames, const unsigned
 {
         for (unsigned int at = 0; at < windows; at++)
         {
-                int row = rows[at];
+                int row = (int)rows[at];
                 unsigned int tag;
 
                 frames[at].runs = 0;
-                if (!compositor_runs_eligible(row, &frames[at]))
+                if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_runs_eligible(row, &frames[at]))
                         continue;
                 tag = compositor.seen[row] * 2 + (compositor.front[row] & 1u) + 1;
                 if (compositor.runs_tag[row] != tag)
@@ -1328,13 +1475,13 @@ static void compositor_runs_learn(const struct compositor_frame *frames, const u
 {
         for (unsigned int at = 0; at < windows; at++)
         {
-                int row = rows[at];
+                int row = (int)rows[at];
                 struct compositor_run_row *runs;
                 struct compositor_learning learning;
                 positive bands = parallel_width();
                 unsigned long covered = 0, height = (unsigned long)frames[at].height;
 
-                if (compositor.runs_state[row] || compositor.runs_composed[row] < COMPOSITOR_RUNS_AFTER ||
+                if (row < 0 || row >= COMPOSITOR_ROWS || compositor.runs_state[row] || compositor.runs_composed[row] < COMPOSITOR_RUNS_AFTER ||
                     !compositor_runs_eligible(row, &frames[at]) || !(runs = compositor_runs_of(row)))
                         continue;
                 learning = (struct compositor_learning){runs, frames[at].pixels, frames[at].pitch, (unsigned long)frames[at].width,
@@ -1664,7 +1811,6 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
                 compositor_glide_frame(row, frame);
-        frame->x += compositor_roll_dx(row);
         if (!compositor.landing[row] && !compositor.glide[row])
         {
                 int dx, dy, dw, dh;
@@ -1676,6 +1822,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                         frame->runs = 0;
                 }
         }
+        compositor_roll_frame(row, frame);
         // A scaled frame keeps its descriptor too: gpu_host's scaled pre-pass reads a tiled picture in place (gpu_image_scaled), and a linear
         // read of it would be garbage.
         frame->tiled_kind = compositor_straight_desc(row, frame->tiled_desc);

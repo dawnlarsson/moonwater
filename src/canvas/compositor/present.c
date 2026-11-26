@@ -1350,7 +1350,17 @@ static void compositor_wall_take(void)
 
         if (job->worker)
                 thread_join(job->worker), job->worker = null;
-        compositor_wall_drop();
+        if (compositor_roll.on && !compositor_roll.from_fs && !compositor_roll.old_wall && compositor_wall)
+        {
+                compositor_roll.old_wall = compositor_wall;
+                compositor_roll.old_wall_bytes = compositor_wall_bytes;
+                compositor_roll.old_wall_w = compositor_wall_w;
+                compositor_roll.old_wall_h = compositor_wall_h;
+                compositor_roll.old_wall_pitch = compositor_wall_pitch;
+                compositor_wall = null, compositor_wall_bytes = 0, compositor_wall_w = compositor_wall_h = compositor_wall_pitch = 0;
+        }
+        else
+                compositor_wall_drop();
         compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height, compositor_wall_pitch = job->pitch;
         memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
         job->pixels = null, job->done = 0, compositor_wall_turn = job->turn;
@@ -1548,6 +1558,8 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
         unsigned int count = 0, room = (unsigned int)COMPOSITOR_ROWS_LAYERED(compositor_rows_in_use);
         int scenes = compositor_scenes_shown(); // 1: the overview's frames are still to come; 2: they are in
 
+        if (compositor_roll.on && !scenes)
+                count += compositor_roll_wall_frames(frames, rows, count, room);
         for (unsigned int at = 0; at < compositor.stacked; at++)
                 if (compositor_visible(compositor.stack[at]) || compositor_roll_holds((int)compositor.stack[at]))
                 {
@@ -1568,9 +1580,10 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
                                 struct compositor_frame *back = &frames[count];
 
                                 memory_zero(back, sizeof(*back));
-                                back->x = compositor.x[row] + compositor_roll_dx(row), back->y = compositor.y[row];
+                                back->x = compositor.x[row], back->y = compositor.y[row];
                                 back->width = (int)compositor.w[row], back->height = (int)compositor.h[row];
                                 back->scale = compositor_row_scale(row), back->fill = 0xff000000u;
+                                compositor_roll_frame(row, back);
                                 rows[count++] = (unsigned int)row;
                         }
                         rows[count] = compositor.stack[at];
