@@ -120,6 +120,7 @@ static void share_build(void)
 
         memory_zero(&share.menu, sizeof(share.menu));
         share.menu.hot = -1;
+        share.count = 0;
         share.asked = share_oldest(table);
         if (share.asked >= 0)
         {
@@ -151,7 +152,7 @@ static void share_build(void)
                         ui_popmenu_add(&share.menu, share.text[n], null, UI_MENU_LITERAL, SHARE_ID_SCENE + (int)k), n++;
                 }
                 if (row->types & WINDOWS_CAST_TOPLEVEL)
-                        for (unsigned int r = 0; r < rows && n < UI_MENU_ITEMS - 3; r++)
+                        for (unsigned int r = 0; r < rows && n < UI_MENU_ITEMS - 3 && share.count < UI_MENU_ITEMS; r++)
                         {
                                 if (!share_offered(table, r, (unsigned int)share.own.row))
                                         continue;
@@ -264,6 +265,12 @@ static int share_open(void)
         return -1;
 }
 
+static fn share_close(void)
+{
+        if (share.asked >= 0 && !share.answered && share.own.table)
+                share_answer(share.own.table, share.asked, share.ticket, 0, 0, 0, 0), share.answered = true;
+}
+
 static struct ui_app share_app = {
         .own = &share.own,
         .ui = &share.ui,
@@ -276,6 +283,7 @@ static struct ui_app share_app = {
         .focused = &share.focused,
         .ground = &share.ground,
         .open = share_open,
+        .close = share_close,
         .language = share_language,
         .event = share_event,
         .dismiss = true,
@@ -322,6 +330,8 @@ static b32 share_command(positive at)
                                         return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_SCENE, table->cast_scene_id[k], 0, sound) ? 0 : 1;
                 // a window by its row, or the first offered whose app id or title holds the word
                 if (string_equals(what, (string_address) "window") && !(number[0] >= '0' && number[0] <= '9'))
+                {
+                        n = ~0u;
                         for (unsigned int r = 0; r < windows_rows(table); r++)
                                 if (share_offered(table, r, ~0u) &&
                                     (string_find((string_address)table->app_id[r], number) || string_find((string_address)table->title[r], number)))
@@ -329,6 +339,7 @@ static b32 share_command(positive at)
                                         n = r;
                                         break;
                                 }
+                }
                 if (string_equals(what, (string_address) "window") && n < windows_rows(table) && share_offered(table, n, ~0u))
                         return share_answer(table, asked, table->casts[asked].ticket, WINDOWS_CAST_WINDOW, n, table->pid[n], 0) ? 0 : 1;
         }
@@ -356,8 +367,6 @@ static b32 share_main()
                         share_app.glass = WINDOW_GLASS | WINDOW_NO_TAB, share_app.dismiss = false, share_app.beside = false;
         }
         ui_app_run(&share_app);
-        if (share.asked >= 0 && !share.answered)
-                share_answer(share.own.table, share.asked, share.ticket, 0, 0, 0, 0);
         return 0;
 }
 

@@ -6159,7 +6159,11 @@ static fn settings_close(void)
 static b32 settings_focus(b32 focused)
 {
         if (!focused)
+        {
                 ui_graph_let_go(&settings.map.graph), ui_page_let_go(&settings.ui, &settings.page, &settings.list);
+                if (settings_route)
+                        ui_graph_let_go(&settings_route->graph);
+        }
         return true;
 }
 

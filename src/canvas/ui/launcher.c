@@ -890,7 +890,10 @@ static b32 launcher_key(const struct window_event address_to event)
             ((event->flags & WINDOW_KEY_CONTROL) && (event->a == UI_KEY_P || event->a == UI_KEY_N)))
         {
                 b32 moved;
-                ui_view_list_key(&launcher.ui, &launcher.view, &launcher.list, event->a == UI_KEY_P ? UI_KEY_UP : event->a == UI_KEY_N ? UI_KEY_DOWN : event->a, &moved);
+                p32 vasks = ui_view_list_key(&launcher.ui, &launcher.view, &launcher.list, event->a == UI_KEY_P ? UI_KEY_UP : event->a == UI_KEY_N ? UI_KEY_DOWN : event->a, &moved);
+                if (vasks & UI_VIEW_DRAW)
+                        launcher.dirty = true;
+                launcher_handed(vasks);
         }
         else if (event->a == UI_KEY_TAB && launcher.entries && launcher.list.focus >= 0 && (positive)launcher.list.focus < launcher.entries)
         {

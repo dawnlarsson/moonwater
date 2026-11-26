@@ -2792,7 +2792,9 @@ static fn files_close_window(void)
         if (!files.big)
                 return;
         files_remote_read_abort();
+        files_move_end(&files.big->move);
         files_queue_clear(&files.big->queue);
+        ui_job_close(&files.device);
         if (files.uevents >= 0)
                 system_close(files.uevents), files.uevents = -1;
         for (p32 k = 0; k < files.big->peer_count; k++)
