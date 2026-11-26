@@ -5411,13 +5411,21 @@ HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned
 
 static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned long serial, int row)
 {
-        unsigned int bit = code >= COMPOSITOR_BTN_LEFT && code <= COMPOSITOR_BTN_TASK ? (1u << (code - COMPOSITOR_BTN_LEFT)) : 0u;
+        unsigned int index = code >= COMPOSITOR_BTN_LEFT ? code - COMPOSITOR_BTN_LEFT : 8u;
         positive now = clock_monotonic_nanoseconds();
 
-        if (pressed)
-                compositor.logo_alone = 0, compositor.button_down |= bit;
-        else
-                compositor.button_down &= ~bit;
+        if (index < 8u)
+        {
+                if (pressed)
+                {
+                        compositor.logo_alone = 0, compositor.button_down |= (unsigned char)(1u << index);
+                        compositor.button_row[index] = row;
+                        if (compositor.grab < 0)
+                                compositor.grab = row;
+                }
+                else
+                        compositor.button_down &= (unsigned char)~(1u << index), compositor_grab_settle();
+        }
         if (pressed && row >= 0)
                 compositor_clip_gesture(row);
         wayland_pointer_noted(row, pressed, serial);

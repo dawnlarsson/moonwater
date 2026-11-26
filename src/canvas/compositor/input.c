@@ -1300,9 +1300,12 @@ static void compositor_button_rect(int x, int y, int which)
 
 static void compositor_alert_show(int warn, const char *title, const char *message)
 {
-        bipolar child = system_fork();
+        bipolar child;
 
-        if (!title || !title[0] || child < 0)
+        if (!title || !title[0])
+                return;
+        child = system_fork();
+        if (child < 0)
                 return;
         if (child == 0)
         {
@@ -1334,8 +1337,15 @@ static void compositor_alert_show(int warn, const char *title, const char *messa
 
 static void compositor_popup_trigger(const char *named, const char *say, int x, int y, int slot)
 {
-        if (named && compositor_row_named(named) >= 0)
-                return;
+        if (named)
+        {
+                int up = compositor_row_named(named);
+                if (up >= 0)
+                {
+                        compositor_close(up), compositor_tabs_changed();
+                        return;
+                }
+        }
         compositor_button_rect(x, y, slot);
         taskbar_cell_waiting(slot, named, clock_monotonic_nanoseconds());
         compositor_script_say(say);
@@ -2885,6 +2895,12 @@ static void compositor_button(unsigned int code, int down)
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, up;
         struct compositor_rows roots;
 
+        if (!down && code == COMPOSITOR_BTN_LEFT && taskbar_globe_held())
+        {
+                compositor_pointer_clamp();
+                compositor_globe_release(compositor.pointer_x, compositor.pointer_y);
+                return;
+        }
         if (compositor_scenes_takes(code, down))
         {
                 compositor_scenes_button(code, down);
@@ -2912,9 +2928,10 @@ static void compositor_button(unsigned int code, int down)
         compositor_menu_roots(&roots);
         if (compositor_popups_close(-1, -1)) { compositor_cancel_holds(&roots); return; }
         up = compositor_launcher_row();
-        if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
-            !compositor_in_row(compositor.focus, compositor.pointer_x, compositor.pointer_y))
-                compositor_close(compositor.focus);
+        for (int r = 0; r < (int)compositor_rows_in_use; r++)
+                if (compositor.showing[r] && (compositor.asks[r] & WINDOW_DISMISS) &&
+                    !compositor_in_row(r, compositor.pointer_x, compositor.pointer_y))
+                        compositor_close(r);
         if (compositor_button_band(tab, code, up))
                 return;
         if (under < 0 && tab == TASKBAR_HIT_NONE && code == COMPOSITOR_BTN_RIGHT)
@@ -4220,6 +4237,8 @@ static void compositor_swipe_hand(unsigned int at, positive now, const struct ui
         struct ui_touch_frame report;
 
         compositor.swipe.state = COMPOSITOR_SWIPE_NONE;
+        if (at < COMPOSITOR_INPUTS && compositor.swipe.slot >= 0 && compositor.swipe.slot < UI_TOUCH_SLOTS)
+                compositor.screen_touch[at].was[compositor.swipe.slot] = -1;
         memory_copy(&report, frame, sizeof(report));
         compositor_touch_feed(at, now, &compositor.swipe.landing, &report);
 }
@@ -4445,6 +4464,8 @@ static void compositor_input_dropped(unsigned int at, positive now)
         if ((compositor.drag >= 0 || compositor.resize >= 0) && !compositor_input_down(any, COMPOSITOR_BTN_LEFT) &&
             !compositor_input_down(any, COMPOSITOR_BTN_RIGHT))
                 compositor_release(COMPOSITOR_BTN_LEFT, 0);
+        if (taskbar_globe_held() && !compositor_input_down(any, COMPOSITOR_BTN_LEFT))
+                compositor_globe_cancel();
 }
 
 #define COMPOSITOR_READER_RING 8192
@@ -5150,6 +5171,8 @@ static void compositor_input_gone(unsigned int at)
                         if (compositor.button_down >> index & 1)
                                 compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
                 compositor_scenes_let_go(COMPOSITOR_NONE);
+                if (taskbar_globe_held())
+                        compositor_globe_cancel();
                 if (compositor_edit_drag.held)
                         compositor_edit_drag.held = 0, taskbar_edit_set(0), compositor_tabs_changed();
                 if (compositor.edge_right)
@@ -5170,8 +5193,19 @@ static void compositor_input_gone(unsigned int at)
                 ui_touch_reset(&compositor.touch.gesture);
         }
         if (compositor.touchscreen[at])
+        {
+#ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_touch_report(at, 1);
+#endif
                 for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                         compositor_spot_lift(slot, clock_monotonic_nanoseconds());
+        }
+        if (compositor.touchpad[at])
+        {
+                struct compositor_pad *pad = compositor_pad_of(at);
+                if (pad && pad->pinching)
+                        compositor_pad_pinch_emit(UI_TOUCH_PINCH_END, pad->pinch_scale), pad->pinching = 0, pad->pinch_count = 0;
+        }
         compositor_device_reset(at), compositor_reader_changed(at);
 }
 
@@ -5212,6 +5246,8 @@ static void compositor_input_pad_drop(unsigned int at)
         pad->touching = compositor_input_down(bits, COMPOSITOR_BTN_TOUCH), pad->fingers = 0;
         for (int k = 4; k >= 0; k--)
                 if (compositor_input_down(bits, compositor_pad_tools[k])) { pad->fingers = k + 1; break; }
+        if (pad->pinching && pad->fingers < 2)
+                compositor_pad_pinch_emit(UI_TOUCH_PINCH_END, pad->pinch_scale), pad->pinching = 0, pad->pinch_count = 0;
 }
 
 static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved)
@@ -5288,7 +5324,7 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                         if (event->code == COMPOSITOR_SYN_DROPPED)
                         {
                                 if (is_spark)
-                                        compositor.held[COMPOSITOR_INPUTS] = 0;
+                                        compositor.held[COMPOSITOR_INPUTS] = 0, compositor_keys_release(), compositor_input_dropped(at, now);
                                 else
                                 {
                                         compositor.table->input_dropped[at]++;
