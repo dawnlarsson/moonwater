@@ -136,7 +136,8 @@ static struct
         unsigned int stack_gen, spaces_gen;     // the stack and the Spaces the layout was made from
         unsigned int *wall;                     // the wallpaper's miniature, a card's size (its pitch the card's width)
         unsigned long wall_bytes;
-        const unsigned int *wall_of;            // the wallpaper it was made from, at its turn, and the screen and card it was made for
+        const unsigned int *wall_of;            // the wallpaper it was made from, at its gen/turn, and the screen and card it was made for
+        unsigned int wall_gen;
         b64 wall_turn;
         int wall_screen[4], wall_w, wall_h;
         b64 shown, speed; // how far the overview is shown, 0 to COMPOSITOR_SCENES_FULL, and its speed (the same units a second): the kit's spring
@@ -411,6 +412,7 @@ static void compositor_scenes_open(int screen)
         compositor.scenes.pressed = 0, compositor.scenes.press_row = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_row = compositor_scenes_kept.hover_card = compositor_scenes_kept.drop_card = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_close = compositor_scenes_kept.held = compositor_scenes_kept.auto_opened = 0;
+        compositor_roll.on = 0, compositor_roll_wall_drop();
         compositor_scenes_kept.hover_brush = compositor_scenes_kept.key_brush = -1;
         compositor_scenes_relayout();
         compositor_scenes_damage();
@@ -439,6 +441,7 @@ static void compositor_scenes_close(void)
         compositor.scenes.open = 0, compositor.scenes.pressed = 0, compositor.scenes.press_row = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_row = compositor_scenes_kept.hover_card = compositor_scenes_kept.drop_card = COMPOSITOR_NONE;
         compositor_scenes_kept.hover_close = compositor_scenes_kept.held = compositor_scenes_kept.auto_opened = 0;
+        compositor_roll.on = 0, compositor_roll_wall_drop();
         compositor_scenes_kept.hover_brush = compositor_scenes_kept.key_brush = -1;
 }
 
@@ -621,6 +624,8 @@ static void compositor_scenes_button(unsigned int code, int down)
                 compositor.scenes.press_row = compositor_scenes_window_at(compositor.pointer_x, compositor.pointer_y);
                 if (compositor.scenes.press_row == COMPOSITOR_NONE)
                         compositor.scenes.press_row = compositor_scenes_strip_row_at(compositor.pointer_x, compositor.pointer_y);
+                if (compositor.scenes.press_row >= 0 && compositor.scenes.press_row < COMPOSITOR_ROWS && compositor.fullscreen[compositor.scenes.press_row])
+                        compositor.scenes.press_row = COMPOSITOR_NONE;
                 return;
         }
         if (!compositor.scenes.pressed)
@@ -769,6 +774,12 @@ static int compositor_scenes_drag_motion(int row, int x, int y)
         if (!compositor.scenes.open || !compositor_scenes_kept.auto_opened)
                 return 0;
         drop = compositor_scenes_card_at(x, y);
+        if (drop >= 0 && (unsigned int)drop + 1 < compositor.scenes.cards)
+        {
+                struct compositor_space *sp = compositor_space_at(compositor.scenes.screen, drop);
+                if (!sp || sp->kind != COMPOSITOR_SPACE_DESKTOP)
+                        drop = COMPOSITOR_NONE;
+        }
         if (drop != compositor_scenes_kept.drop_card)
                 compositor_scenes_kept.drop_card = drop, compositor_scenes_damage();
         return compositor_scenes_point(x, y);
@@ -795,7 +806,8 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
         if (!compositor_wall || w <= 0 || h <= 0 || s[2] <= 0 || s[3] <= 0 || s[0] < 0 || s[1] < 0 || s[0] + s[2] > compositor_wall_w ||
             s[1] + s[3] > compositor_wall_h)
                 return 0;
-        if (compositor_scenes_kept.wall && compositor_scenes_kept.wall_of == compositor_wall && compositor_scenes_kept.wall_turn == compositor_wall_turn &&
+        if (compositor_scenes_kept.wall && compositor_scenes_kept.wall_of == compositor_wall && compositor_scenes_kept.wall_gen == compositor_wall_gen &&
+            compositor_scenes_kept.wall_turn == compositor_wall_turn &&
             compositor_scenes_kept.wall_w == w && compositor_scenes_kept.wall_h == h && !memory_compare(compositor_scenes_kept.wall_screen, s, 4 * sizeof(int)))
                 return compositor_scenes_kept.wall;
         if (compositor_scenes_kept.wall_bytes < bytes)
@@ -838,7 +850,7 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
                                          compositor_wall + (long)s[1] * compositor_wall_pitch + s[0], (positive)compositor_wall_pitch,
                                          (positive)s[2], (positive)s[3], (positive)w, (positive)h, 0, 0);
         }
-        compositor_scenes_kept.wall_of = compositor_wall, compositor_scenes_kept.wall_turn = compositor_wall_turn;
+        compositor_scenes_kept.wall_of = compositor_wall, compositor_scenes_kept.wall_gen = compositor_wall_gen, compositor_scenes_kept.wall_turn = compositor_wall_turn;
         compositor_scenes_kept.wall_w = w, compositor_scenes_kept.wall_h = h;
         memory_copy(compositor_scenes_kept.wall_screen, s, 4 * sizeof(int));
         return compositor_scenes_kept.wall;
@@ -1402,7 +1414,16 @@ static void compositor_scenes_hover(void)
         if (compositor.scenes.pressed && compositor.scenes.press_row != COMPOSITOR_NONE && d > (slop < 2 ? 2 : slop))
                 held = 1;
         if (held && !compositor_scenes_kept.auto_opened)
-                compositor_scenes_kept.drop_card = card;
+        {
+                int drop = card;
+                if (drop >= 0 && (unsigned int)drop + 1 < compositor.scenes.cards)
+                {
+                        struct compositor_space *sp = compositor_space_at(compositor.scenes.screen, drop);
+                        if (!sp || sp->kind != COMPOSITOR_SPACE_DESKTOP)
+                                drop = COMPOSITOR_NONE;
+                }
+                compositor_scenes_kept.drop_card = drop;
+        }
         if (row != compositor_scenes_kept.hover_row || card != compositor_scenes_kept.hover_card || close != compositor_scenes_kept.hover_close ||
             brush != compositor_scenes_kept.hover_brush ||
             held != compositor_scenes_kept.held || (held && (x != compositor_scenes_kept.at_x || y != compositor_scenes_kept.at_y)))

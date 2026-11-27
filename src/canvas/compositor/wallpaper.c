@@ -897,6 +897,7 @@ static struct
         unsigned long veil_bytes;
         int veil_rect[4], veil_level;
         const unsigned int *veil_of;
+        unsigned int veil_gen;
         b64 veil_turn;
         unsigned int *pill; // the rounded Dark | Light | Auto segmented switch drawn over the Moonwater dynamic wallpaper card
         unsigned long pill_bytes;
@@ -1780,7 +1781,8 @@ static void compositor_wall_veil_keep(void)
                 if (compositor_wall_editor.pill && !compositor_wall_editor_shown() && !compositor_card_holds())
                         p = compositor_wall_editor.pill, mem_buf_free(&p, &compositor_wall_editor.pill_bytes, MEM_BUF_GPU_FORGET),
                         compositor_wall_editor.pill = 0, compositor_wall_editor.pill_w = compositor_wall_editor.pill_h = 0;
-                if (compositor_wall_editor.bands && !compositor_wall_editor_shown() && !compositor_card_holds())
+                if ((compositor_wall_editor.bands || compositor_wall_editor.strips || compositor_wall_editor.note.pixels) &&
+                    !compositor_wall_editor_shown() && !compositor_card_holds())
                         compositor_wall_editor_bands_free();
                 if (compositor_wall_editor.wheel_px && !compositor_wall_editor_shown() && !compositor_card_holds())
                         p = compositor_wall_editor.wheel_px, mem_buf_free(&p, &compositor_wall_editor.wheel_bytes, MEM_BUF_GPU_FORGET),
@@ -1793,6 +1795,7 @@ static void compositor_wall_veil_keep(void)
         if (s[2] <= 0 || s[3] <= 0 || compositor_card_holds())
                 return;
         if (compositor_wall_editor.veil && level == compositor_wall_editor.veil_level && compositor_wall_editor.veil_of == compositor_wall &&
+            compositor_wall_editor.veil_gen == compositor_wall_gen &&
             compositor_wall_editor.veil_turn == compositor_wall_turn && !memory_compare(compositor_wall_editor.veil_rect, s, sizeof(s)))
                 return;
         p = compositor_wall_editor.veil;
@@ -1814,7 +1817,7 @@ static void compositor_wall_veil_keep(void)
                         into[x] = alpha << 24 | rb | g << 8;
                 }
         }
-        compositor_wall_editor.veil_level = level, compositor_wall_editor.veil_of = compositor_wall, compositor_wall_editor.veil_turn = compositor_wall_turn;
+        compositor_wall_editor.veil_level = level, compositor_wall_editor.veil_of = compositor_wall, compositor_wall_editor.veil_gen = compositor_wall_gen, compositor_wall_editor.veil_turn = compositor_wall_turn;
         memory_copy(compositor_wall_editor.veil_rect, s, sizeof(s));
         compositor_wall_editor_damage();
 }

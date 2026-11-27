@@ -712,6 +712,8 @@ static int taskbar_plate(const struct taskbar_view *view, int at, int *which, in
 
 static int taskbar_hit_raw(const struct taskbar_view *view, int px, int py, const int grown[2], int *which)
 {
+        if (taskbar.shift >= UI_ONE)
+                return 0;
         const struct ui_tree address_to t = taskbar_tree(view);
         int at = ui_tree_hit(t, px, py, grown);
         return at < 0 ? 0 : (*which = t->node[at].id - 1, 1);
@@ -719,6 +721,8 @@ static int taskbar_hit_raw(const struct taskbar_view *view, int px, int py, cons
 
 static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 {
+        if (taskbar.shift >= UI_ONE)
+                return TASKBAR_HIT_NONE;
         const struct ui_tree address_to t = taskbar_tree(view);
         int grown[2] = {0, 0}, at, which;
 
