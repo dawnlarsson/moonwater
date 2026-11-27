@@ -183,6 +183,9 @@ static string_address ipp_job_state_name(b32 state)
 
 /* ---- Bounded IPP Binary Encoder (RFC 8010) ---- */
 
+#define NET_IPP_WIRE_ASM_IMPLEMENTATION
+#include "ipp_wire.asm.c"
+
 typedef struct
 {
         p8 address_to bytes;
@@ -191,100 +194,32 @@ typedef struct
         bool failed;
 } ipp_writer;
 
-static bool ipp_write_room(ipp_writer address_to w, positive need)
-{
-        if (w->failed || need > w->room - w->used)
-        {
-                w->failed = true;
-                return false;
-        }
-        return true;
-}
-
-static fn ipp_write_u8(ipp_writer address_to w, p8 v)
-{
-        if (!ipp_write_room(w, 1))
-                return;
-        w->bytes[w->used++] = v;
-}
-
-static fn ipp_write_u16(ipp_writer address_to w, p16 v)
-{
-        if (!ipp_write_room(w, 2))
-                return;
-        network_store_16(w->bytes + w->used, v);
-        w->used += 2;
-}
-
-static fn ipp_write_u32(ipp_writer address_to w, p32 v)
-{
-        if (!ipp_write_room(w, 4))
-                return;
-        network_store_32(w->bytes + w->used, v);
-        w->used += 4;
-}
-
-static fn ipp_write_raw(ipp_writer address_to w, const p8 address_to data,
-                        positive len)
-{
-        if (!len)
-                return;
-        if (!data || !ipp_write_room(w, len))
-        {
-                w->failed = true;
-                return;
-        }
-        memory_copy(w->bytes + w->used, data, len);
-        w->used += len;
-}
+_Static_assert(sizeof(ipp_writer) == sizeof(struct ipp_wire_writer), "ipp_writer size");
+_Static_assert(IW_OFFSET(ipp_writer, bytes)  == IW_OFFSET(struct ipp_wire_writer, bytes),  "ipp_writer.bytes");
+_Static_assert(IW_OFFSET(ipp_writer, room)   == IW_OFFSET(struct ipp_wire_writer, room),   "ipp_writer.room");
+_Static_assert(IW_OFFSET(ipp_writer, used)   == IW_OFFSET(struct ipp_wire_writer, used),   "ipp_writer.used");
+_Static_assert(IW_OFFSET(ipp_writer, failed) == IW_OFFSET(struct ipp_wire_writer, failed), "ipp_writer.failed");
 
 static fn ipp_write_begin(ipp_writer address_to w, p8 address_to buf,
                           positive room, p8 ver_major, p8 ver_minor,
                           p16 op_or_status, p32 request_id)
 {
-        w->bytes = buf;
-        w->room = room;
-        w->used = 0;
-        w->failed = false;
-        if (!buf || room < 9)
-        {
-                w->failed = true;
-                return;
-        }
-        ipp_write_u8(w, ver_major);
-        ipp_write_u8(w, ver_minor);
-        ipp_write_u16(w, op_or_status);
-        ipp_write_u32(w, request_id);
+        iw_u64 header = ((iw_u64)ver_major << 56) | ((iw_u64)ver_minor << 48) |
+                        ((iw_u64)op_or_status << 32) | (iw_u64)request_id;
+        ipp_wire_write_begin((struct ipp_wire_writer *)w, buf, room, header);
 }
 
 static fn ipp_write_group(ipp_writer address_to w, p8 group_tag)
 {
-        if (group_tag < 0x01 || group_tag > 0x0f || group_tag == IPP_TAG_END)
-        {
-                w->failed = true;
-                return;
-        }
-        ipp_write_u8(w, group_tag);
+        ipp_wire_write_group((struct ipp_wire_writer *)w, group_tag);
 }
 
 static fn ipp_write_attr(ipp_writer address_to w, p8 tag,
                          string_address name, const p8 address_to val,
                          positive val_len)
 {
-        positive name_len = name ? string_length(name) : 0;
-
-        if (tag < 0x10 || name_len > 0x7fff || val_len > 0x7fff)
-        {
-                w->failed = true;
-                return;
-        }
-        if (!ipp_write_room(w, 1 + 2 + name_len + 2 + val_len))
-                return;
-        ipp_write_u8(w, tag);
-        ipp_write_u16(w, (p16)name_len);
-        ipp_write_raw(w, (const p8 address_to)name, name_len);
-        ipp_write_u16(w, (p16)val_len);
-        ipp_write_raw(w, val, val_len);
+        ipp_wire_write_attr((struct ipp_wire_writer *)w, tag,
+                            (const char *)name, val, val_len);
 }
 
 static fn ipp_write_str(ipp_writer address_to w, p8 tag, string_address name,
@@ -340,8 +275,7 @@ static fn ipp_write_resolution(ipp_writer address_to w, string_address name,
 
 static positive ipp_write_end(ipp_writer address_to w)
 {
-        ipp_write_u8(w, IPP_TAG_END);
-        return w->failed ? 0 : w->used;
+        return (positive)ipp_wire_write_end((struct ipp_wire_writer *)w);
 }
 
 static fn ipp_write_op_header(ipp_writer address_to w, p8 ver_major,
@@ -394,159 +328,41 @@ typedef struct
         bool is_additional;
 } ipp_attr;
 
+_Static_assert(sizeof(ipp_reader) == sizeof(struct ipp_wire_reader), "ipp_reader size");
+_Static_assert(IW_OFFSET(ipp_reader, bytes)          == IW_OFFSET(struct ipp_wire_reader, bytes),          "ipp_reader.bytes");
+_Static_assert(IW_OFFSET(ipp_reader, length)         == IW_OFFSET(struct ipp_wire_reader, length),         "ipp_reader.length");
+_Static_assert(IW_OFFSET(ipp_reader, at)             == IW_OFFSET(struct ipp_wire_reader, at),             "ipp_reader.at");
+_Static_assert(IW_OFFSET(ipp_reader, ver_major)      == IW_OFFSET(struct ipp_wire_reader, ver_major),      "ipp_reader.ver_major");
+_Static_assert(IW_OFFSET(ipp_reader, ver_minor)      == IW_OFFSET(struct ipp_wire_reader, ver_minor),      "ipp_reader.ver_minor");
+_Static_assert(IW_OFFSET(ipp_reader, op_or_status)   == IW_OFFSET(struct ipp_wire_reader, op_or_status),   "ipp_reader.op_or_status");
+_Static_assert(IW_OFFSET(ipp_reader, request_id)     == IW_OFFSET(struct ipp_wire_reader, request_id),     "ipp_reader.request_id");
+_Static_assert(IW_OFFSET(ipp_reader, group)          == IW_OFFSET(struct ipp_wire_reader, group),          "ipp_reader.group");
+_Static_assert(IW_OFFSET(ipp_reader, last_name)      == IW_OFFSET(struct ipp_wire_reader, last_name),      "ipp_reader.last_name");
+_Static_assert(IW_OFFSET(ipp_reader, last_name_len)  == IW_OFFSET(struct ipp_wire_reader, last_name_len),  "ipp_reader.last_name_len");
+_Static_assert(IW_OFFSET(ipp_reader, attr_count)     == IW_OFFSET(struct ipp_wire_reader, attr_count),     "ipp_reader.attr_count");
+_Static_assert(IW_OFFSET(ipp_reader, payload_offset) == IW_OFFSET(struct ipp_wire_reader, payload_offset), "ipp_reader.payload_offset");
+_Static_assert(IW_OFFSET(ipp_reader, ended)          == IW_OFFSET(struct ipp_wire_reader, ended),          "ipp_reader.ended");
+_Static_assert(IW_OFFSET(ipp_reader, failed)         == IW_OFFSET(struct ipp_wire_reader, failed),         "ipp_reader.failed");
+
+_Static_assert(sizeof(ipp_attr) == sizeof(struct ipp_wire_attr), "ipp_attr size");
+_Static_assert(IW_OFFSET(ipp_attr, group)         == IW_OFFSET(struct ipp_wire_attr, group),         "ipp_attr.group");
+_Static_assert(IW_OFFSET(ipp_attr, tag)           == IW_OFFSET(struct ipp_wire_attr, tag),           "ipp_attr.tag");
+_Static_assert(IW_OFFSET(ipp_attr, name)          == IW_OFFSET(struct ipp_wire_attr, name),          "ipp_attr.name");
+_Static_assert(IW_OFFSET(ipp_attr, name_len)      == IW_OFFSET(struct ipp_wire_attr, name_len),      "ipp_attr.name_len");
+_Static_assert(IW_OFFSET(ipp_attr, value)         == IW_OFFSET(struct ipp_wire_attr, value),         "ipp_attr.value");
+_Static_assert(IW_OFFSET(ipp_attr, value_len)     == IW_OFFSET(struct ipp_wire_attr, value_len),     "ipp_attr.value_len");
+_Static_assert(IW_OFFSET(ipp_attr, is_additional) == IW_OFFSET(struct ipp_wire_attr, is_additional), "ipp_attr.is_additional");
+
 static bool ipp_read_open(ipp_reader address_to r, const p8 address_to bytes,
                           positive length)
 {
-        memory_zero(r, sizeof(address_to r));
-        if (!bytes || length < 9)
-        {
-                r->failed = true;
-                return false;
-        }
-        r->bytes = bytes;
-        r->length = length;
-        r->ver_major = bytes[0];
-        r->ver_minor = bytes[1];
-        if (r->ver_major < 1 || r->ver_major > 2)
-        {
-                r->failed = true;
-                return false;
-        }
-        r->op_or_status = network_load_16((p8 address_to)bytes + 2);
-        r->request_id = network_load_32((p8 address_to)bytes + 4);
-        r->at = 8;
-        return true;
+        return ipp_wire_read_open((struct ipp_wire_reader *)r, bytes, length) != 0;
 }
 
 static bool ipp_read_next(ipp_reader address_to r, ipp_attr address_to out)
 {
-        memory_zero(out, sizeof(address_to out));
-        if (r->failed || r->ended)
-                return false;
-
-        for (;;)
-        {
-                p8 tag;
-                p16 name_len, val_len;
-
-                if (r->at >= r->length)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                tag = r->bytes[r->at++];
-                if (tag == IPP_TAG_END)
-                {
-                        r->ended = true;
-                        r->payload_offset = r->at;
-                        return false;
-                }
-                if (tag < 0x10)
-                {
-                        if (tag == 0x00)
-                        {
-                                r->failed = true;
-                                return false;
-                        }
-                        r->group = tag;
-                        r->last_name = null;
-                        r->last_name_len = 0;
-                        continue;
-                }
-                if (!r->group)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (r->attr_count >= IPP_MAX_ATTRIBUTES)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (r->length - r->at < 2)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                name_len = network_load_16((p8 address_to)r->bytes + r->at);
-                r->at += 2;
-                if (name_len > r->length - r->at)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (name_len)
-                {
-                        out->name = r->bytes + r->at;
-                        out->name_len = name_len;
-                        out->is_additional = false;
-                        r->last_name = out->name;
-                        r->last_name_len = name_len;
-                        r->at += name_len;
-                }
-                else
-                {
-                        // Multi-valued (1setOf) or collection member/end.
-                        if (tag != IPP_TAG_END_COLLECTION &&
-                            tag != IPP_TAG_MEMBERNAME && !r->last_name)
-                        {
-                                r->failed = true;
-                                return false;
-                        }
-                        out->name = r->last_name;
-                        out->name_len = r->last_name_len;
-                        out->is_additional = true;
-                }
-                if (r->length - r->at < 2)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                val_len = network_load_16((p8 address_to)r->bytes + r->at);
-                r->at += 2;
-                if (val_len > r->length - r->at)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                out->value = r->bytes + r->at;
-                out->value_len = val_len;
-                r->at += val_len;
-
-                // Validate fixed-size RFC 8010 value encodings.
-                if ((tag == IPP_TAG_INTEGER || tag == IPP_TAG_ENUM) &&
-                    val_len != 4)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (tag == IPP_TAG_BOOLEAN &&
-                    (val_len != 1 || out->value[0] > 1))
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (tag == IPP_TAG_RANGE && val_len != 8)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (tag == IPP_TAG_RESOLUTION && val_len != 9)
-                {
-                        r->failed = true;
-                        return false;
-                }
-                if (tag == IPP_TAG_DATETIME && val_len != 11)
-                {
-                        r->failed = true;
-                        return false;
-                }
-
-                out->group = r->group;
-                out->tag = tag;
-                r->attr_count++;
-                return true;
-        }
+        return ipp_wire_read_next((struct ipp_wire_reader *)r,
+                                  (struct ipp_wire_attr *)out) != 0;
 }
 
 static bool ipp_attr_is(const ipp_attr address_to a, string_address name)
@@ -559,19 +375,12 @@ static bool ipp_attr_is(const ipp_attr address_to a, string_address name)
 
 static bool ipp_attr_i32(const ipp_attr address_to a, b32 address_to out)
 {
-        if ((a->tag != IPP_TAG_INTEGER && a->tag != IPP_TAG_ENUM) ||
-            a->value_len != 4)
-                return false;
-        address_to out = (b32)network_load_32((p8 address_to)a->value);
-        return true;
+        return ipp_wire_attr_i32((const struct ipp_wire_attr *)a, (iw_i32 *)out) != 0;
 }
 
 static bool ipp_attr_bool(const ipp_attr address_to a, bool address_to out)
 {
-        if (a->tag != IPP_TAG_BOOLEAN || a->value_len != 1)
-                return false;
-        address_to out = a->value[0] != 0;
-        return true;
+        return ipp_wire_attr_bool((const struct ipp_wire_attr *)a, (iw_u8 *)out) != 0;
 }
 
 static positive ipp_attr_copy_str(const ipp_attr address_to a,
@@ -608,103 +417,16 @@ typedef struct
         p8 path[160];
 } ipp_uri;
 
+_Static_assert(sizeof(ipp_uri) == sizeof(struct ipp_wire_uri), "ipp_uri size");
+_Static_assert(IW_OFFSET(ipp_uri, tls)  == IW_OFFSET(struct ipp_wire_uri, tls),  "ipp_uri.tls");
+_Static_assert(IW_OFFSET(ipp_uri, host) == IW_OFFSET(struct ipp_wire_uri, host), "ipp_uri.host");
+_Static_assert(IW_OFFSET(ipp_uri, port) == IW_OFFSET(struct ipp_wire_uri, port), "ipp_uri.port");
+_Static_assert(IW_OFFSET(ipp_uri, path) == IW_OFFSET(struct ipp_wire_uri, path), "ipp_uri.path");
+
 static bool ipp_parse_uri(string_address text, ipp_uri address_to out)
 {
-        string_address p = text;
-        p16 default_port = IPP_PORT_DEFAULT;
-        positive host_len = 0, path_len = 0;
-
-        memory_zero(out, sizeof(address_to out));
-        if (!text || !text[0])
-                return false;
-
-        if (!memory_compare_ascii_case(p, "ipps://", 7))
-        {
-                out->tls = true;
-                default_port = IPP_PORT_DEFAULT;
-                p += 7;
-        }
-        else if (!memory_compare_ascii_case(p, "ipp://", 6))
-        {
-                out->tls = false;
-                default_port = IPP_PORT_DEFAULT;
-                p += 6;
-        }
-        else if (!memory_compare_ascii_case(p, "https://", 8))
-        {
-                out->tls = true;
-                default_port = 443;
-                p += 8;
-        }
-        else if (!memory_compare_ascii_case(p, "http://", 7))
-        {
-                out->tls = false;
-                default_port = 80;
-                p += 7;
-        }
-        else if (string_find(p, "://"))
-        {
-                return false;
-        }
-
-        // Host
-        while (p[host_len] && p[host_len] != ':' && p[host_len] != '/')
-        {
-                p8 c = p[host_len];
-
-                if (!http_host_byte(c))
-                        return false;
-                if (host_len >= sizeof(out->host) - 1)
-                        return false;
-                out->host[host_len++] = c;
-        }
-        if (!host_len)
-                return false;
-        out->host[host_len] = end;
-        p += host_len;
-
-        // Optional :port
-        if (*p == ':')
-        {
-                positive port_val = 0, digits = 0;
-
-                p++;
-                while (*p >= '0' && *p <= '9')
-                {
-                        port_val = port_val * 10 + (positive)(*p - '0');
-                        if (++digits > 5 || port_val > 65535)
-                                return false;
-                        p++;
-                }
-                if (!digits || !port_val)
-                        return false;
-                out->port = (p16)port_val;
-        }
-        else
-        {
-                out->port = default_port;
-        }
-
-        // Optional /path (default "/ipp/print")
-        if (!*p)
-        {
-                memory_copy(out->path, "/ipp/print", 11);
-                return true;
-        }
-        if (*p != '/')
-                return false;
-        while (p[path_len])
-        {
-                p8 c = p[path_len];
-
-                if (byte_is_control(c) || c == ' ' || c == '\\' || c > 0x7f)
-                        return false;
-                if (path_len >= sizeof(out->path) - 1)
-                        return false;
-                out->path[path_len++] = c;
-        }
-        out->path[path_len] = end;
-        return true;
+        return ipp_wire_parse_uri((const char *)text,
+                                  (struct ipp_wire_uri *)out) != 0;
 }
 
 static positive ipp_format_uri(const ipp_uri address_to u, p8 address_to into,
