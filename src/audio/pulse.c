@@ -435,12 +435,7 @@ struct pulse
 
 static unsigned long pulse_r_u8(struct wire_r *r)
 {
-        if (!wire_r_tag(r, 'B') || r->length - r->at < 1)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        return r->p[r->at++];
+        return (unsigned long)aw_r_u8((struct aw_r *)r);
 }
 
 // A string of the tag structure: NULL for the null string (and *isnull set), else a pointer into the frame, whose limit is checked.
@@ -451,89 +446,28 @@ static const char *pulse_r_string(struct wire_r *r, int *isnull)
 
 static void pulse_r_sample_spec(struct wire_r *r, long *format, long *channels, long *rate)
 {
-        if (!wire_r_tag(r, 'a') || r->length - r->at < 6)
-        {
-                r->bad = 1;
-                return;
-        }
-        *format = r->p[r->at];
-        *channels = r->p[r->at + 1];
-        *rate = (long)wire_be32(r->p + r->at + 2);
-        r->at += 6;
+        aw_r_sample_spec((struct aw_r *)r, (aw_i64 *)format, (aw_i64 *)channels, (aw_i64 *)rate);
 }
 
 static long pulse_r_channel_map(struct wire_r *r, signed char *map)
 {
-        long n;
-
-        if (!wire_r_tag(r, 'm') || r->length - r->at < 1)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        n = r->p[r->at++];
-        if (n > PULSE_CHANNEL_MAX || r->length - r->at < n)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        for (long i = 0; i < n; i++)
-                if (i < AUDIO_CHANNELS_MAX)
-                        map[i] = (signed char)(r->p[r->at + i] < 64 ? r->p[r->at + i] : 63);
-        r->at += n;
-        return n;
+        return (long)aw_r_channel_map((struct aw_r *)r, (aw_i8 *)map, AUDIO_CHANNELS_MAX, PULSE_CHANNEL_MAX);
 }
 
 static long pulse_r_cvolume(struct wire_r *r, unsigned long *volume)
 {
-        long n;
-
-        if (!wire_r_tag(r, 'v') || r->length - r->at < 1)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        n = r->p[r->at++];
-        if (n > PULSE_CHANNEL_MAX || r->length - r->at < 4 * n)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        for (long i = 0; i < n; i++)
-        {
-                volume[i] = wire_be32(r->p + r->at + 4 * i);
-                if (volume[i] > AUDIO_VOLUME_MAX)
-                        volume[i] = AUDIO_VOLUME_MAX;
-        }
-        r->at += 4 * n;
-        return n;
+        return (long)aw_r_cvolume((struct aw_r *)r, (aw_u64 *)volume, PULSE_CHANNEL_MAX, AUDIO_VOLUME_MAX);
 }
 
 static void pulse_r_timeval(struct wire_r *r, unsigned long *seconds, unsigned long *microseconds)
 {
-        if (!wire_r_tag(r, 'T') || r->length - r->at < 8)
-        {
-                r->bad = 1;
-                return;
-        }
-        *seconds = wire_be32(r->p + r->at);
-        *microseconds = wire_be32(r->p + r->at + 4);
-        r->at += 8;
+        aw_r_timeval((struct aw_r *)r, (aw_u64 *)seconds, (aw_u64 *)microseconds);
 }
 
 // An arbitrary block of exactly n bytes.
 static const unsigned char *pulse_r_arbitrary(struct wire_r *r, unsigned long n)
 {
-        const unsigned char *at;
-
-        if (!wire_r_tag(r, 'x') || r->length - r->at < 4 || wire_be32(r->p + r->at) != n || (unsigned long)(r->length - r->at - 4) < n)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        at = r->p + r->at + 4;
-        r->at += 4 + (long)n;
-        return at;
+        return aw_r_arbitrary((struct aw_r *)r, (aw_u64)n);
 }
 
 static int pulse_r_eof(const struct wire_r *r)
@@ -705,37 +639,27 @@ static void pulse_r_proplist(struct wire_r *r, struct pulse_props *props)
 // A volume on its own (the base volume of a device) has a tag of its own.
 static void pulse_w_volume(struct wire_w *w, unsigned long v)
 {
-        wire_w_byte(w, 'V');
-        wire_w_be32(w, v);
+        aw_w_tagged32((struct aw_w *)w, 'V', (aw_u32)v);
 }
 
 static void pulse_w_u8(struct wire_w *w, unsigned long v)
 {
-        wire_w_byte(w, 'B');
-        wire_w_byte(w, (unsigned char)v);
+        aw_w_u8((struct aw_w *)w, (aw_u32)v);
 }
 
 static void pulse_w_64(struct wire_w *w, unsigned char tag, long long v)
 {
-        wire_w_byte(w, tag);
-        wire_w_be32(w, (unsigned long)((unsigned long long)v >> 32));
-        wire_w_be32(w, (unsigned long)((unsigned long long)v & 0xffffffffu));
+        aw_w_64((struct aw_w *)w, tag, (aw_u64)v);
 }
 
 static void pulse_w_sample_spec(struct wire_w *w, long format, long channels, long rate)
 {
-        wire_w_byte(w, 'a');
-        wire_w_byte(w, (unsigned char)format);
-        wire_w_byte(w, (unsigned char)channels);
-        wire_w_be32(w, (unsigned long)rate);
+        aw_w_sample_spec((struct aw_w *)w, (aw_i64)format, (aw_i64)channels, (aw_i64)rate);
 }
 
 static void pulse_w_channel_map(struct wire_w *w, const signed char *map, long channels)
 {
-        wire_w_byte(w, 'm');
-        wire_w_byte(w, (unsigned char)channels);
-        for (long i = 0; i < channels; i++)
-                wire_w_byte(w, (unsigned char)(i < AUDIO_CHANNELS_MAX ? map[i] : AUDIO_POSITION_AUX0 + i));
+        aw_w_channel_map((struct aw_w *)w, (const aw_i8 *)map, (aw_i64)channels, AUDIO_CHANNELS_MAX, AUDIO_POSITION_AUX0);
 }
 
 static void pulse_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)

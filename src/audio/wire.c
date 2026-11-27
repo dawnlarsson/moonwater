@@ -21,161 +21,93 @@ struct wire_r
         int bad;
 };
 
+#ifndef AUDIO_WIRE_ASM_NO_IMPL
+#define AUDIO_WIRE_ASM_IMPLEMENTATION
+#endif
+#include "wire.asm.c"
+
+_Static_assert(sizeof(long) == sizeof(aw_i64), "wire.c requires 64-bit long");
+_Static_assert(sizeof(struct wire_w) == sizeof(struct aw_w) &&
+               AW_OFFSET(struct wire_w, p)   == AW_OFFSET(struct aw_w, p) &&
+               AW_OFFSET(struct wire_w, cap) == AW_OFFSET(struct aw_w, cap) &&
+               AW_OFFSET(struct wire_w, len) == AW_OFFSET(struct aw_w, len) &&
+               AW_OFFSET(struct wire_w, bad) == AW_OFFSET(struct aw_w, bad),
+               "wire_w / aw_w ABI mismatch");
+_Static_assert(sizeof(struct wire_r) == sizeof(struct aw_r) &&
+               AW_OFFSET(struct wire_r, p)      == AW_OFFSET(struct aw_r, p) &&
+               AW_OFFSET(struct wire_r, length) == AW_OFFSET(struct aw_r, length) &&
+               AW_OFFSET(struct wire_r, at)     == AW_OFFSET(struct aw_r, at) &&
+               AW_OFFSET(struct wire_r, bad)    == AW_OFFSET(struct aw_r, bad),
+               "wire_r / aw_r ABI mismatch");
+
 static unsigned long wire_be32(const unsigned char *p)
 {
-#ifdef STANDARD_MODERN_C
-        return (unsigned long)network_load_32((p8 *)p);
-#else
-        return (unsigned long)p[0] << 24 | (unsigned long)p[1] << 16 | (unsigned long)p[2] << 8 | (unsigned long)p[3];
-#endif
+        return (unsigned long)aw_be32(p);
 }
 
 static void wire_put_be(unsigned char *to, unsigned long v)
 {
-#ifdef STANDARD_MODERN_C
-        network_store_32((p8 *)to, (p32)v);
-#else
-        to[0] = (unsigned char)(v >> 24), to[1] = (unsigned char)(v >> 16), to[2] = (unsigned char)(v >> 8), to[3] = (unsigned char)v;
-#endif
+        aw_put_be32(to, (aw_u32)v);
 }
 
 static int wire_r_tag(struct wire_r *r, unsigned char tag)
 {
-        if (r->bad || r->at >= r->length || r->p[r->at] != tag)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        r->at++;
-        return 1;
+        return (int)aw_r_tag((struct aw_r *)r, tag);
 }
 
 static unsigned long wire_r_u32(struct wire_r *r)
 {
-        unsigned long v;
-
-        if (!wire_r_tag(r, 'L') || r->length - r->at < 4)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        v = wire_be32(r->p + r->at);
-        r->at += 4;
-        return v;
+        return (unsigned long)aw_r_u32((struct aw_r *)r);
 }
 
 static int wire_r_bool(struct wire_r *r)
 {
-        if (r->bad || r->at >= r->length || (r->p[r->at] != '1' && r->p[r->at] != '0'))
-        {
-                r->bad = 1;
-                return 0;
-        }
-        return r->p[r->at++] == '1';
+        return (int)aw_r_bool((struct aw_r *)r);
 }
 
 static const char *wire_r_string(struct wire_r *r, long limit, int *isnull)
 {
-        long start, avail;
-        const unsigned char *nul;
-
-        if (isnull)
-                *isnull = 0;
-        if (r->bad || r->at >= r->length)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        if (r->p[r->at] == 'N')
-        {
-                r->at++;
-                if (isnull)
-                        *isnull = 1;
-                return 0;
-        }
-        if (r->p[r->at] != 't')
-        {
-                r->bad = 1;
-                return 0;
-        }
-        start = r->at + 1;
-        avail = r->length - start;
-        if (limit > 0 && avail > limit + 1)
-                avail = limit + 1;
-        nul = avail > 0 ? (const unsigned char *)memory_first_of((void *)(r->p + start), 0, (unsigned long)avail) : 0;
-        if (!nul)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        r->at = (long)(nul - r->p) + 1;
-        return (const char *)(r->p + start);
+        return aw_r_string((struct aw_r *)r, (aw_i64)limit, (aw_i32 *)isnull);
 }
 
 static long wire_len(const char *s)
 {
-        return (long)string_length(s);
+        return (long)aw_strlen(s);
 }
 
 static void wire_w_raw(struct wire_w *w, const void *data, long n)
 {
-        if (w->bad)
-                return;
-        if (n < 0 || w->len < 0 || w->cap < w->len || n > w->cap - w->len)
-        {
-                w->bad = 1;
-                return;
-        }
-        memory_copy_apart(w->p + w->len, data, (unsigned long)n);
-        w->len += n;
+        aw_w_raw((struct aw_w *)w, data, (aw_i64)n);
 }
 
 static void wire_w_byte(struct wire_w *w, unsigned char c)
 {
-        wire_w_raw(w, &c, 1);
+        aw_w_byte((struct aw_w *)w, c);
 }
 
 static void wire_w_be32(struct wire_w *w, unsigned long v)
 {
-        unsigned char b[4];
-
-        wire_put_be(b, v);
-        wire_w_raw(w, b, 4);
+        aw_w_be32((struct aw_w *)w, (aw_u32)v);
 }
 
 static void wire_w_u32(struct wire_w *w, unsigned long v)
 {
-        wire_w_byte(w, 'L');
-        wire_w_be32(w, v);
+        aw_w_tagged32((struct aw_w *)w, 'L', (aw_u32)v);
 }
 
 static void wire_w_bool(struct wire_w *w, int v)
 {
-        wire_w_byte(w, v ? '1' : '0');
+        aw_w_bool((struct aw_w *)w, v);
 }
 
 static void wire_w_string(struct wire_w *w, const char *s)
 {
-        if (!s)
-        {
-                wire_w_byte(w, 'N');
-                return;
-        }
-        wire_w_byte(w, 't');
-        wire_w_raw(w, s, wire_len(s) + 1);
+        aw_w_string((struct aw_w *)w, s);
 }
 
 static void wire_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)
 {
-        if (channels < 0 || channels > 255)
-        {
-                w->bad = 1;
-                return;
-        }
-        wire_w_byte(w, 'v');
-        wire_w_byte(w, (unsigned char)channels);
-        for (long i = 0; i < channels; i++)
-                wire_w_be32(w, volume[i]);
+        aw_w_cvolume((struct aw_w *)w, (const aw_u64 *)volume, (aw_i64)channels);
 }
 
 #endif // AUDIO_WIRE_INCLUDED
