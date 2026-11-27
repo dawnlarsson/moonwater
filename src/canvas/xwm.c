@@ -261,8 +261,8 @@ struct compositor_xwm
            id), for what the compositor's side changes of them (a close, the place and size, the state). */
         int walk_all;
         unsigned long walk_gen;
-        long bound_count;
-        struct wayland_table bound_table;
+        long bound_count, stack_count;
+        struct wayland_table bound_table, stack_table;
 };
 struct compositor_xwm_bound { long at; unsigned int id; };
 
@@ -3847,6 +3847,7 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
         }
         x->pending_at = x->pending_count = 0, x->focus_row = -2;
         wayland_table_drop(&x->bound_table), x->bound_count = 0, x->walk_all = 1;
+        wayland_table_drop(&x->stack_table), x->stack_count = 0;
         for (long at = 0; at < x->in_table.count; at++)
                 if (x->ins[at].window)
                 {
@@ -4229,18 +4230,39 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
         }
         if (x->fd >= 0 && x->last_stack_gen != compositor.stack_gen)
         {
-                struct xwm_configure sc = {.mask = XWM_CONFIGURE_STACK_MODE, .stack_mode = XWM_STACK_ABOVE};
+                unsigned int want[256];
+                long want_n = 0;
+
                 x->last_stack_gen = compositor.stack_gen;
-                // Stack inactive-Scene X11 windows below active-Scene ones so an off-Scene fullscreen window never sits above
-                // an active X11 window (e.g. Steam) in Xwayland's root tree and steals its cursor/hit-testing.
+                // Collect non-popup X11 windows bottom-to-top: inactive-Scene windows first, then active-Scene ones.
+                // Override-redirect popups/menus are stacked by their X11 client and must never be restacked or buried
+                // under their parent (raising the parent sends ConfigureNotify/LeaveNotify that makes Steam dismiss menus).
                 for (int active_pass = 0; active_pass < 2; active_pass++)
-                        for (unsigned int s = 0; s < compositor.stacked; s++)
+                        for (unsigned int s = 0; s < compositor.stacked && want_n < 256; s++)
                         {
                                 int r = (int)compositor.stack[s];
                                 struct compositor_xwm_window *w = xwm_row_lookup(x, r, 0);
-                                if (w && (compositor_space_row_active(r) != 0) == active_pass)
-                                        compositor_xwm_configure(x, w->id, &sc);
+                                if (w && !compositor_xwm_is_popup(w) && (compositor_space_row_active(r) != 0) == active_pass)
+                                        want[want_n++] = w->id;
                         }
+                if (want_n != x->stack_count ||
+                    (want_n && memory_compare(want, x->stack_table.at, (positive)want_n * sizeof(unsigned int))))
+                {
+                        wayland_tables_host(&compositor_wl_host);
+                        x->stack_table.unit = sizeof(unsigned int);
+                        if (want_n && wayland_table_reach(&x->stack_table, want_n))
+                                memory_copy(x->stack_table.at, want, (positive)want_n * sizeof(unsigned int)), x->stack_count = want_n;
+                        else
+                                x->stack_count = 0;
+                        // Stack top-to-bottom using Below relative to the window above: keeps the topmost active window
+                        // untouched (never raised above its own override-redirect popups) and avoids spurious ConfigureNotify.
+                        for (long k = want_n - 2; k >= 0; k--)
+                        {
+                                struct xwm_configure sc = {.mask = XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE,
+                                                           .sibling = want[k + 1], .stack_mode = XWM_STACK_BELOW};
+                                compositor_xwm_configure(x, want[k], &sc);
+                        }
+                }
         }
         compositor_xwm_flush(x);
 }

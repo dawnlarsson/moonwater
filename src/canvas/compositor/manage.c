@@ -88,8 +88,22 @@ static signed char compositor_layer_of(int row)
 static void compositor_raise_one(int row)
 {
         signed char mine = compositor_layer_of(row);
-        unsigned int at = 0;
+        unsigned int at = 0, was = compositor.stacked;
 
+        for (unsigned int i = 0; i < compositor.stacked; i++)
+                if (compositor.stack[i] == (unsigned int)row)
+                {
+                        was = i;
+                        break;
+                }
+        if (was < compositor.stacked)
+        {
+                unsigned int target = was;
+                while (target + 1 < compositor.stacked && compositor_layer_of((int)compositor.stack[target + 1]) <= mine)
+                        target++;
+                if (target == was && (!was || compositor_layer_of((int)compositor.stack[was - 1]) <= mine))
+                        return;
+        }
         compositor_stack_remove(row);
         while (at < compositor.stacked && compositor_layer_of((int)compositor.stack[at]) <= mine)
                 at++;
