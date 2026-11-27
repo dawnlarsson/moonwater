@@ -1624,6 +1624,14 @@ static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct composito
         w->state &= ~COMPOSITOR_XWM_COVERED;
         if (on == !!(w->state & COMPOSITOR_XWM_FULLSCREEN))
                 return;
+        // A window on an inactive Scene (e.g. an SDL2/Source game on a background Fullscreen Space that tries to unfullscreen on
+        // focus loss) must stay on its own Space instead of tearing it down and dumping itself onto the Desktop Scene it came from.
+        if (w->row >= 0 && !compositor_space_row_active(w->row))
+        {
+                compositor_xwm_net_state(x, w->id, (int)w->state);
+                compositor_xwm_counted_refusal();
+                return;
+        }
         // A window the person took out of fullscreen stays out of it on its own ask (a Proton game put back what F11 took away): it is
         // told its state again, without fullscreen, and goes back when the person puts it back.
         if (on && w->left_fullscreen)

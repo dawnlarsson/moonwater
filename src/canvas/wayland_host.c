@@ -3361,8 +3361,18 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         {
         case WAYLAND_DO_MINIMIZE: compositor_minimize_row(row); break;
         case WAYLAND_DO_MAXIMIZE: compositor_arrange(row, COMPOSITOR_ROOM); break;
-        case WAYLAND_DO_FULLSCREEN: compositor_fullscreen_on(row, (int)a); break;
-        case WAYLAND_DO_UNFULLSCREEN: compositor_fullscreen_off(row); break;
+        case WAYLAND_DO_FULLSCREEN:
+                if (compositor_space_row_active(row))
+                        compositor_fullscreen_on(row, (int)a);
+                else
+                        compositor_wl_settle(row);
+                break;
+        case WAYLAND_DO_UNFULLSCREEN:
+                if (compositor_space_row_active(row))
+                        compositor_fullscreen_off(row);
+                else
+                        compositor_wl_settle(row);
+                break;
         case WAYLAND_DO_UNMAXIMIZE: compositor_float(row); break;
         case WAYLAND_DO_CLOSE: compositor_close(row); break;
         case WAYLAND_DO_FOCUS:
