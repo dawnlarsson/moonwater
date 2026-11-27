@@ -256,6 +256,18 @@ typedef struct
         font_work work;
 } font_engine;
 
+#ifndef CANVAS_FONT_CORE_ASM_NO_IMPL
+#define CANVAS_FONT_CORE_ASM_IMPLEMENTATION
+#endif
+#include "font_core.asm.c"
+
+_Static_assert(offset_of(font_face, data) == 0 && offset_of(font_face, size) == 8 &&
+               offset_of(font_face, cmap) == 48 && offset_of(font_face, glyphs) == 96 &&
+               offset_of(font_face, cmap_format) == 146 && offset_of(font_face, symbol) == 147,
+               "font_face ABI parity with font_core.asm.c");
+_Static_assert(sizeof(font_row) == 48 && offset_of(font_row, touched) == 0 && offset_of(font_row, crossed) == 8,
+               "font_row ABI parity with font_core.asm.c");
+
 // Bounds-checked big-endian readers (0 past end).
 static inline INLINE PURE p32 font_u8(const font_face address_to face, positive at)
 {
@@ -290,21 +302,10 @@ static inline INLINE PURE p32 font_hmtx_advance(const font_face address_to face,
 }
 
 // First record in [0, count) whose 2- or 4-byte key at offset is >= value.
-static p32 font_search(const font_face address_to face, positive table, p32 count,
-                       positive stride, positive offset, p32 bytes, p32 value)
+static inline p32 font_search(const font_face address_to face, positive table, p32 count,
+                              positive stride, positive offset, p32 bytes, p32 value)
 {
-        p32 low = 0;
-
-        for (p32 high = count; low < high;)
-        {
-                p32 middle = low + (high - low) / 2;
-                positive at = table + stride * middle + offset;
-                if ((bytes == 4 ? font_u32(face, at) : font_u16(face, at)) < value)
-                        low = middle + 1;
-                else
-                        high = middle;
-        }
-        return low;
+        return font_asm_search(face, table, count, stride, (p32)(offset << 1) | (p32)(bytes == 4), value);
 }
 
 // Nearest integer division, halves away from zero, and 16.16 pixel scaling clamped to +-16384 px.
@@ -523,43 +524,7 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
 
 p32 font_glyph(const font_face address_to face, p32 code)
 {
-        positive table = face->cmap;
-        p64 glyph = 0;
-
-        if (face->symbol && code < 0x100)
-        {
-                font_face plain = *face;
-                plain.symbol = 0;
-                glyph = font_glyph(&plain, code);
-                return glyph ? (p32)glyph : font_glyph(&plain, code | 0xf000);
-        }
-        if (face->cmap_format == 12 && table + 16 <= face->size)
-        {
-                p32 count = font_u32(face, table + 12);
-                if (count > (face->size - table - 16) / 12)
-                        count = (p32)((face->size - table - 16) / 12);
-                p32 low = font_search(face, table + 16, count, 12, 4, 4, code);
-                positive group = table + 16 + 12 * (positive)low;
-                if (low < count && font_u32(face, group) <= code)
-                        glyph = (p64)font_u32(face, group + 8) + code - font_u32(face, group);
-        }
-        else if (face->cmap_format == 4 && code <= 0xffff)
-        {
-                p32 segments = font_u16(face, table + 6) / 2;
-                positive ends = table + 14, starts = ends + 2 * (positive)segments + 2;
-                positive deltas = starts + 2 * (positive)segments, ranges = deltas + 2 * (positive)segments;
-                p32 low = font_search(face, ends, segments, 2, 0, 2, code);
-                if (low == segments)
-                        return 0;
-                p32 start = font_u16(face, starts + 2 * (positive)low), delta = font_u16(face, deltas + 2 * (positive)low);
-                p32 range = font_u16(face, ranges + 2 * (positive)low);
-                if (code < start)
-                        return 0;
-                glyph = range ? font_u16(face, ranges + 2 * (positive)low + range + 2 * (positive)(code - start)) : code;
-                if (glyph)
-                        glyph = (glyph + delta) & 0xffff;
-        }
-        return glyph < face->glyphs ? (p32)glyph : 0;
+        return font_asm_glyph(face, code);
 }
 
 __attribute__((used)) b32 font_advance(const font_face address_to face, p32 glyph, p32 size)
@@ -575,71 +540,20 @@ static inline INLINE CONST p32 font_bits(p32 format)
         return (v + (v >> 4)) & 0x0fu;
 }
 
-static b32 font_coverage(const font_face address_to face, positive table, p32 glyph)
+static inline b32 font_coverage(const font_face address_to face, positive table, p32 glyph)
 {
-        p32 format = font_u16(face, table), count = font_u16(face, table + 2);
-        if (format != 1 && format != 2)
-                return -1;
-
-        p32 low = font_search(face, table + 4, count, format == 1 ? 2 : 6, format == 1 ? 0 : 2, 2, glyph);
-        positive at = table + 4 + (format == 1 ? 2 : 6) * (positive)low;
-        if (low == count)
-                return -1;
-        if (format == 1)
-                return font_u16(face, at) == glyph ? (b32)low : -1;
-        return font_u16(face, at) <= glyph ? (b32)(font_u16(face, at + 4) + glyph - font_u16(face, at)) : -1;
+        return font_asm_coverage(face, table, glyph);
 }
 
-static p32 font_class(const font_face address_to face, positive table, p32 glyph)
+static inline p32 font_class(const font_face address_to face, positive table, p32 glyph)
 {
-        p32 format = font_u16(face, table);
-        if (format == 1)
-        {
-                p32 first = font_u16(face, table + 2);
-                return glyph >= first && glyph - first < font_u16(face, table + 4)
-                           ? font_u16(face, table + 6 + 2 * (positive)(glyph - first)) : 0;
-        }
-        if (format != 2)
-                return 0;
-        p32 count = font_u16(face, table + 2), low = font_search(face, table + 4, count, 6, 2, 2, glyph);
-        positive at = table + 4 + 6 * (positive)low;
-        return low < count && font_u16(face, at) <= glyph ? font_u16(face, at + 4) : 0;
+        return font_asm_class(face, table, glyph);
 }
 
-static p8 font_pair_at(const font_face address_to face, positive table, p32 left, p32 right,
-                       positive address_to first_at, positive address_to second_at)
+static inline p8 font_pair_at(const font_face address_to face, positive table, p32 left, p32 right,
+                              positive address_to first_at, positive address_to second_at)
 {
-        p32 format = font_u16(face, table), first = font_u16(face, table + 4);
-        positive record = 2 * (positive)(font_bits(first) + font_bits(font_u16(face, table + 6))), at;
-        b32 index = font_coverage(face, table + font_u16(face, table + 2), left);
-
-        if (index < 0)
-                return false;
-        if (format == 1)
-        {
-                if ((p32)index >= font_u16(face, table + 8))
-                        return false;
-                positive set = table + font_u16(face, table + 10 + 2 * (positive)index);
-                p32 count = font_u16(face, set), low = font_search(face, set + 2, count, record + 2, 0, 2, right);
-                at = set + 2 + (record + 2) * low;
-                if (low == count || font_u16(face, at) != right)
-                        return false;
-                at += 2;
-        }
-        else if (format == 2)
-        {
-                p32 one = font_class(face, table + font_u16(face, table + 8), left);
-                p32 two = font_class(face, table + font_u16(face, table + 10), right);
-                p32 ones = font_u16(face, table + 12), twos = font_u16(face, table + 14);
-                if (one >= ones || two >= twos)
-                        return false;
-                at = table + 16 + ((positive)one * twos + two) * record;
-        }
-        else
-                return false;
-        *first_at = at;
-        *second_at = at + 2 * (positive)font_bits(first);
-        return true;
+        return (p8)font_asm_pair_at(face, table, left, right, first_at, second_at);
 }
 
 static b32 font_kerning_units(const font_face address_to face, p32 left, p32 right)
@@ -1186,37 +1100,13 @@ static const p16 font_lam_alef[8][3] = {
 //      The last packed range entry (key << shift | value) whose key is at or below code.
 static inline p32 font_range_find(const p32 address_to table, p32 count, p32 shift, p32 code)
 {
-        p32 low = 0, high = count;
-
-        while (high - low > 1)
-        {
-                p32 middle = (low + high) / 2;
-
-                if ((table[middle] >> shift) <= code)
-                        low = middle;
-                else
-                        high = middle;
-        }
-        return table[low] & ((1u << shift) - 1);
+        return font_asm_range_find(table, count, shift, code);
 }
 
 //      The first of count sorted keys (stride elements apart, u32 when wide else u16) that is not below code.
-static p32 font_lower_bound(const void address_to values, p32 count, p32 stride, p8 wide, p32 code)
+static inline p32 font_lower_bound(const void address_to values, p32 count, p32 stride, p8 wide, p32 code)
 {
-        p32 low = 0, high = count;
-
-        while (low < high)
-        {
-                p32 middle = (low + high) / 2;
-                p32 key = wide ? ((const p32 address_to)values)[middle * stride]
-                               : ((const p16 address_to)values)[middle * stride];
-
-                if (key < code)
-                        low = middle + 1;
-                else
-                        high = middle;
-        }
-        return low;
+        return font_asm_lower_bound(values, count, stride, wide, code);
 }
 
 static inline p32 font_bidi_class(p32 code)
@@ -5389,81 +5279,16 @@ static inline fn font_cell_add(font_engine address_to e, b32 row, b32 column, b3
                 e->row[row].crossed |= (p64)1 << (column >> e->cross);
 }
 
-static inline fn font_mark(font_engine address_to e, b32 row, b32 first, b32 last)
+static inline struct font_raster_band font_band_of(font_engine address_to e)
 {
-        if (e->mark)
-                e->row[row].touched |= ((p64)2 << (last >> e->grain)) - ((p64)1 << (first >> e->grain));
-}
-
-static inline fn font_cross(font_engine address_to e, b32 row, b32 first, b32 last)
-{
-        if (e->track)
-                e->row[row].crossed |= ((p64)2 << (last >> e->cross)) - ((p64)1 << (first >> e->cross));
-}
-
-static inline fn font_span_one(font_engine address_to e, p32 address_to cells, b32 row, b32 column,
-                               b32 xa, b32 xb, b32 cover)
-{
-        b32 area = cover * ((xa & (FONT_ONE - 1)) + (xb & (FONT_ONE - 1)));
-        cells[column] += (p32)(2 * FONT_ONE * cover - area);
-        cells[column + 1] += (p32)area;
-        font_mark(e, row, column, column + 1);
-        font_cross(e, row, column, column);
-}
-
-static fn font_span_many(font_engine address_to e, p32 address_to cells, b32 row, b32 xa, b32 xb, b32 cover)
-{
-        b32 column = xa >> FONT_SHIFT, last = xb >> FONT_SHIFT, mask = FONT_ONE - 1;
-        p8 right = xb > xa;
-        b32 step = right ? 1 : -1, leave = right ? FONT_ONE : 0, enter = FONT_ONE - leave, sign = cover < 0 ? -1 : 1;
-        b64 travel = right ? (b64)xb - xa : (b64)xa - xb, size = font_abs64(cover);
-        b64 first = right ? FONT_ONE - (xa & mask) : xa & mask, half = travel >> 1;
-        b64 done = (size * first + half) / travel, carry = (size * first + half) % travel;
-        b64 lift = size * FONT_ONE / travel, spare = size * FONT_ONE % travel;
-
-        font_mark(e, row, right ? column : last, right ? last + 1 : column + 1);
-        font_cross(e, row, right ? column : last, right ? last : column);
-
-        b32 part = (b32)done * sign, area = part * ((xa & mask) + leave);
-        cells[column] += (p32)(2 * FONT_ONE * part - area);
-        cells[column + 1] += (p32)area;
-        for (column += step; column != last; column += step)
-        {
-                b64 piece = lift;
-                carry += spare;
-                if (carry >= travel)
-                        carry -= travel, piece++;
-                done += piece;
-                part = (b32)piece * sign;
-                cells[column] += (p32)(part * FONT_ONE);
-                cells[column + 1] += (p32)(part * FONT_ONE);
-        }
-        part = cover - (b32)done * sign;
-        area = part * (enter + (xb & mask));
-        cells[last] += (p32)(2 * FONT_ONE * part - area);
-        cells[last + 1] += (p32)area;
+        return (struct font_raster_band){e->cells, &e->row[0].touched, e->band, e->rows, e->stride,
+                                         e->width, e->grain, e->cross, e->mark, e->track, {0}};
 }
 
 static inline fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover)
 {
-        b32 wide = e->width * FONT_ONE;
-        if (row < 0 || row >= e->rows)
-                return;
-        xa = xa < 0 ? 0 : xa > wide ? wide : xa;
-        xb = xb < 0 ? 0 : xb > wide ? wide : xb;
-        p32 address_to cells = e->cells + (positive)row * (positive)e->stride;
-        if ((xa ^ xb) >> FONT_SHIFT)
-                font_span_many(e, cells, row, xa, xb, cover);
-        else
-                font_span_one(e, cells, row, xa >> FONT_SHIFT, xa, xb, cover);
-}
-
-static inline fn font_floor_divide(b64 numerator, b64 denominator, b64 address_to quotient, b64 address_to remainder)
-{
-        *quotient = numerator / denominator;
-        *remainder = numerator % denominator;
-        if (*remainder < 0)
-                *quotient -= 1, *remainder += denominator;
+        struct font_raster_band b = font_band_of(e);
+        font_asm_span(&b, row, xa, xb, cover);
 }
 
 static fn font_flush(font_engine address_to e)
@@ -5497,37 +5322,11 @@ static fn font_gather(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
         edge[0] = x0, edge[1] = y0, edge[2] = x1, edge[3] = y1;
 }
 
-static fn font_edge_rows(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1, b32 ya, b32 top, b32 sign)
+static inline fn font_edge_rows(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1, b32 ya, b32 top, b32 sign)
 {
-        b64 dx = (b64)x1 - x0, dy = (b64)y1 - y0, half = dy >> 1, at = 0, carry = half, lift = 0, spare = -1;
-
-        if (ya != y0)
-                font_floor_divide(dx * (ya - y0) + half, dy, &at, &carry);
-        b32 xa = x0 + (b32)at;
-        while (ya < top)
-        {
-                b32 yb = (ya & ~(FONT_ONE - 1)) + FONT_ONE;
-                if (ya & (FONT_ONE - 1) || yb > top)
-                {
-                        yb = yb > top ? top : yb;
-                        if (yb == y1)
-                                at = dx;
-                        else
-                                font_floor_divide(dx * (yb - y0) + half, dy, &at, &carry);
-                }
-                else
-                {
-                        if (spare < 0)
-                                font_floor_divide(dx * FONT_ONE, dy, &lift, &spare);
-                        at += lift;
-                        carry += spare;
-                        if (carry >= dy)
-                                carry -= dy, at++;
-                }
-                b32 xb = x0 + (b32)at;
-                font_span(e, (ya >> FONT_SHIFT) - e->band, xa, xb, (yb - ya) * sign);
-                ya = yb, xa = xb;
-        }
+        struct font_raster_band b = font_band_of(e);
+        b32 seg[7] = {x0, y0, x1, y1, ya, top, sign};
+        font_asm_edge_rows(&b, seg);
 }
 
 static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
@@ -5570,33 +5369,10 @@ static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
         font_edge_rows(e, x0, y0, x1, y1, y0 < low ? low : y0, y1 > high ? high : y1, sign);
 }
 
-static fn font_trace(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
+static inline fn font_trace(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
 {
-        b32 sign = 1;
-
-        if (y0 == y1)
-                return;
-        if (y0 > y1)
-        {
-                b32 t = x0;
-                x0 = x1, x1 = t, t = y0, y0 = y1, y1 = t, sign = -1;
-        }
-        if ((y0 >> FONT_SHIFT) == ((y1 - 1) >> FONT_SHIFT))
-        {
-                font_span(e, (y0 >> FONT_SHIFT) - e->band, x0, x1, (y1 - y0) * sign);
-                return;
-        }
-        if (((y1 - 1) >> FONT_SHIFT) - (y0 >> FONT_SHIFT) == 1)
-        {
-                b64 dx = (b64)x1 - x0, dy = (b64)y1 - y0, at, carry;
-                b32 yb = (y1 - 1) & ~(FONT_ONE - 1), xb;
-                font_floor_divide(dx * (yb - y0) + (dy >> 1), dy, &at, &carry);
-                xb = x0 + (b32)at;
-                font_span(e, (y0 >> FONT_SHIFT) - e->band, x0, xb, (yb - y0) * sign);
-                font_span(e, (yb >> FONT_SHIFT) - e->band, xb, x1, (y1 - yb) * sign);
-                return;
-        }
-        font_edge_rows(e, x0, y0, x1, y1, y0, y1, sign);
+        struct font_raster_band b = font_band_of(e);
+        font_asm_trace(&b, x0, y0, x1, y1);
 }
 
 typedef struct { b32 floor, height, wide, band, cell_x, cell_y; p32 cover, area; } font_hand;
