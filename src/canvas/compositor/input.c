@@ -3,6 +3,53 @@
         pointer motion/buttons/wheel/pad gestures, frame-ahead prediction, chips, touch, and reader thread.
 */
 
+#define COMPOSITOR_INPUT_SCAN_ASM_IMPLEMENTATION
+#if defined(__has_include)
+# if __has_include("input_scan.asm.c")
+#  include "input_scan.asm.c"
+# elif __has_include("compositor/input_scan.asm.c")
+#  include "compositor/input_scan.asm.c"
+# else
+#  include "src/canvas/compositor/input_scan.asm.c"
+# endif
+#else
+# include "input_scan.asm.c"
+#endif
+
+_Static_assert(sizeof(struct compositor_input_event) == sizeof(struct inscan_event), "compositor_input_event != inscan_event size");
+_Static_assert(INSCAN_OFFSET(struct compositor_input_event, seconds) == INSCAN_OFFSET(struct inscan_event, seconds) &&
+               INSCAN_OFFSET(struct compositor_input_event, microseconds) == INSCAN_OFFSET(struct inscan_event, microseconds) &&
+               INSCAN_OFFSET(struct compositor_input_event, type) == INSCAN_OFFSET(struct inscan_event, type) &&
+               INSCAN_OFFSET(struct compositor_input_event, code) == INSCAN_OFFSET(struct inscan_event, code) &&
+               INSCAN_OFFSET(struct compositor_input_event, value) == INSCAN_OFFSET(struct inscan_event, value),
+               "compositor_input_event != inscan_event layout");
+_Static_assert(sizeof(struct compositor_predict) == sizeof(struct inscan_predict), "compositor_predict != inscan_predict size");
+_Static_assert(INSCAN_OFFSET(struct compositor_predict, x) == INSCAN_OFFSET(struct inscan_predict, x) &&
+               INSCAN_OFFSET(struct compositor_predict, y) == INSCAN_OFFSET(struct inscan_predict, y) &&
+               INSCAN_OFFSET(struct compositor_predict, when) == INSCAN_OFFSET(struct inscan_predict, when) &&
+               INSCAN_OFFSET(struct compositor_predict, arrived) == INSCAN_OFFSET(struct inscan_predict, arrived) &&
+               INSCAN_OFFSET(struct compositor_predict, count) == INSCAN_OFFSET(struct inscan_predict, count) &&
+               INSCAN_OFFSET(struct compositor_predict, last) == INSCAN_OFFSET(struct inscan_predict, last) &&
+               INSCAN_OFFSET(struct compositor_predict, lead_x) == INSCAN_OFFSET(struct inscan_predict, lead_x) &&
+               INSCAN_OFFSET(struct compositor_predict, lead_y) == INSCAN_OFFSET(struct inscan_predict, lead_y),
+               "compositor_predict != inscan_predict layout");
+_Static_assert(INSCAN_OFFSET(struct compositor_device, wheel_streamed) == INSCAN_OFFSET(struct inscan_wheel_dev, wheel_streamed) &&
+               INSCAN_OFFSET(struct compositor_device, wheel_run) == INSCAN_OFFSET(struct inscan_wheel_dev, wheel_run) &&
+               INSCAN_OFFSET(struct compositor_device, wheel_at) == INSCAN_OFFSET(struct inscan_wheel_dev, wheel_at) &&
+               INSCAN_OFFSET(struct compositor_device, wheel_stream_at) == INSCAN_OFFSET(struct inscan_wheel_dev, wheel_stream_at),
+               "compositor_device != inscan_wheel_dev prefix layout");
+_Static_assert(COMPOSITOR_PREDICT_HISTORY == INSCAN_PREDICT_HISTORY && COMPOSITOR_PREDICT_FX == INSCAN_PREDICT_FX &&
+               COMPOSITOR_PREDICT_CAP == INSCAN_PREDICT_CAP && COMPOSITOR_PREDICT_WINDOW_NS == INSCAN_PREDICT_WINDOW_NS &&
+               COMPOSITOR_PREDICT_SPAN_NS == INSCAN_PREDICT_SPAN_NS &&
+               COMPOSITOR_PREDICT_STRAIGHT_LO == INSCAN_PREDICT_STRAIGHT_LO &&
+               COMPOSITOR_PREDICT_STRAIGHT_SPAN == INSCAN_PREDICT_STRAIGHT_SPAN &&
+               COMPOSITOR_PREDICT_STILL_LO == INSCAN_PREDICT_STILL_LO &&
+               COMPOSITOR_PREDICT_STILL_HI == INSCAN_PREDICT_STILL_HI &&
+               UI_HAND_GAP_NS == INSCAN_HAND_GAP_NS && COMPOSITOR_WHEEL_MEMORY_NS == INSCAN_WHEEL_MEMORY_NS &&
+               COMPOSITOR_WHEEL_STREAMS == INSCAN_WHEEL_STREAMS && COMPOSITOR_GAIN_BASE == INSCAN_GAIN_BASE &&
+               COMPOSITOR_STREAM_HIST == INSCAN_STREAM_HIST && COMPOSITOR_GAIN_TURN == INSCAN_GAIN_TURN,
+               "compositor input_scan constants mismatch");
+
 static void compositor_latency(unsigned int which, positive reported, positive now)
 {
         positive took = reported && now > reported ? now - reported : 0;
@@ -3003,15 +3050,12 @@ static int compositor_speed(void) { return compositor.trackpad_speed < 25 || com
 
 static inline long long compositor_scale_rem(long long delta, long long num, long long den, long long *rem)
 {
-        long long total = delta * num + *rem, out = total / den;
-
-        *rem = total - out * den;
-        return out;
+        return (long long)inscan_scale_rem((inscan_i64)delta, (inscan_i64)num, (inscan_i64)den, (inscan_i64 *)(void *)rem);
 }
 
 static inline int compositor_scale_rem_i(long long delta, long long num, long long den, int *rem)
 {
-        long long r = *rem, out = compositor_scale_rem(delta, num, den, &r);
+        inscan_i64 r = *rem, out = inscan_scale_rem((inscan_i64)delta, (inscan_i64)num, (inscan_i64)den, &r);
 
         *rem = (int)r;
         return (int)out;
@@ -3050,47 +3094,7 @@ static positive compositor_predict_period(void) { return compositor.period ? com
 
 static void compositor_predict_lead(struct compositor_predict *track)
 {
-        const long long fx = COMPOSITOR_PREDICT_FX, period = (long long)compositor_predict_period() / 1000;
-        const long long cap = (long long)COMPOSITOR_PREDICT_CAP * compositor.scale / 100 * fx;
-        long long n = track->count, tn = (long long)track->when[n - 1], i0 = n - 1;
-        long long St = 0, Stt = 0, Sx = 0, Stx = 0, Sy = 0, Sty = 0, path = 0, m, denom, lx, ly, net, g, w, ws, lim, len2;
-
-        track->lead_x = track->lead_y = 0;
-        while (i0 > 0 && (long long)track->when[i0 - 1] >= tn - (long long)COMPOSITOR_PREDICT_WINDOW_NS)
-                i0--;
-        m = n - i0;
-        if (m < 2 || tn - (long long)track->when[i0] < (long long)COMPOSITOR_PREDICT_SPAN_NS || cap <= 0)
-                return;
-        for (long long i = i0; i < n; i++)
-        {
-                long long t = ((long long)track->when[i] - tn) / 1000;
-
-                St += t, Stt += t * t, Sx += track->x[i], Stx += t * track->x[i], Sy += track->y[i], Sty += t * track->y[i];
-                if (i > i0)
-                        path += compositor_abs64(track->x[i] - track->x[i - 1]) + compositor_abs64(track->y[i] - track->y[i - 1]);
-        }
-        if (!(denom = m * Stt - St * St))
-                return;
-        lx = (m * Stx - St * Sx) * period / denom, ly = (m * Sty - St * Sy) * period / denom;
-        net = compositor_abs64(track->x[n - 1] - track->x[i0]) + compositor_abs64(track->y[n - 1] - track->y[i0]);
-        g = path > 0 ? net * 1000 / path : 0;
-        w = compositor_clamp64((g - COMPOSITOR_PREDICT_STRAIGHT_LO) * 1000 / COMPOSITOR_PREDICT_STRAIGHT_SPAN, 0, 1000);
-        ws = compositor_clamp64((net * 1000000 / (tn - (long long)track->when[i0]) - COMPOSITOR_PREDICT_STILL_LO) * 1000 /
-                                (COMPOSITOR_PREDICT_STILL_HI - COMPOSITOR_PREDICT_STILL_LO), 0, 1000);
-        lx = lx * w / 1000 * ws / 1000, ly = ly * w / 1000 * ws / 1000;
-        if ((track->x[n - 1] - track->x[n - 2] < 0 && lx > 0) || (track->x[n - 1] - track->x[n - 2] > 0 && lx < 0))
-                lx = 0;
-        if ((track->y[n - 1] - track->y[n - 2] < 0 && ly > 0) || (track->y[n - 1] - track->y[n - 2] > 0 && ly < 0))
-                ly = 0;
-        lx = compositor_predict_px(lx), ly = compositor_predict_px(ly), lim = cap / fx, len2 = lx * lx + ly * ly;
-        if (len2 > lim * lim)
-        {
-                long long len = (long long)compositor_isqrt((unsigned long long)len2);
-
-                len += len * len < len2;
-                lx = lx * lim / len, ly = ly * lim / len;
-        }
-        track->lead_x = lx * fx, track->lead_y = ly * fx;
+        inscan_predict_lead((struct inscan_predict *)(void *)track, (inscan_u64)compositor_predict_period(), (inscan_i32)compositor.scale);
 }
 
 static void compositor_predict_sample(unsigned int cls, long long x, long long y, positive when, positive now)
@@ -3234,17 +3238,8 @@ static int compositor_picture_under(int x, int y)
 
 static int compositor_wheel_stream(unsigned int at, positive now)
 {
-        struct compositor_device *dev = &compositor.devices[at];
-        positive last = dev->wheel_at, since = dev->wheel_stream_at;
-        int within = last && now >= last && now - last <= UI_HAND_GAP_NS;
-        int stream = within || (dev->wheel_streamed && since && now >= since && now - since <= COMPOSITOR_WHEEL_MEMORY_NS);
-
-        if (stream)
-                dev->wheel_streamed |= ++dev->wheel_run >= COMPOSITOR_WHEEL_STREAMS, dev->wheel_stream_at = now;
-        else
-                dev->wheel_run = 0, compositor.stream_hist_n[at] = 0;
-        dev->wheel_at = now;
-        return stream;
+        return (int)inscan_wheel_stream((struct inscan_wheel_dev *)(void *)&compositor.devices[at],
+                                        (inscan_u32 *)(void *)&compositor.stream_hist_n[at], (inscan_u64)now);
 }
 
 static int compositor_wheel_streams(unsigned int at, positive now)
@@ -3254,27 +3249,13 @@ static int compositor_wheel_streams(unsigned int at, positive now)
 
 static long long compositor_stream_gain(unsigned long long rate)
 {
-        long long x = rate > 100000 ? 100000 : rate > 1000 ? (long long)rate - 1000 : 0;
-        unsigned long long xq, f;
-
-        if (!x)
-                return COMPOSITOR_GAIN_BASE;
-        xq = (unsigned long long)x * 65536 / 3500;
-        xq = xq > 65536 ? 65536 : xq;
-        f = xq * ui_touch_isqrt(xq * 65536) / 65536;
-        return COMPOSITOR_GAIN_BASE + COMPOSITOR_GAIN_BASE * 3 * (long long)f / 65536;
+        return (long long)inscan_stream_gain((inscan_u64)rate);
 }
 
 static unsigned long long compositor_stream_rate(unsigned int at)
 {
-        unsigned int n = compositor.stream_hist_n[at], m = n < COMPOSITOR_STREAM_HIST ? n : COMPOSITOR_STREAM_HIST;
-        positive last, first;
-
-        if (m < 2)
-                return 0;
-        last = compositor.stream_hist[at][(n - 1) % COMPOSITOR_STREAM_HIST];
-        first = compositor.stream_hist[at][(n - m) % COMPOSITOR_STREAM_HIST];
-        return last < first ? 0 : last == first ? 100000000000ull : (unsigned long long)(m - 1) * 100000000000ull / (last - first);
+        return (unsigned long long)inscan_stream_rate((const inscan_u64 *)(const void *)compositor.stream_hist[at],
+                                                      (inscan_u32)compositor.stream_hist_n[at]);
 }
 
 static long long compositor_stream_gain_at(unsigned int at, positive now)
@@ -3285,9 +3266,8 @@ static long long compositor_stream_gain_at(unsigned int at, positive now)
 
 static long long compositor_stream_turn(unsigned int at, long long value120, long long gain, int horizontal)
 {
-        value120 = compositor_clamp64(value120, -1000000000ll, 1000000000ll);
-        return compositor_scale_rem(value120, gain * (long long)compositor_speed(), COMPOSITOR_GAIN_TURN,
-                                    &compositor.wheel_rest[at][horizontal ? 1 : 0]);
+        return (long long)inscan_stream_turn((inscan_i64)value120, (inscan_i64)gain, (inscan_i32)compositor_speed(),
+                                             (inscan_i64 *)(void *)&compositor.wheel_rest[at][horizontal ? 1 : 0]);
 }
 
 // The natural-direction flip of a mouse's or a pad's turn (the table's FLIP): the one place it is made, by the loop and by the reader.
@@ -4669,59 +4649,29 @@ static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned 
 
 HOT static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
-        // A frame of nothing but EV_MSC and SYN_REPORT (hid-input's MSC_SCAN of an edge the kernel's filter took, where the kernel has no
-        // EVIOCSMASK, session.c) holds nothing anyone reads: consumed here, not handed to the loop, which shut the gate straight to the client.
-        {
-                unsigned int k = 0;
-
-                while (k < count && (raw[k].type == 4u || (raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0)))
-                        k++;
-                if (count && k == count)
-                        return 1;
-        }
 #ifdef CONFIG_MOONWATER_WAYLAND
-        long dx = 0, dy = 0;
-        int key = -1, value = 0, btn = 0, btn_val = 0, wheel_v120 = 0, wheel_horiz = 0;
-        positive micro;
+        struct inscan_batch b;
         unsigned int shape = __atomic_load_n(&compositor_reader.shape[at], __ATOMIC_ACQUIRE);
+        unsigned int no_direct = (shape & 7u) || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
+                                 __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed_out ||
+                                 compositor_reader.dropped;
+        unsigned int flags = (shape & (INSCAN_F_HIRES_V | INSCAN_F_HIRES_H)) |
+                             (compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? INSCAN_F_FLIP : 0u) |
+                             (no_direct ? INSCAN_F_NO_DIRECT : 0u);
+        int kind = inscan_evdev_batch((const struct inscan_event *)(const void *)raw, (inscan_u32)count, (inscan_u32)flags, &b);
 
-        if ((shape & 7u) || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
-            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed_out || compositor_reader.dropped)
-                return 0;
-        for (unsigned int k = 0; k < count; k++)
-                if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_X)
-                        dx += raw[k].value;
-                else if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_Y)
-                        dy += raw[k].value;
-                else if (raw[k].type == COMPOSITOR_EV_REL &&
-                         (raw[k].code == COMPOSITOR_REL_WHEEL || raw[k].code == COMPOSITOR_REL_HWHEEL ||
-                          raw[k].code == COMPOSITOR_REL_WHEEL_HI || raw[k].code == COMPOSITOR_REL_HWHEEL_HI) && !wheel_v120)
-                {
-                        int fine = raw[k].code == COMPOSITOR_REL_WHEEL_HI || raw[k].code == COMPOSITOR_REL_HWHEEL_HI;
-                        int sideways = raw[k].code == COMPOSITOR_REL_HWHEEL || raw[k].code == COMPOSITOR_REL_HWHEEL_HI;
-
-                        if (!fine && (shape >> (3 + sideways) & 1))
-                                continue;
-                        wheel_v120 = compositor_wheel_turn(fine ? raw[k].value : raw[k].value * 120);
-                        wheel_horiz = sideways;
-                }
-                else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code >= COMPOSITOR_BTN_LEFT && raw[k].code <= COMPOSITOR_BTN_TASK && !btn)
-                        btn = raw[k].code, btn_val = raw[k].value;
-                else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code < 256 && key < 0)
-                        key = raw[k].code, value = raw[k].value;
-                else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0))
-                        return 0;
-        micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds;
-        // A key while a feature of the keys is on (access.c) is the loop's: its gate is the one load a key's report pays for them.
-        if (key >= 0)
-                return !dx && !dy && !btn && !wheel_v120 && !__atomic_load_n(&compositor_access_gate, __ATOMIC_RELAXED) &&
-                       compositor_reader_key(at, (unsigned int)key, value, micro);
-        if (!dx && !dy && !btn && !wheel_v120)
-                return 0;
-        return compositor_reader_button(at, dx, dy, (unsigned int)btn, btn_val, wheel_v120, wheel_horiz, micro);
-#else
-        (void)at, (void)raw, (void)count;
+        if (kind == INSCAN_BATCH_NOISE)
+                return 1;
+        if (kind == INSCAN_BATCH_KEY)
+                return !__atomic_load_n(&compositor_access_gate, __ATOMIC_RELAXED) &&
+                       compositor_reader_key(at, (unsigned int)b.key, b.key_val, (positive)b.micro);
+        if (kind == INSCAN_BATCH_POINTER)
+                return compositor_reader_button(at, (long)b.dx, (long)b.dy, (unsigned int)b.btn, b.btn_val,
+                                                b.wheel_v120, b.wheel_horiz, (positive)b.micro);
         return 0;
+#else
+        (void)at;
+        return inscan_evdev_batch((const struct inscan_event *)(const void *)raw, (inscan_u32)count, INSCAN_F_NO_DIRECT, 0) == INSCAN_BATCH_NOISE;
 #endif
 }
 
