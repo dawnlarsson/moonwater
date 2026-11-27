@@ -235,6 +235,20 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #define UI_HOLD_MOST 1500
 static b64 ui_hold_ns = (b64)UI_HOLD_NS;
 
+/* Fixed density-independent logical unit (dp): 1 dp == 1 device pixel at 100% scale,
+   so any DPI or % display scale produces identical physical UI size. */
+static inline int ui_dp(int scale, int dp)
+{
+        int s = scale >= 50 ? scale : 100;
+        return dp >= 0 ? (dp * s + 50) / 100 : -((-dp * s + 50) / 100);
+}
+
+static inline int ui_dp_min(int scale, int dp, int least)
+{
+        int px = ui_dp(scale, dp);
+        return px < least ? least : px;
+}
+
 // A finger's target, the one rule:
 static inline int ui_reach_hit(int touch, int least, int px, int py, int x, int y, int width, int height)
 {
