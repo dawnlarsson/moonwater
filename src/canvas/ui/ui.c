@@ -8181,26 +8181,26 @@ struct ui_walk
         unsigned long stroke;              // the stroke, 0 for none
         struct ui_ramp address_to ramp;
 };
-_Static_assert(sizeof(struct ui_walk) == sizeof(struct ui_text_walk) &&
-               offset_of(struct ui_walk, scratch)     == offset_of(struct ui_text_walk, scratch) &&
-               offset_of(struct ui_walk, wide)        == offset_of(struct ui_text_walk, wide) &&
-               offset_of(struct ui_walk, rows)        == offset_of(struct ui_text_walk, rows) &&
-               offset_of(struct ui_walk, top)         == offset_of(struct ui_text_walk, top) &&
-               offset_of(struct ui_walk, first)       == offset_of(struct ui_text_walk, first) &&
-               offset_of(struct ui_walk, last)        == offset_of(struct ui_text_walk, last) &&
-               offset_of(struct ui_walk, pixels)      == offset_of(struct ui_text_walk, pixels) &&
-               offset_of(struct ui_walk, pitch)       == offset_of(struct ui_text_walk, pitch) &&
-               offset_of(struct ui_walk, pen_x)       == offset_of(struct ui_text_walk, pen_x) &&
-               offset_of(struct ui_walk, ui_top)      == offset_of(struct ui_text_walk, ui_top) &&
-               offset_of(struct ui_walk, ui_bottom)   == offset_of(struct ui_text_walk, ui_bottom) &&
-               offset_of(struct ui_walk, ui_height)   == offset_of(struct ui_text_walk, ui_height) &&
-               offset_of(struct ui_walk, band_top)    == offset_of(struct ui_text_walk, band_top) &&
-               offset_of(struct ui_walk, band_bottom) == offset_of(struct ui_text_walk, band_bottom) &&
-               offset_of(struct ui_walk, paper)       == offset_of(struct ui_text_walk, paper) &&
-               offset_of(struct ui_walk, ground)      == offset_of(struct ui_text_walk, ground) &&
-               offset_of(struct ui_walk, flip)        == offset_of(struct ui_text_walk, flip) &&
-               offset_of(struct ui_walk, stroke)      == offset_of(struct ui_text_walk, stroke) &&
-               offset_of(struct ui_walk, ramp)        == offset_of(struct ui_text_walk, ramp),
+_Static_assert(sizeof(struct ui_walk) == sizeof(struct ui_text_blit_walk) &&
+               offset_of(struct ui_walk, scratch)     == offset_of(struct ui_text_blit_walk, scratch) &&
+               offset_of(struct ui_walk, wide)        == offset_of(struct ui_text_blit_walk, wide) &&
+               offset_of(struct ui_walk, rows)        == offset_of(struct ui_text_blit_walk, rows) &&
+               offset_of(struct ui_walk, top)         == offset_of(struct ui_text_blit_walk, top) &&
+               offset_of(struct ui_walk, first)       == offset_of(struct ui_text_blit_walk, first) &&
+               offset_of(struct ui_walk, last)        == offset_of(struct ui_text_blit_walk, last) &&
+               offset_of(struct ui_walk, pixels)      == offset_of(struct ui_text_blit_walk, pixels) &&
+               offset_of(struct ui_walk, pitch)       == offset_of(struct ui_text_blit_walk, pitch) &&
+               offset_of(struct ui_walk, pen_x)       == offset_of(struct ui_text_blit_walk, pen_x) &&
+               offset_of(struct ui_walk, ui_top)      == offset_of(struct ui_text_blit_walk, ui_top) &&
+               offset_of(struct ui_walk, ui_bottom)   == offset_of(struct ui_text_blit_walk, ui_bottom) &&
+               offset_of(struct ui_walk, ui_height)   == offset_of(struct ui_text_blit_walk, ui_height) &&
+               offset_of(struct ui_walk, band_top)    == offset_of(struct ui_text_blit_walk, band_top) &&
+               offset_of(struct ui_walk, band_bottom) == offset_of(struct ui_text_blit_walk, band_bottom) &&
+               offset_of(struct ui_walk, paper)       == offset_of(struct ui_text_blit_walk, paper) &&
+               offset_of(struct ui_walk, ground)      == offset_of(struct ui_text_blit_walk, ground) &&
+               offset_of(struct ui_walk, flip)        == offset_of(struct ui_text_blit_walk, flip) &&
+               offset_of(struct ui_walk, stroke)      == offset_of(struct ui_text_blit_walk, stroke) &&
+               offset_of(struct ui_walk, ramp)        == offset_of(struct ui_text_blit_walk, ramp),
                "ui_walk ABI parity with ui_text_blit.asm.c");
 
 // A bordered cover bitmap allocated in the scene pool and emitted as op 3: returns the bitmap buffer, or null when out of room.
@@ -8505,7 +8505,7 @@ HOT static fn ui_run_lay(struct ui address_to restrict ui, int wide, int rows, i
                 return;
         }
         {
-                struct ui_text_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
+                struct ui_text_blit_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
                                             .last = last, .pixels = ui->pixels, .pitch = (ui_txt_i64)ui->pitch, .pen_x = pen_x,
                                             .ui_top = ui->top < 0 ? 0 : ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
                                             .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,

@@ -72,7 +72,8 @@ sh_esc_u64 sh_ansi_sgr_skip(const char *src, sh_esc_u64 len);
 
 #endif /* MOONWATER_SH_SHELL_ESCAPE_H */
 
-#ifdef SH_SHELL_ESCAPE_ASM_IMPLEMENTATION
+#if defined(SH_SHELL_ESCAPE_ASM_IMPLEMENTATION) && !defined(SH_SHELL_ESCAPE_ASM_EMITTED)
+#define SH_SHELL_ESCAPE_ASM_EMITTED 1
 
 #if !defined(ARM64) && !defined(X64) && !defined(RISCV64)
 # if defined(__aarch64__) || defined(_M_ARM64)

@@ -63,7 +63,7 @@ void c_ref_cover_row(const uint32_t *src, uint8_t *dst, uint64_t width, uint32_t
 }
 
 __attribute__((noinline))
-void c_ref_run_walk(const struct ui_text_walk *walk)
+void c_ref_run_walk(const struct ui_text_blit_walk *walk)
 {
         if (!walk || !walk->scratch || !walk->pixels || !walk->ramp)
                 return;
@@ -280,7 +280,7 @@ static void test_cover_row(void)
 
 /* ---- Test 3: ui_text_run_walk ---- */
 
-static void compare_walk_case(const char *label, const struct ui_text_walk *tpl,
+static void compare_walk_case(const char *label, const struct ui_text_blit_walk *tpl,
                               const uint32_t *init_pixels, size_t pix_count,
                               uint32_t colour, uint32_t alpha, uint32_t rground, int warm_twice)
 {
@@ -298,7 +298,7 @@ static void compare_walk_case(const char *label, const struct ui_text_walk *tpl,
         ramp_asm.ground = ramp_ref.ground = rground;
         ramp_asm.set    = ramp_ref.set    = 1;
 
-        struct ui_text_walk w_asm = *tpl, w_ref = *tpl;
+        struct ui_text_blit_walk w_asm = *tpl, w_ref = *tpl;
         w_asm.pixels = pix_asm; w_asm.ramp = &ramp_asm;
         w_ref.pixels = pix_ref; w_ref.ramp = &ramp_ref;
 
@@ -334,7 +334,7 @@ static void test_run_walk(void)
 {
         /* NULL & degenerate safety */
         ui_text_run_walk(NULL);
-        struct ui_text_walk empty;
+        struct ui_text_blit_walk empty;
         memset(&empty, 0, sizeof(empty));
         ui_text_run_walk(&empty);
 
@@ -376,7 +376,7 @@ static void test_run_walk(void)
                         for (size_t k = 0; k < px_n; k++)
                                 pixels[k] = (k & 1) ? ground : rng_u32();
 
-                        struct ui_text_walk w = {
+                        struct ui_text_blit_walk w = {
                                 .scratch = scratch, .wide = W, .rows = H, .top = 1,
                                 .first = -2, .last = W + 3, /* deliberately out of bounds -> must clamp */
                                 .pixels = NULL, .pitch = pitch, .pen_x = 2,
@@ -446,7 +446,7 @@ static void test_run_walk(void)
                 int btop = (int)(rng_u32() % (uint32_t)img_h);
                 int bbot = band_on ? btop + (int)(rng_u32() % (uint32_t)(img_h - btop + 1)) : btop;
 
-                struct ui_text_walk w = {
+                struct ui_text_blit_walk w = {
                         .scratch = scratch, .wide = W, .rows = H,
                         .top = (int)(rng_u32() % 9) - 3,
                         .first = first, .last = last,
@@ -545,7 +545,7 @@ static void test_guard_pages(void)
                         r_asm.ground = r_ref.ground = ground;
                         r_asm.set    = r_ref.set    = 1;
 
-                        struct ui_text_walk w_asm = {
+                        struct ui_text_blit_walk w_asm = {
                                 .scratch = sc, .wide = W, .rows = H, .top = 0,
                                 .first = 0, .last = W, .pixels = px, .pitch = pitch, .pen_x = 0,
                                 .ui_top = 0, .ui_bottom = H, .ui_height = H,
@@ -553,7 +553,7 @@ static void test_guard_pages(void)
                                 .paper = paper, .ground = ground, .flip = 255,
                                 .stroke = st ? 128 : 0, .ramp = &r_asm
                         };
-                        struct ui_text_walk w_ref = w_asm;
+                        struct ui_text_blit_walk w_ref = w_asm;
                         w_ref.pixels = px_ref; w_ref.ramp = &r_ref;
 
                         ui_text_run_walk(&w_asm);
@@ -635,14 +635,14 @@ static void run_bench(void)
         r_asm.ground = r_ref.ground = ground;
         r_asm.set    = r_ref.set    = 1;
 
-        struct ui_text_walk wa = {
+        struct ui_text_blit_walk wa = {
                 .scratch = sc, .wide = W, .rows = H, .top = 0, .first = 0, .last = W,
                 .pixels = px, .pitch = PITCH, .pen_x = 8,
                 .ui_top = 0, .ui_bottom = H, .ui_height = H,
                 .band_top = 0, .band_bottom = 0,
                 .paper = paper, .ground = ground, .flip = 255, .stroke = 0, .ramp = &r_asm
         };
-        struct ui_text_walk wr = wa;
+        struct ui_text_blit_walk wr = wa;
         wr.ramp = &r_ref;
 
         const int N_WALK = 50000;

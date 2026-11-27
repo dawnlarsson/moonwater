@@ -52,7 +52,7 @@ struct ui_text_ramp {
 };
 
 /* 152 bytes — byte-for-byte identical to ui.c's struct ui_walk */
-struct ui_text_walk {
+struct ui_text_blit_walk {
         const ui_txt_u32    *scratch;     /* +0   */
         ui_txt_i64           wide;        /* +8   */
         ui_txt_i64           rows;        /* +16  */
@@ -86,22 +86,22 @@ _Static_assert(UITXT_OFF(struct ui_text_ramp, colour) == 0    && UITXT_OFF(struc
                UITXT_OFF(struct ui_text_ramp, tone)   == 16   && UITXT_OFF(struct ui_text_ramp, over)  == 1040 &&
                UITXT_OFF(struct ui_text_ramp, known)  == 2064 && UITXT_OFF(struct ui_text_ramp, made)  == 2096,
                "ui_text_ramp layout");
-_Static_assert(sizeof(struct ui_text_walk) == 152, "ui_text_walk size");
-_Static_assert(UITXT_OFF(struct ui_text_walk, scratch)     == 0   && UITXT_OFF(struct ui_text_walk, wide)        == 8 &&
-               UITXT_OFF(struct ui_text_walk, rows)        == 16  && UITXT_OFF(struct ui_text_walk, top)         == 24 &&
-               UITXT_OFF(struct ui_text_walk, first)       == 32  && UITXT_OFF(struct ui_text_walk, last)        == 40 &&
-               UITXT_OFF(struct ui_text_walk, pixels)      == 48  && UITXT_OFF(struct ui_text_walk, pitch)       == 56 &&
-               UITXT_OFF(struct ui_text_walk, pen_x)       == 64  && UITXT_OFF(struct ui_text_walk, ui_top)      == 72 &&
-               UITXT_OFF(struct ui_text_walk, ui_bottom)   == 80  && UITXT_OFF(struct ui_text_walk, ui_height)   == 88 &&
-               UITXT_OFF(struct ui_text_walk, band_top)    == 96  && UITXT_OFF(struct ui_text_walk, band_bottom) == 104 &&
-               UITXT_OFF(struct ui_text_walk, paper)       == 112 && UITXT_OFF(struct ui_text_walk, ground)      == 120 &&
-               UITXT_OFF(struct ui_text_walk, flip)        == 128 && UITXT_OFF(struct ui_text_walk, stroke)      == 136 &&
-               UITXT_OFF(struct ui_text_walk, ramp)        == 144,
-               "ui_text_walk layout");
+_Static_assert(sizeof(struct ui_text_blit_walk) == 152, "ui_text_blit_walk size");
+_Static_assert(UITXT_OFF(struct ui_text_blit_walk, scratch)     == 0   && UITXT_OFF(struct ui_text_blit_walk, wide)        == 8 &&
+               UITXT_OFF(struct ui_text_blit_walk, rows)        == 16  && UITXT_OFF(struct ui_text_blit_walk, top)         == 24 &&
+               UITXT_OFF(struct ui_text_blit_walk, first)       == 32  && UITXT_OFF(struct ui_text_blit_walk, last)        == 40 &&
+               UITXT_OFF(struct ui_text_blit_walk, pixels)      == 48  && UITXT_OFF(struct ui_text_blit_walk, pitch)       == 56 &&
+               UITXT_OFF(struct ui_text_blit_walk, pen_x)       == 64  && UITXT_OFF(struct ui_text_blit_walk, ui_top)      == 72 &&
+               UITXT_OFF(struct ui_text_blit_walk, ui_bottom)   == 80  && UITXT_OFF(struct ui_text_blit_walk, ui_height)   == 88 &&
+               UITXT_OFF(struct ui_text_blit_walk, band_top)    == 96  && UITXT_OFF(struct ui_text_blit_walk, band_bottom) == 104 &&
+               UITXT_OFF(struct ui_text_blit_walk, paper)       == 112 && UITXT_OFF(struct ui_text_blit_walk, ground)      == 120 &&
+               UITXT_OFF(struct ui_text_blit_walk, flip)        == 128 && UITXT_OFF(struct ui_text_blit_walk, stroke)      == 136 &&
+               UITXT_OFF(struct ui_text_blit_walk, ramp)        == 144,
+               "ui_text_blit_walk layout");
 
 ui_txt_u32 ui_text_over(ui_txt_u32 pixel, ui_txt_u32 under);
 void       ui_text_cover_row(const ui_txt_u32 *src, ui_txt_u8 *dst, ui_txt_u64 width, ui_txt_u32 xor_mask);
-void       ui_text_run_walk(const struct ui_text_walk *walk);
+void       ui_text_run_walk(const struct ui_text_blit_walk *walk);
 
 #endif /* MOONWATER_CANVAS_UI_TEXT_BLIT_ASM_H */
 

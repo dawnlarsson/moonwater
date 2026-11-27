@@ -126,7 +126,8 @@ wl_u32 wl_direct_pack_packet(wl_u8 *out, wl_u64 cap, const struct wl_direct_pack
 
 #endif /* MOONWATER_CANVAS_WAYLAND_DIRECT_ASM_H */
 
-#ifdef CANVAS_WAYLAND_DIRECT_ASM_IMPLEMENTATION
+#if defined(CANVAS_WAYLAND_DIRECT_ASM_IMPLEMENTATION) && !defined(CANVAS_WAYLAND_DIRECT_ASM_EMITTED)
+#define CANVAS_WAYLAND_DIRECT_ASM_EMITTED 1
 
 #if !defined(ARM64) && !defined(X64) && !defined(RISCV64)
 # if defined(__aarch64__) || defined(_M_ARM64)
