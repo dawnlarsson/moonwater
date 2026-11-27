@@ -20,11 +20,12 @@
 #define TAR_CHKSUM_WIDTH 8
 #define TAR_SPACE_SUM ((p32)' ' * TAR_CHKSUM_WIDTH)
 
+#define SH_SHELL_TAR_ASM_IMPLEMENTATION
+#include "shell_tar.asm.c"
+
 static p32 tar_header_sum(p8 address_to block)
 {
-        return memory_sum_bytes(block, TAR_BLOCK) -
-               memory_sum_bytes(block + TAR_CHKSUM, TAR_CHKSUM_WIDTH) +
-               TAR_SPACE_SUM;
+        return sh_tar_header_sum(block);
 }
 
 static bool tar_header_zero(p8 address_to block)
@@ -35,23 +36,7 @@ static bool tar_header_zero(p8 address_to block)
 static bool tar_base256(p8 address_to field, positive width,
                         p64 address_to value)
 {
-        p64 held = 0;
-        positive at;
-
-        if (!width || (field[0] & 0x40))
-                return false;
-
-        held = (p64)(field[0] & 0x7f);
-        for (at = 1; at < width; at++)
-        {
-                if (held > (positive_max >> 8))
-                        return false;
-
-                held = (held << 8) | field[at];
-        }
-
-        address_to value = held;
-        return true;
+        return sh_tar_base256(field, width, value) != 0;
 }
 
 static bool tar_field_value(p8 address_to field, positive width,
@@ -65,28 +50,7 @@ static bool tar_field_value(p8 address_to field, positive width,
 static bool tar_field_moment(p8 address_to field, positive width,
                              b64 address_to value)
 {
-        p64 plain;
-        b64 held;
-
-        if (!width || !(field[0] & 0x80))
-        {
-                if (!tar_field_value(field, width, address_of plain) ||
-                    plain > (p64)bipolar_max)
-                        return false;
-                address_to value = (b64)plain;
-                return true;
-        }
-
-        held = (b64)(field[0] & 0x3f) - (b64)(field[0] & 0x40);
-        for (positive at = 1; at < width; at++)
-        {
-                if (held > (bipolar_max >> 8) || held < (bipolar_min >> 8))
-                        return false;
-                held = held * 256 + field[at];
-        }
-
-        address_to value = held;
-        return true;
+        return sh_tar_field_moment(field, width, value) != 0;
 }
 
 /* Eight octal digit characters, the first the most significant, read as a
@@ -95,147 +59,18 @@ static bool tar_field_moment(p8 address_to field, positive width,
    way octal_digits_word spreads them out. */
 static inline bool tar_octal_eight(p64 word, p64 address_to value)
 {
-        if ((word ^ 0x3030303030303030ull) & 0xf8f8f8f8f8f8f8f8ull)
-                return false;
-        word &= 0x0707070707070707ull;
-        word = (word * 8 + (word >> 8)) & 0x00ff00ff00ff00ffull;
-        word = (word * 64 + (word >> 16)) & 0x0000ffff0000ffffull;
-        word = (word * 4096 + (word >> 32)) & 0xffffffull;
-        address_to value = word;
-        return true;
+        return sh_tar_octal_eight(word, value) != 0;
 }
 
 static bool tar_field_value(p8 address_to field, positive width,
                             p64 address_to value)
 {
-        p8 digits[32];
-        positive at = 0;
-        positive keep;
-        string_address cursor;
-
-        if (width && (field[0] & 0x80))
-                return tar_base256(field, width, value);
-
-        //      The fields as archives write them, digits and a NUL or space,
-        //      without the copy and the scan.
-        if (width == 8)
-        {
-                p64 word;
-                p64 number;
-
-                memory_copy(address_of word, field, 8);
-                if ((word >> 56) == 0 || (word >> 56) == ' ')
-                {
-                        //      The last byte, not a digit, reads as a zero
-                        //      one and is shifted away.
-                        if (tar_octal_eight((word & 0x00ffffffffffffffull) |
-                                                0x3000000000000000ull,
-                                            address_of number))
-                        {
-                                address_to value = number >> 3;
-                                return true;
-                        }
-                }
-        }
-        else if (width == 12 && (field[11] == 0 || field[11] == ' ') &&
-                 field[0] >= '0' && field[0] <= '7' && field[1] >= '0' &&
-                 field[1] <= '7' && field[2] >= '0' && field[2] <= '7')
-        {
-                p64 word;
-                p64 number;
-
-                memory_copy(address_of word, field + 3, 8);
-                if (tar_octal_eight(word, address_of number))
-                {
-                        address_to value =
-                            ((p64)((field[0] - '0') * 64 + (field[1] - '0') * 8 +
-                                   (field[2] - '0'))
-                             << 24) | number;
-                        return true;
-                }
-        }
-
-        if (width >= sizeof(digits))
-                return false;
-
-        //      A field that begins with a NUL is empty, and so is none:
-        //      archives that do not write a device number leave its two
-        //      fields as NULs, and every member asks for them.
-        if (width && !field[0])
-        {
-                address_to value = 0;
-                return true;
-        }
-
-        memory_copy(digits, field, width);
-        digits[width] = end;
-
-        at += memory_span_byte(digits + at, ' ', width - at);
-
-        if (at >= width || !digits[at] || digits[at] == ' ')
-        {
-                address_to value = 0;
-                return true;
-        }
-
-        cursor = digits + at;
-        if (!string_digits_checked(address_of cursor, 8, address_of keep))
-                return false;
-
-        at = (positive)(cursor - digits);
-        while (at < width && (digits[at] == ' ' || !digits[at]))
-                at++;
-
-        if (at < width && digits[at])
-                return false;
-
-        address_to value = keep;
-        return true;
+        return sh_tar_field_value(field, width, value) != 0;
 }
 
 static fn tar_field_put_octal(p8 address_to field, positive width, p64 value)
 {
-        p8 digits[32];
-        positive length;
-
-        //      The widths a header has, whole and in a few instructions.
-        if (width == 8 && value < ((p64)1 << 21))
-        {
-                p64 word = octal_digits_word(value) >> 8;
-
-                memory_copy(field, address_of word, 8);
-                return;
-        }
-        if (width == 7 && value < ((p64)1 << 18))
-        {
-                p64 word = octal_digits_word(value) >> 16;
-
-                memory_copy(field, address_of word, 7);
-                return;
-        }
-        if (width == 12 && value < ((p64)1 << 33))
-        {
-                p64 word = octal_digits_word(value);
-                positive high = (positive)(value >> 24);
-
-                field[0] = (p8)('0' + ((high >> 6) & 7));
-                field[1] = (p8)('0' + ((high >> 3) & 7));
-                field[2] = (p8)('0' + (high & 7));
-                memory_copy(field + 3, address_of word, 8);
-                field[11] = end;
-                return;
-        }
-
-        memory_fill(field, '0', width);
-        if (!width)
-                return;
-
-        field[width - 1] = end;
-        length = positive_into_base(digits, (positive)value, 8, false);
-        if (length >= width)
-                length = width - 1;
-
-        memory_copy(field + (width - 1 - length), digits, length);
+        sh_tar_field_put_octal(field, width, value);
 }
 
 static fn tar_header_put_checksum(p8 address_to block)
@@ -249,16 +84,7 @@ static fn tar_header_put_checksum(p8 address_to block)
    sum a tool with signed chars writes for a header with bytes above 0x7f. */
 static bool tar_header_sum_match(p8 address_to block, p64 stored, p64 expect)
 {
-        p64 high = 0;
-        positive at;
-
-        if (stored == expect)
-                return true;
-        for (at = 0; at < TAR_BLOCK; at++)
-                if ((at < TAR_CHKSUM || at >= TAR_CHKSUM + TAR_CHKSUM_WIDTH) &&
-                    block[at] > 127)
-                        high++;
-        return (b64)stored == (b64)expect - (b64)high * 256;
+        return sh_tar_header_sum_match(block, stored, expect) != 0;
 }
 
 static bool tar_header_ok(p8 address_to block)
