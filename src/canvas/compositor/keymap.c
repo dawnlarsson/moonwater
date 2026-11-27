@@ -232,32 +232,6 @@ static const struct
 #define CK_HELD_LSUPER 64u
 #define CK_HELD_RSUPER 128u
 
-static unsigned int compositor_held_bit(unsigned int code)
-{
-        switch (code)
-        {
-        case 42: return CK_HELD_LSHIFT;
-        case 54: return CK_HELD_RSHIFT;
-        case 29: return CK_HELD_LCONTROL;
-        case 97: return CK_HELD_RCONTROL;
-        case 56: return CK_HELD_ALT;
-        case 100: return CK_HELD_ALTGR; // the right Alt is AltGr, the right Control is Control
-        case 125: return CK_HELD_LSUPER;
-        case 126: return CK_HELD_RSUPER;
-        }
-        return 0;
-}
-
-// What is held, as the flags a key event carries.
-static unsigned int compositor_held_flags(unsigned int held)
-{
-        return (held & (CK_HELD_LSHIFT | CK_HELD_RSHIFT) ? WINDOW_KEY_SHIFT : 0) |
-               (held & (CK_HELD_LCONTROL | CK_HELD_RCONTROL) ? WINDOW_KEY_CONTROL : 0) |
-               (held & CK_HELD_ALT ? WINDOW_KEY_ALT : 0) |
-               (held & CK_HELD_ALTGR ? WINDOW_KEY_ALTGR : 0) |
-               (held & (CK_HELD_LSUPER | CK_HELD_RSUPER) ? WINDOW_KEY_SUPER : 0);
-}
-
 struct compositor_keymap
 {
         unsigned char layout;    // an index into compositor_layouts
@@ -266,87 +240,80 @@ struct compositor_keymap
         unsigned int hidden[4];  // keys whose press was taken and so whose release is
 };
 
+#define COMPOSITOR_KEYMAP_EVAL_ASM_IMPLEMENTATION
+#if defined(__has_include)
+# if __has_include("keymap_eval.asm.c")
+#  include "keymap_eval.asm.c"
+# elif __has_include("compositor/keymap_eval.asm.c")
+#  include "compositor/keymap_eval.asm.c"
+# else
+#  include "src/canvas/compositor/keymap_eval.asm.c"
+# endif
+#else
+# include "keymap_eval.asm.c"
+#endif
+
+_Static_assert(sizeof(struct compositor_patch) == sizeof(struct km_patch), "compositor_patch != km_patch size");
+_Static_assert(KM_EVAL_OFFSET(struct compositor_patch, code) == KM_EVAL_OFFSET(struct km_patch, code) &&
+               KM_EVAL_OFFSET(struct compositor_patch, level) == KM_EVAL_OFFSET(struct km_patch, level),
+               "compositor_patch != km_patch layout");
+_Static_assert(sizeof(compositor_layouts[0]) == sizeof(struct km_layout), "compositor_layouts != km_layout size");
+_Static_assert(sizeof(compositor_composed[0]) == sizeof(struct km_composed), "compositor_composed != km_composed size");
+_Static_assert(sizeof(struct compositor_keymap) == sizeof(struct km_state), "compositor_keymap != km_state size");
+_Static_assert(KM_EVAL_OFFSET(struct compositor_keymap, layout) == KM_EVAL_OFFSET(struct km_state, layout) &&
+               KM_EVAL_OFFSET(struct compositor_keymap, caps) == KM_EVAL_OFFSET(struct km_state, caps) &&
+               KM_EVAL_OFFSET(struct compositor_keymap, dead) == KM_EVAL_OFFSET(struct km_state, dead) &&
+               KM_EVAL_OFFSET(struct compositor_keymap, hidden) == KM_EVAL_OFFSET(struct km_state, hidden),
+               "compositor_keymap != km_state layout");
+_Static_assert(CK_DEAD == KM_DEAD && CK_TABLE == KM_TABLE && CK_LEVELS == KM_LEVELS && CK_CAPSLOCK == KM_CAPSLOCK,
+               "CK_* != KM_* constants");
+_Static_assert(WINDOW_KEY_SHIFT == KM_MOD_SHIFT && WINDOW_KEY_CONTROL == KM_MOD_CONTROL &&
+               WINDOW_KEY_ALT == KM_MOD_ALT && WINDOW_KEY_ALTGR == KM_MOD_ALTGR &&
+               WINDOW_KEY_SUPER == KM_MOD_SUPER,
+               "WINDOW_KEY_* != KM_MOD_* flags");
+
+static const struct km_tables compositor_km_tables = {
+    &compositor_us[0][0],
+    (const struct km_layout *)(const void *)compositor_layouts,
+    (const struct km_composed *)(const void *)compositor_composed,
+    (km_u32)(sizeof(compositor_layouts) / sizeof(compositor_layouts[0])),
+    (km_u32)(sizeof(compositor_composed) / sizeof(compositor_composed[0])),
+};
+
+static unsigned int compositor_held_bit(unsigned int code)
+{
+        return km_held_bit(code);
+}
+
+// What is held, as the flags a key event carries.
+static unsigned int compositor_held_flags(unsigned int held)
+{
+        return km_held_flags(held);
+}
+
 // A layout by name, or -1; the name it is kept under is what asked for it.
 static int compositor_layout_index(const char *name)
 {
-        for (unsigned int at = 0; at < sizeof(compositor_layouts) / sizeof(compositor_layouts[0]); at++)
-                if (name[0] == compositor_layouts[at].name[0] && name[1] == compositor_layouts[at].name[1] &&
-                    !name[2])
-                        return (int)at;
-        return -1;
+        return km_layout_index(name, compositor_km_tables.layouts, compositor_km_tables.layout_count);
 }
 
 // The case of a letter turned over, which is what Caps Lock does to one.
 static unsigned int compositor_letter_flip(unsigned int c)
 {
-        if ((c | 0x20) - 'a' < 26u)
-                return c ^ 0x20;
-        if ((c >= 0xE0 && c <= 0xFE && c != 0xF7) || (c >= 0xC0 && c <= 0xDE && c != 0xD7))
-                return c ^ 0x20;
-        return c;
+        return km_letter_flip(c);
 }
 
 // What a key says at the levels the modifiers pick, with CK_DEAD on an accent.
 static unsigned int compositor_keymap_character(const struct compositor_keymap *map, unsigned int code,
                                                 unsigned int modifiers)
 {
-        const struct compositor_patch *patch = compositor_layouts[map->layout].patch;
-        unsigned int count = compositor_layouts[map->layout].count;
-        unsigned int level[CK_LEVELS] = {0, 0, 0, 0};
-        unsigned int at, want = 0, c;
-
-        if (code >= CK_TABLE)
-                return 0;
-
-        level[0] = compositor_us[code][0];
-        level[1] = compositor_us[code][1];
-        for (at = 0; at < count; at++)
-                if (patch[at].code == code)
-                        memory_copy(level, patch[at].level, sizeof(level));
-
-        if (modifiers & WINDOW_KEY_ALTGR)
-                want += 2;
-        if (modifiers & WINDOW_KEY_SHIFT)
-                want += 1;
-
-        // A level the layout leaves empty is the one below it.
-        c = level[want];
-        if (!c && want)
-                c = level[want & 2];
-        if (!c && (modifiers & WINDOW_KEY_SHIFT))
-                c = level[1];
-        if (!c)
-                c = level[0];
-        if (!c)
-                return 0;
-
-        // A chord with Control is the key's Latin letter, whatever the layout types: Ctrl+C copies on an Arabic or a Hebrew keyboard.
-        if ((modifiers & WINDOW_KEY_CONTROL) && c > 0x7f && !(c & CK_DEAD))
-                c = compositor_us[code][(modifiers & WINDOW_KEY_SHIFT) != 0];
-
-        if (map->caps && !(c & CK_DEAD))
-                c = compositor_letter_flip(c);
-
-        // Control turns a letter into the control code that letter names,
-        // which is the whole of why a terminal wants a modifier at all.
-        if ((modifiers & WINDOW_KEY_CONTROL) && !(c & CK_DEAD) && (c | 0x20) - 'a' < 26u)
-                return c & 0x1f;
-
-        return c;
+        return km_character(&compositor_km_tables, (const struct km_state *)(const void *)map, code, modifiers);
 }
 
 // What a dead accent and a character make together, or 0 when they make nothing.
 static unsigned int compositor_keymap_compose(unsigned int accent, unsigned int c)
 {
-        if (c == ' ' || c == accent)
-                return accent;
-
-        for (unsigned int row = 0; row < sizeof(compositor_composed) / sizeof(compositor_composed[0]); row++)
-                if (compositor_composed[row].accent == accent)
-                        for (unsigned int at = 0; compositor_composed[row].bases[at]; at++)
-                                if (c < 128 && compositor_composed[row].bases[at] == (char)c)
-                                        return compositor_composed[row].made[at];
-        return 0;
+        return km_compose(accent, c, compositor_km_tables.composed, compositor_km_tables.composed_count);
 }
 
 /*
@@ -365,74 +332,7 @@ static unsigned int compositor_keymap_compose(unsigned int accent, unsigned int 
 static int compositor_keymap_event(struct compositor_keymap *map, unsigned int code, int value,
                                    unsigned int modifiers, unsigned int out[2])
 {
-        unsigned int bit = 1u << (code & 31), c, made;
-        int taken = code < 128 && (map->hidden[code >> 5] & bit);
-
-        if (code >= 128)
-                return 0;
-
-        if (!value)
-        {
-                map->hidden[code >> 5] &= ~bit;
-                return taken ? -1 : 0;
-        }
-
-        if (taken)
-                return -1;
-
-        if (code == CK_CAPSLOCK)
-        {
-                if (value == 1)
-                        map->caps ^= 1;
-                return 0;
-        }
-
-        c = compositor_keymap_character(map, code, modifiers);
-        if (!c)
-                return 0;
-
-        if (c & CK_DEAD)
-        {
-                unsigned int accent = c & ~CK_DEAD, was = map->dead;
-
-                map->hidden[code >> 5] |= bit;
-                map->dead = accent;
-                if (!was)
-                        return -1;
-
-                // Typed, so it is a press and its release goes out with it.
-                map->hidden[code >> 5] &= ~bit;
-                if (was == accent)
-                        map->dead = 0;
-                out[0] = was; // twice the same is that accent; another types the first
-                return 1;
-        }
-
-        if (!map->dead)
-        {
-                out[0] = c;
-                return 1;
-        }
-
-        if (c < ' ' || c == 127)
-        {
-                map->dead = 0;
-                out[0] = c;
-                return 1;
-        }
-
-        made = compositor_keymap_compose(map->dead, c);
-        if (made)
-        {
-                map->dead = 0;
-                out[0] = made;
-                return 1;
-        }
-
-        out[0] = map->dead;
-        out[1] = c;
-        map->dead = 0;
-        return 2;
+        return km_event(&compositor_km_tables, (struct km_state *)(void *)map, code, value, modifiers, out);
 }
 
 /*
