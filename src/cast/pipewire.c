@@ -213,14 +213,17 @@ static int pwire_equal(const char *a, long n, const char *b)
         return k == n && !b[k];
 }
 
+#define CAST_PWIRE_POD_ASM_IMPLEMENTATION
+#include "pwire_pod.asm.c"
+
 static unsigned pwire_get32(const unsigned char *p)
 {
-        return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+        return (unsigned)pwire_pod_get32(p);
 }
 
 static void pwire_put32(unsigned char *p, unsigned v)
 {
-        p[0] = (unsigned char)v, p[1] = (unsigned char)(v >> 8), p[2] = (unsigned char)(v >> 16), p[3] = (unsigned char)(v >> 24);
+        pwire_pod_put32(p, (pw_u32)v);
 }
 
 static void pwire_put64(unsigned char *p, unsigned long long v)
@@ -450,24 +453,6 @@ struct pwire_pod
         const unsigned char *body;
 };
 
-// The pod at *at of [p, p + n): 0 and *at past it (and its padding), or -1 when it does not fit.
-static int pwire_p_next(const unsigned char *p, long n, long *at, struct pwire_pod *pod)
-{
-        long size;
-
-        if (*at < 0 || n - *at < 8)
-                return -1;
-        size = (long)pwire_get32(p + *at);
-        pod->type = pwire_get32(p + *at + 4);
-        if (size > n - *at - 8)
-                return -1;
-        pod->size = (unsigned)size, pod->body = p + *at + 8;
-        *at += 8 + ((size + 7) & ~7l);
-        if (*at > n)
-                *at = n;
-        return 0;
-}
-
 // The members of a struct, read one after another.
 struct pwire_members
 {
@@ -476,103 +461,12 @@ struct pwire_members
         int bad;
 };
 
-static int pwire_p_struct(const struct pwire_pod *pod, struct pwire_members *m)
-{
-        m->p = pod->body, m->n = pod->size, m->at = 0, m->bad = pod->type != PWIRE_STRUCT;
-        return m->bad ? -1 : 0;
-}
-
-static struct pwire_pod pwire_p_member(struct pwire_members *m)
-{
-        struct pwire_pod pod = {0, 0, 0};
-
-        if (m->bad || pwire_p_next(m->p, m->n, &m->at, &pod) < 0)
-                m->bad = 1, pod.type = 0;
-        return pod;
-}
-
-// An Int (or an Id, or a Bool: four bytes) member, or 0 with the members marked bad.
-static unsigned pwire_p_int(struct pwire_members *m)
-{
-        struct pwire_pod pod = pwire_p_member(m);
-
-        if ((pod.type != PWIRE_INT && pod.type != PWIRE_ID && pod.type != PWIRE_BOOL) || pod.size < 4)
-        {
-                m->bad = 1;
-                return 0;
-        }
-        return pwire_get32(pod.body);
-}
-
-// A String member: its bytes (NUL-ended inside its pod) and length, or null with the members marked bad. A None is a null string.
-static const char *pwire_p_string(struct pwire_members *m, long *length)
-{
-        struct pwire_pod pod = pwire_p_member(m);
-        long n = 0;
-
-        *length = 0;
-        if (pod.type == PWIRE_NONE)
-                return "";
-        if (pod.type != PWIRE_STRING || !pod.size || pod.body[pod.size - 1])
-        {
-                m->bad = 1;
-                return 0;
-        }
-        while (pod.body[n])
-                n++;
-        *length = n;
-        return (const char *)pod.body;
-}
-
 // The values of a property: a plain value is one of them; a Choice's are its child pods (the default first), each `size` bytes.
 struct pwire_values
 {
         unsigned type, choice, size, count;
         const unsigned char *at;
 };
-
-static int pwire_p_values(const struct pwire_pod *pod, struct pwire_values *v)
-{
-        if (pod->type != PWIRE_CHOICE)
-        {
-                v->type = pod->type, v->choice = PWIRE_CHOICE_NONE, v->size = pod->size, v->count = 1, v->at = pod->body;
-                return 0;
-        }
-        if (pod->size < 16)
-                return -1;
-        v->choice = pwire_get32(pod->body);
-        v->size = pwire_get32(pod->body + 8);
-        v->type = pwire_get32(pod->body + 12);
-        if (!v->size || v->size > pod->size - 16)
-                return -1;
-        v->count = (pod->size - 16) / v->size;
-        v->at = pod->body + 16;
-        return v->count ? 0 : -1;
-}
-
-static unsigned pwire_value32(const struct pwire_values *v, unsigned k, unsigned word)
-{
-        return k < v->count && v->size >= 4 * (word + 1) ? pwire_get32(v->at + (long)k * v->size + 4 * word) : 0;
-}
-
-// Whether the values allow x (an Id or an Int): one of them for none or an enum, between the bounds for a range, a bit of the flags.
-static int pwire_allows(const struct pwire_values *v, unsigned x)
-{
-        if (v->choice == PWIRE_CHOICE_NONE)
-                return pwire_value32(v, 0, 0) == x;
-        if (v->choice == PWIRE_CHOICE_ENUM)
-        {
-                for (unsigned k = v->count > 1 ? 1 : 0; k < v->count; k++)
-                        if (pwire_value32(v, k, 0) == x)
-                                return 1;
-                return 0;
-        }
-        if (v->choice == PWIRE_CHOICE_RANGE || v->choice == PWIRE_CHOICE_STEP)
-                return v->count >= 3 && pwire_value32(v, 1, 0) <= x && x <= pwire_value32(v, 2, 0);
-        if (v->choice == PWIRE_CHOICE_FLAGS)
-                return (pwire_value32(v, 0, 0) & x) == x;
-        return 0;
-}
 
 // The properties of an object pod: its type and id, then each key and value in turn (pwire_p_prop).
 struct pwire_props
@@ -582,25 +476,108 @@ struct pwire_props
         long n, at;
 };
 
+_Static_assert(sizeof(struct pwire_pod) == sizeof(struct pwire_pod_view), "pwire_pod size");
+_Static_assert(PW_POD_OFFSET(struct pwire_pod, type) == PW_POD_OFFSET(struct pwire_pod_view, type), "pwire_pod.type");
+_Static_assert(PW_POD_OFFSET(struct pwire_pod, size) == PW_POD_OFFSET(struct pwire_pod_view, size), "pwire_pod.size");
+_Static_assert(PW_POD_OFFSET(struct pwire_pod, body) == PW_POD_OFFSET(struct pwire_pod_view, body), "pwire_pod.body");
+
+_Static_assert(sizeof(struct pwire_members) == sizeof(struct pwire_pod_members), "pwire_members size");
+_Static_assert(PW_POD_OFFSET(struct pwire_members, p)   == PW_POD_OFFSET(struct pwire_pod_members, p),   "pwire_members.p");
+_Static_assert(PW_POD_OFFSET(struct pwire_members, n)   == PW_POD_OFFSET(struct pwire_pod_members, n),   "pwire_members.n");
+_Static_assert(PW_POD_OFFSET(struct pwire_members, at)  == PW_POD_OFFSET(struct pwire_pod_members, at),  "pwire_members.at");
+_Static_assert(PW_POD_OFFSET(struct pwire_members, bad) == PW_POD_OFFSET(struct pwire_pod_members, bad), "pwire_members.bad");
+
+_Static_assert(sizeof(struct pwire_values) == sizeof(struct pwire_pod_values), "pwire_values size");
+_Static_assert(PW_POD_OFFSET(struct pwire_values, type)   == PW_POD_OFFSET(struct pwire_pod_values, type),   "pwire_values.type");
+_Static_assert(PW_POD_OFFSET(struct pwire_values, choice) == PW_POD_OFFSET(struct pwire_pod_values, choice), "pwire_values.choice");
+_Static_assert(PW_POD_OFFSET(struct pwire_values, size)   == PW_POD_OFFSET(struct pwire_pod_values, size),   "pwire_values.size");
+_Static_assert(PW_POD_OFFSET(struct pwire_values, count)  == PW_POD_OFFSET(struct pwire_pod_values, count),  "pwire_values.count");
+_Static_assert(PW_POD_OFFSET(struct pwire_values, at)     == PW_POD_OFFSET(struct pwire_pod_values, at),     "pwire_values.at");
+
+_Static_assert(sizeof(struct pwire_props) == sizeof(struct pwire_pod_props), "pwire_props size");
+_Static_assert(PW_POD_OFFSET(struct pwire_props, type) == PW_POD_OFFSET(struct pwire_pod_props, type), "pwire_props.type");
+_Static_assert(PW_POD_OFFSET(struct pwire_props, id)   == PW_POD_OFFSET(struct pwire_pod_props, id),   "pwire_props.id");
+_Static_assert(PW_POD_OFFSET(struct pwire_props, p)    == PW_POD_OFFSET(struct pwire_pod_props, p),    "pwire_props.p");
+_Static_assert(PW_POD_OFFSET(struct pwire_props, n)    == PW_POD_OFFSET(struct pwire_pod_props, n),    "pwire_props.n");
+_Static_assert(PW_POD_OFFSET(struct pwire_props, at)   == PW_POD_OFFSET(struct pwire_pod_props, at),   "pwire_props.at");
+
+_Static_assert(PWIRE_NONE == PW_POD_NONE && PWIRE_BOOL == PW_POD_BOOL && PWIRE_ID == PW_POD_ID && PWIRE_INT == PW_POD_INT &&
+               PWIRE_STRING == PW_POD_STRING && PWIRE_STRUCT == PW_POD_STRUCT && PWIRE_OBJECT == PW_POD_OBJECT &&
+               PWIRE_CHOICE == PW_POD_CHOICE, "PW_POD_* mismatch");
+_Static_assert(PWIRE_CHOICE_NONE == PW_CHOICE_NONE && PWIRE_CHOICE_RANGE == PW_CHOICE_RANGE &&
+               PWIRE_CHOICE_STEP == PW_CHOICE_STEP && PWIRE_CHOICE_ENUM == PW_CHOICE_ENUM &&
+               PWIRE_CHOICE_FLAGS == PW_CHOICE_FLAGS, "PW_CHOICE_* mismatch");
+
+// The pod at *at of [p, p + n): 0 and *at past it (and its padding), or -1 when it does not fit.
+static int pwire_p_next(const unsigned char *p, long n, long *at, struct pwire_pod *pod)
+{
+        pw_i64 pos = (pw_i64)*at;
+        pw_i32 rc = pwire_pod_next(p, (pw_i64)n, &pos, (struct pwire_pod_view *)pod);
+
+        *at = (long)pos;
+        return (int)rc;
+}
+
+static int pwire_p_struct(const struct pwire_pod *pod, struct pwire_members *m)
+{
+        return (int)pwire_pod_struct((const struct pwire_pod_view *)pod, (struct pwire_pod_members *)m);
+}
+
+static struct pwire_pod pwire_p_member(struct pwire_members *m)
+{
+        struct pwire_pod pod = {0, 0, 0};
+
+        pwire_pod_member((struct pwire_pod_members *)m, (struct pwire_pod_view *)&pod);
+        return pod;
+}
+
+// An Int (or an Id, or a Bool: four bytes) member, or 0 with the members marked bad.
+static unsigned pwire_p_int(struct pwire_members *m)
+{
+        return (unsigned)pwire_pod_int((struct pwire_pod_members *)m);
+}
+
+// A String member: its bytes (NUL-ended inside its pod) and length, or null with the members marked bad. A None is a null string.
+static const char *pwire_p_string(struct pwire_members *m, long *length)
+{
+        const char *s = 0;
+        pw_i64 n = 0;
+        pw_i32 rc = pwire_pod_string((struct pwire_pod_members *)m, &s, &n);
+
+        *length = (long)n;
+        return rc > 0 ? s : rc == 0 ? "" : 0;
+}
+
+static int pwire_p_values(const struct pwire_pod *pod, struct pwire_values *v)
+{
+        return (int)pwire_pod_values((const struct pwire_pod_view *)pod, (struct pwire_pod_values *)v);
+}
+
+static unsigned pwire_value32(const struct pwire_values *v, unsigned k, unsigned word)
+{
+        return (unsigned)pwire_pod_value32((const struct pwire_pod_values *)v, (pw_u32)k, (pw_u32)word);
+}
+
+// Whether the values allow x (an Id or an Int): one of them for none or an enum, between the bounds for a range, a bit of the flags.
+static int pwire_allows(const struct pwire_values *v, unsigned x)
+{
+        return (int)pwire_pod_allows((const struct pwire_pod_values *)v, (pw_u32)x);
+}
+
 static int pwire_p_object(const struct pwire_pod *pod, struct pwire_props *o)
 {
-        if (pod->type != PWIRE_OBJECT || pod->size < 8)
-                return -1;
-        o->type = pwire_get32(pod->body), o->id = pwire_get32(pod->body + 4);
-        o->p = pod->body + 8, o->n = pod->size - 8, o->at = 0;
-        return 0;
+        return (int)pwire_pod_object((const struct pwire_pod_view *)pod, (struct pwire_pod_props *)o);
 }
 
 // The next property: 1 with its key and value, 0 at the end, -1 when it does not fit.
 static int pwire_p_prop(struct pwire_props *o, unsigned *key, struct pwire_pod *value)
 {
-        if (o->at >= o->n)
-                return 0;
-        if (o->n - o->at < 8)
-                return -1;
-        *key = pwire_get32(o->p + o->at);
-        o->at += 8;
-        return pwire_p_next(o->p, o->n, &o->at, value) < 0 ? -1 : 1;
+        pw_u32 k = 0;
+        pw_i32 rc = pwire_pod_prop((struct pwire_pod_props *)o, &k, (struct pwire_pod_view *)value);
+
+        if (rc > 0 || (rc < 0 && o->at > 0))
+                *key = (unsigned)k;
+        return (int)rc;
 }
 
 /* ---- the connections ---- */
