@@ -1693,13 +1693,17 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
         if (!(w->state & COMPOSITOR_XWM_FULLSCREEN))
                 w->state = f.filling ? (w->state | COMPOSITOR_XWM_MAXIMIZED) : (w->state & ~COMPOSITOR_XWM_MAXIMIZED);
         w->state = f.layer == WINDOW_LAYER_ABOVE ? (w->state | COMPOSITOR_XWM_ABOVE) : (w->state & ~COMPOSITOR_XWM_ABOVE);
-        w->state = f.minimized ? (w->state | COMPOSITOR_XWM_HIDDEN) : (w->state & ~COMPOSITOR_XWM_HIDDEN);
-        w->state = f.focused ? (w->state | COMPOSITOR_XWM_FOCUSED) : (w->state & ~COMPOSITOR_XWM_FOCUSED);
-        if (w->state != prev_state)
         {
-                compositor_xwm_net_state(x, w->id, (int)w->state);
-                if ((w->state ^ prev_state) & COMPOSITOR_XWM_HIDDEN)
-                        compositor_xwm_wm_state(x, w->id, f.minimized ? COMPOSITOR_XWM_STATE_ICONIC : COMPOSITOR_XWM_STATE_NORMAL);
+                int hidden = f.minimized || !compositor_space_row_active(w->row);
+
+                w->state = hidden ? (w->state | COMPOSITOR_XWM_HIDDEN) : (w->state & ~COMPOSITOR_XWM_HIDDEN);
+                w->state = f.focused ? (w->state | COMPOSITOR_XWM_FOCUSED) : (w->state & ~COMPOSITOR_XWM_FOCUSED);
+                if (w->state != prev_state)
+                {
+                        compositor_xwm_net_state(x, w->id, (int)w->state);
+                        if ((w->state ^ prev_state) & COMPOSITOR_XWM_HIDDEN)
+                                compositor_xwm_wm_state(x, w->id, hidden ? COMPOSITOR_XWM_STATE_ICONIC : COMPOSITOR_XWM_STATE_NORMAL);
+                }
         }
         c.x = compositor_xwm_to_x(f.x, 0), c.y = compositor_xwm_to_x(f.y, 1);
         //      A fullscreen window whose client set a mode is the emulated monitor's size and place, not the screen's (xwm_fullscreen_place).
@@ -4216,12 +4220,16 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
         {
                 struct xwm_configure sc = {.mask = XWM_CONFIGURE_STACK_MODE, .stack_mode = XWM_STACK_ABOVE};
                 x->last_stack_gen = compositor.stack_gen;
-                for (unsigned int s = 0; s < compositor.stacked; s++)
-                {
-                        struct compositor_xwm_window *w = xwm_row_lookup(x, (int)compositor.stack[s], 0);
-                        if (w)
-                                compositor_xwm_configure(x, w->id, &sc);
-                }
+                // Stack inactive-Scene X11 windows below active-Scene ones so an off-Scene fullscreen window never sits above
+                // an active X11 window (e.g. Steam) in Xwayland's root tree and steals its cursor/hit-testing.
+                for (int active_pass = 0; active_pass < 2; active_pass++)
+                        for (unsigned int s = 0; s < compositor.stacked; s++)
+                        {
+                                int r = (int)compositor.stack[s];
+                                struct compositor_xwm_window *w = xwm_row_lookup(x, r, 0);
+                                if (w && (compositor_space_row_active(r) != 0) == active_pass)
+                                        compositor_xwm_configure(x, w->id, &sc);
+                        }
         }
         compositor_xwm_flush(x);
 }
