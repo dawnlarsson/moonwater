@@ -412,6 +412,9 @@ _Static_assert(ROVER_RULE_WHEN == 1 && ROVER_RULE_ONCE == 2 && ROVER_RULE_OFF ==
                    ROVER_JOIN_LINE == 2 && ROVER_EQ == 1 && ROVER_GE == 6,
                "rover walker: the codes");
 
+#define ROVER_EVAL_ASM_IMPLEMENTATION
+#include "rover_eval.asm.c"
+
 struct rover_refusal
 {
         const char address_to why;
@@ -690,68 +693,12 @@ static fn rover_value_of(const struct rover_table address_to table, struct rover
 
 /*
         A pattern over bytes: * any run, ? one byte, every other byte itself.
-        One star is remembered and returned to, so the walk is at most the
-        product of the two lengths, which a word bounds at 62 by 255.
+        Backed by rover_eval_glob in rover_eval.asm.c (single-pass head/tail +
+        bounded O(N*M) single-star backtracking, leaf pure ASM).
 */
-static bool rover_glob_loop(const p8 address_to text, p32 length, const p8 address_to pattern, p32 size)
+static inline bool rover_glob(const p8 address_to text, p32 length, const p8 address_to pattern, p32 size)
 {
-        p32 at = 0, in = 0, star = 0, mark = 0;
-        bool starred = false;
-
-        while (at < length)
-        {
-                if (in < size && pattern[in] == '*')
-                {
-                        starred = true;
-                        star = in++;
-                        mark = at;
-                }
-                else if (in < size && (pattern[in] == '?' || pattern[in] == text[at]))
-                        at++, in++;
-                else if (starred)
-                {
-                        in = star + 1;
-                        at = ++mark;
-                }
-                else
-                        return false;
-        }
-        while (in < size && pattern[in] == '*')
-                in++;
-        return in == size;
-}
-
-/*
-        The pattern's literal head and tail are compared whole, by the
-        library's memory_compare, and only what lies between its first and
-        last star is walked: steam_app_* is one compare of ten bytes.
-*/
-static bool rover_glob(const p8 address_to text, p32 length, const p8 address_to pattern, p32 size)
-{
-        p32 head = 0, tail = 0, last;
-
-        while (head < size && pattern[head] != '*' && pattern[head] != '?')
-                head++;
-        if (head == size)
-                return length == size && !memory_compare(text, pattern, size);
-        if (head > length || (head && memory_compare(text, pattern, head)))
-                return false;
-        last = size;
-        while (last > head && pattern[last - 1] != '*' && pattern[last - 1] != '?')
-                last--, tail++;
-        if (last > head && pattern[last - 1] == '*')
-        {
-                if (head + tail > length || (tail && memory_compare(text + length - tail, pattern + last, tail)))
-                        return false;
-                //      Between the head and the tail, a pattern that is only stars holds anything.
-                p32 star = head;
-                while (star < last && pattern[star] == '*')
-                        star++;
-                if (star == last)
-                        return true;
-                return rover_glob_loop(text + head, length - head - tail, pattern + head, last - head);
-        }
-        return rover_glob_loop(text + head, length - head, pattern + head, size - head);
+        return rover_eval_glob(text, length, pattern, size) != 0;
 }
 
 //      The rare numbers, out of the comparison's way: a call, the clock, the weekday.
@@ -835,21 +782,16 @@ static inline INLINE b64 rover_side(const struct rover_table address_to table, s
         return operand.index < event->count ? event->field[operand.index].number : 0;
 }
 
-//      Which of < == > a comparison holds for: bit 0 below, bit 1 equal, bit 2 above.
-static const p8 rover_holds_for[ROVER_OPS] = {
-    [ROVER_EQ] = 2, [ROVER_NE] = 5, [ROVER_LT] = 1, [ROVER_LE] = 3, [ROVER_GT] = 4, [ROVER_GE] = 6,
-};
-
 static inline INLINE bool rover_compare(const struct rover_table address_to table, const struct rover_comparison address_to comparison,
                           const struct rover_event address_to event, const p8 address_to const address_to pages)
 {
-        b64 a, b, c;
+        b64 a, b, c = 0;
 
         if (comparison->form == ROVER_FORM_NUMBER)
         {
                 a = rover_side(table, comparison->a, event, pages);
                 b = rover_side(table, comparison->b, event, pages);
-                return (rover_holds_for[comparison->op] >> ((a > b) - (a < b) + 1)) & 1;
+                return rover_eval_compare_num(a, b, 0, comparison->op) != 0;
         }
         if (rover_kind_is_word(comparison->type))
         {
@@ -876,22 +818,9 @@ static inline INLINE bool rover_compare(const struct rover_table address_to tabl
         if (comparison->op == ROVER_TRUE)
                 return a != 0;
         b = rover_number_at(table, comparison->b, event, pages);
-        switch (comparison->op)
-        {
-        case ROVER_EQ: return a == b;
-        case ROVER_NE: return a != b;
-        case ROVER_LT: return a < b;
-        case ROVER_LE: return a <= b;
-        case ROVER_GT: return a > b;
-        case ROVER_GE: return a >= b;
-        case ROVER_BETWEEN:
+        if (comparison->op == ROVER_BETWEEN)
                 c = rover_number_at(table, comparison->c, event, pages);
-                //      An upper end below the lower one wraps: 22:00 to 06:00 is the night.
-                if (b <= c)
-                        return a >= b && a <= c;
-                return a >= b || a <= c;
-        }
-        return false;
+        return rover_eval_compare_num(a, b, c, comparison->op) != 0;
 }
 
 /*
@@ -907,6 +836,10 @@ static inline INLINE bool rover_compare(const struct rover_table address_to tabl
 static inline INLINE b32 rover_holds(const struct rover_table address_to table, const struct rover_rule address_to rule,
                        const struct rover_event address_to event, const p8 address_to const address_to pages)
 {
+        if (rule->flags & ROVER_RULE_NUMBERS)
+                return rover_eval_holds_numbers((const struct rover_eval_table address_to)table,
+                                                (const struct rover_eval_rule address_to)rule,
+                                                (const struct rover_eval_event address_to)event, pages);
         const struct rover_comparison address_to comparison = table->comparison + rule->comparison;
         bool line = false, term = true;
 
@@ -931,18 +864,10 @@ static inline INLINE b32 rover_holds(const struct rover_table address_to table, 
 
 //      Whether a rule may fire now, by its once and its limit; a firing it
 //      refuses is counted.
-static bool rover_may(const struct rover_rule address_to rule, struct rover_run address_to run, p64 when)
+static inline bool rover_may(const struct rover_rule address_to rule, struct rover_run address_to run, p64 when)
 {
-        if ((rule->flags & ROVER_RULE_ONCE) && run->done)
-                return false;
-        //      Signed: an event stamped before the last firing (two devices, a driver's stamp) is inside the window,
-        //      not a gap of centuries past it. The walkers compare the same way.
-        if (rule->limit_ms && run->fires && (b64)(when - run->last) < (b64)rule->limit_ms * 1000000)
-        {
-                run->dropped++;
-                return false;
-        }
-        return true;
+        return rover_eval_may((const struct rover_eval_rule address_to)rule,
+                              (struct rover_eval_run address_to)run, when) != 0;
 }
 
 static fn rover_fired(const struct rover_rule address_to rule, struct rover_run address_to run, p64 when)
@@ -954,40 +879,14 @@ static fn rover_fired(const struct rover_rule address_to rule, struct rover_run 
 }
 
 /*
-        The walker: an event's run of rules, while each rule it meets is one
-        whose comparisons all have the number form, in assembly, as a leaf
-        (no call, so a kernel build takes the same body). It answers the hits
-        it made in the low 32 bits; with bit 63 set, it stopped at the slot
-        in bits 32 to 47, a rule it does not take, and rover_fire_rules asks
-        that rule and the rest in C. place_room is the place in its low byte
-        and the room in its high 32 bits. pages are never null here.
-
-        A comparison is its two sides loaded (a state one movslq from its
-        page, a constant one load from the pool, a field one load from the
-        event) and which of below, equal and above its operator holds for
-        read out of one immediate: 0x06431520 holds the mask of operator n in
-        bits 4n to 4n+2, so the answer is that word shifted by four times the
-        operator plus the side the compare fell on, its low bit. There is no
-        table to load and no jump table to take; the C's lines and terms are
-        bit 1 and bit 0 of one register.
+        The walker: implemented in rover_eval.asm.c for arm64, x86-64, and riscv64.
+        Answers the hits made in the low 32 bits; with bit 63 set, it stopped at
+        the slot in bits 32 to 47, a rule it does not take, and rover_fire_rules
+        asks that rule and the rest in C.
 */
-positive rover_walk_numbers(const struct rover_table address_to table, struct rover_run address_to runs,
-                            const p8 address_to const address_to pages, const struct rover_event address_to event,
-                            positive place_room, struct rover_hit address_to hits);
+#define ROVER_WALK_STOPPED ROVER_EVAL_WALK_STOPPED
+#define ROVER_WALKER 1
 
-#define ROVER_WALK_STOPPED (1ull << 63)
-
-/*
-        The walker takes runs of fewer than ROVER_WALK_MOST rules, where it
-        was measured faster, paired against the C in one process, a trial
-        each in turn. On box (Zen 5), against gcc -O2 a run of one rule is 1
-        to 9 percent faster through it (the dispatch, one condition, two) and
-        four chord rules 7 percent; eight chord rules were 4 percent slower,
-        the C's key loop beating the walker's at that length. On arm64 (Lima),
-        against gcc a run of one rule is 15 to 21 percent faster, and four
-        chord rules 2 percent slower (6 percent faster against clang), so
-        arm64 stops at four.
-*/
 #if ARM64
 #define ROVER_WALK_MOST 4u
 #else
@@ -997,140 +896,6 @@ positive rover_walk_numbers(const struct rover_table address_to table, struct ro
 //      Whether the walker is asked at all: 1, but for BENCH_rover, which points it at a switch to time both sides.
 #ifndef ROVER_WALKER_ASKED
 #define ROVER_WALKER_ASKED 1
-#endif
-
-#if X64
-#define ROVER_WALK_SIDE(at, next)                                                                                 \
-    "movzbl " #at "(%r8), %ecx\n   movzwl " #at "+2(%r8), %edx\n   cmp $3, %ecx\n   jne 61f\n"                        \
-    "mov (%rsp), %rax\n   cmpb $0, " #at "+1(%r8)\n   cmovne 8(%rsp), %rax\n   movslq (%rax,%rdx), %rax\n   jmp " next "\n" \
-    "61: cmp $1, %ecx\n   jne 62f\n   mov 16(%rsp), %rax\n   mov (%rax,%rdx), %rax\n   jmp " next "\n"               \
-    "62: xor %eax, %eax\n   movzbl 2(%r15), %ecx\n   cmp %ecx, %edx\n   jae " next "\n"                             \
-    "lea (%rdx,%rdx,2), %rdx\n   mov 24(%r15,%rdx,8), %rax\n"
-
-__asm__(
-    ASM_FUNC(rover_walk_numbers)
-    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $56, %rsp\n"
-    //  The frame: 0 and 8 the pages, 16 the pool, 24 the key wanted, 32 place and room, 40 the table, 48 the runs.
-    "mov (%rdx), %rax\n   mov %rax, (%rsp)\n   mov 8(%rdx), %rax\n   mov %rax, 8(%rsp)\n"
-    "mov 80(%rdi), %rax\n   mov %rax, 16(%rsp)\n   mov %r8, 32(%rsp)\n   mov %rdi, 40(%rsp)\n   mov %rsi, 48(%rsp)\n"
-    "mov %rcx, %r15\n"
-    //  The event's run: r13 its order, r14 its keys, r12 how many; rbx the slot, rbp the hits made.
-    "movzwl (%r15), %eax\n   mov 32(%rdi), %rdx\n   movzwl (%rdx,%rax,4), %ecx\n   movzwl 2(%rdx,%rax,4), %r12d\n"
-    "and $0x7fff, %r12d\n"
-    "mov 16(%rdi), %r13\n   lea (%r13,%rcx,2), %r13\n   mov 24(%rdi), %r14\n   lea (%r14,%rcx,4), %r14\n"
-    "mov $-1, %eax\n   cmpb $0, 2(%r15)\n   je 1f\n   mov 24(%r15), %rdx\n   test %rdx, %rdx\n   js 1f\n"
-    "cmp %rax, %rdx\n   jae 1f\n   mov %edx, %eax\n"
-    "1:  mov %eax, 24(%rsp)\n   xor %ebx, %ebx\n   xor %ebp, %ebp\n"
-    //  The keys: a slot whose key is the one wanted or any.
-    "10: cmp %r12, %rbx\n   jae 90f\n   mov (%r14,%rbx,4), %eax\n   cmp 24(%rsp), %eax\n   je 20f\n"
-    "cmp $-1, %eax\n   je 20f\n   inc %rbx\n   jmp 10b\n"
-    //  The rule: rdi; placed here, not off, and every comparison a number's, or handed back.
-    "20: movzwl (%r13,%rbx,2), %eax\n   lea (%rax,%rax,4), %rdi\n   mov 40(%rsp), %rdx\n   shl $3, %rdi\n   add 8(%rdx), %rdi\n"
-    "movzbl 2(%rdi), %ecx\n   cmp 32(%rsp), %cl\n   jne 80f\n"
-    "movzbl 3(%rdi), %ecx\n   test $4, %cl\n   jnz 80f\n   test $16, %cl\n   jz 95f\n"
-    //  Its comparisons, r8 to r11; r10 bit 0 the term, bit 1 the line.
-    "movzwl 4(%rdi), %r8d\n   shl $4, %r8\n   add 40(%rdx), %r8\n   movzwl 6(%rdi), %r11d\n   shl $4, %r11\n   add %r8, %r11\n"
-    "mov $1, %r10d\n"
-    "30: cmp %r11, %r8\n   jae 50f\n   cmp $1, %r10d\n   jne 38f\n"
-    ROVER_WALK_SIDE(4, "63f")
-    "63: mov %rax, %rsi\n"
-    ROVER_WALK_SIDE(8, "64f")
-    "64: xor %ecx, %ecx\n   xor %edx, %edx\n   cmp %rax, %rsi\n   setg %cl\n   setl %dl\n   sub %edx, %ecx\n"
-    "movzbl (%r8), %edx\n   lea 1(%rcx,%rdx,4), %ecx\n   mov $0x06431520, %eax\n   shr %cl, %eax\n   and $1, %eax\n"
-    "and $2, %r10d\n   or %eax, %r10d\n"
-    //  The join: or and the line's end fold the term into the line; the end asks the line.
-    "38: movzbl 2(%r8), %ecx\n   test $3, %cl\n   jz 39f\n   lea (%r10,%r10), %eax\n   or %eax, %r10d\n   and $2, %r10d\n"
-    "or $1, %r10d\n   test $2, %cl\n   jz 39f\n   test $2, %r10d\n   jz 45f\n   mov $1, %r10d\n"
-    "39: add $16, %r8\n   jmp 30b\n"
-    //  A line that did not hold: inside an on line's filters it is not the rule's event at all.
-    "45: testb $1, 3(%rdi)\n   jnz 47f\n   mov 40(%rsp), %rdx\n   movzwl 4(%rdi), %eax\n   shl $4, %rax\n   add 40(%rdx), %rax\n"
-    "sub %rax, %r8\n   shr $4, %r8\n   movzbl 8(%rdi), %eax\n   cmp %rax, %r8\n   jb 80f\n"
-    "47: movzbl 10(%rdi), %ecx\n   test %ecx, %ecx\n   jz 80f\n   movzwl 12(%rdi), %edx\n   movzbl 9(%rdi), %eax\n"
-    "add %eax, %edx\n   mov $1, %r8d\n   jmp 55f\n"
-    "50: movzbl 9(%rdi), %ecx\n   movzwl 12(%rdi), %edx\n   xor %r8d, %r8d\n"
-    //  ecx the actions, edx the first, r8 the else; the run (r10) says whether once and the limit let it.
-    "55: movzwl (%r13,%rbx,2), %eax\n   lea (%rax,%rax,2), %r10\n   shl $3, %r10\n   add 48(%rsp), %r10\n"
-    "testb $2, 3(%rdi)\n   jz 56f\n   cmpb $0, 17(%r10)\n   jne 80f\n"
-    "56: mov 16(%rdi), %esi\n   test %esi, %esi\n   jz 57f\n   cmpl $0, 8(%r10)\n   je 57f\n"
-    "imul $1000000, %rsi, %rsi\n   mov 8(%r15), %r11\n   sub (%r10), %r11\n   cmp %rsi, %r11\n   jge 57f\n"
-    "incl 12(%r10)\n   jmp 80f\n"
-    //  The hit, one store: the rule, its first action, the count and the else.
-    "57: shl $16, %rdx\n   or %rdx, %rax\n   shl $32, %rcx\n   or %rcx, %rax\n   shl $40, %r8\n   or %r8, %rax\n"
-    "mov %rax, (%r9,%rbp,8)\n   incl 8(%r10)\n   mov 8(%r15), %rax\n   mov %rax, (%r10)\n"
-    "testb $2, 3(%rdi)\n   jz 58f\n   movb $1, 17(%r10)\n"
-    "58: inc %rbp\n   mov 32(%rsp), %rax\n   shr $32, %rax\n   cmp %rax, %rbp\n   jae 90f\n"
-    "80: inc %rbx\n   jmp 10b\n"
-    "90: mov %rbp, %rax\n   jmp 99f\n"
-    "95: mov %rbx, %rax\n   shl $32, %rax\n   or %rbp, %rax\n   bts $63, %rax\n"
-    "99: add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
-    ASM_RET
-    ASM_END(rover_walk_numbers)
-);
-#define ROVER_WALKER 1
-#undef ROVER_WALK_SIDE
-#elif ARM64
-#define ROVER_WALK_SIDE(at, into, next)                                                                           \
-    "ldrb w0, [x20, #" #at "]\n   ldrh w2, [x20, #" #at "+2]\n   cmp w0, #3\n   b.ne 61f\n"                            \
-    "ldrb w0, [x20, #" #at "+1]\n   cmp w0, #0\n   csel x0, x6, x7, eq\n   ldrsw " into ", [x0, x2]\n   b " next "\n"  \
-    "61: cmp w0, #1\n   b.ne 62f\n   ldr " into ", [x8, x2]\n   b " next "\n"                                           \
-    "62: mov " into ", #0\n   ldrb w0, [x3, #2]\n   cmp w2, w0\n   b.hs " next "\n   mov x0, #24\n   mul x2, x2, x0\n"   \
-    "add x2, x2, x3\n   ldr " into ", [x2, #24]\n"
-
-/*
-        The arm64 walker: the x86_64 block's algorithm, with every value it
-        keeps in a register of its own (x6 and x7 the pages, x8 the pool, x9
-        the rules, x10 the comparisons, x11 the order, x12 the keys, x13 the
-        count, x14 the slot, x15 the hits made, w16 the key wanted, x17 the
-        room), so it has no frame but the six registers it saves.
-*/
-__asm__(
-    ASM_FUNC(rover_walk_numbers)
-    "stp x19, x20, [sp, #-48]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n"
-    "ldp x6, x7, [x2]\n   ldr x8, [x0, #80]\n   ldr x9, [x0, #8]\n   ldr x10, [x0, #40]\n"
-    "ldrh w2, [x3]\n   ldr x24, [x0, #32]\n   add x24, x24, x2, lsl #2\n   ldrh w2, [x24]\n   ldrh w13, [x24, #2]\n"
-    "and w13, w13, #0x7fff\n   ldr x11, [x0, #16]\n   add x11, x11, x2, lsl #1\n   ldr x12, [x0, #24]\n   add x12, x12, x2, lsl #2\n"
-    "mov w16, #-1\n   ldrb w2, [x3, #2]\n   cbz w2, 1f\n   ldr x2, [x3, #24]\n   tbnz x2, #63, 1f\n"
-    "mov x24, #0xffffffff\n   cmp x2, x24\n   b.hs 1f\n   mov w16, w2\n"
-    "1:  lsr x17, x4, #32\n   and w4, w4, #0xff\n   mov x14, #0\n   mov x15, #0\n"
-    "10: cmp x14, x13\n   b.hs 90f\n   ldr w2, [x12, x14, lsl #2]\n   cmp w2, w16\n   b.eq 20f\n   cmn w2, #1\n   b.eq 20f\n"
-    "add x14, x14, #1\n   b 10b\n"
-    "20: ldrh w0, [x11, x14, lsl #1]\n   mov x24, #40\n   madd x19, x0, x24, x9\n"
-    "ldrb w2, [x19, #2]\n   cmp w2, w4\n   b.ne 80f\n   ldrb w2, [x19, #3]\n   tbnz w2, #2, 80f\n   tbz w2, #4, 95f\n"
-    "ldrh w20, [x19, #4]\n   add x20, x10, x20, lsl #4\n   ldrh w21, [x19, #6]\n   add x21, x20, x21, lsl #4\n   mov w22, #1\n"
-    "30: cmp x20, x21\n   b.hs 50f\n   cmp w22, #1\n   b.ne 38f\n"
-    ROVER_WALK_SIDE(4, "x23", "63f")
-    "63:\n"
-    ROVER_WALK_SIDE(8, "x24", "64f")
-    "64: cmp x23, x24\n   cset w0, gt\n   csinv w0, w0, wzr, ge\n   add w0, w0, #1\n   ldrb w2, [x20]\n   add w0, w0, w2, lsl #2\n"
-    "mov w2, #0x1520\n   movk w2, #0x0643, lsl #16\n   lsr w2, w2, w0\n   and w2, w2, #1\n   and w22, w22, #2\n   orr w22, w22, w2\n"
-    "38: ldrb w0, [x20, #2]\n   tst w0, #3\n   b.eq 39f\n   orr w22, w22, w22, lsl #1\n   and w22, w22, #2\n   orr w22, w22, #1\n"
-    "tbz w0, #1, 39f\n   tbz w22, #1, 45f\n   mov w22, #1\n"
-    "39: add x20, x20, #16\n   b 30b\n"
-    "45: ldrb w0, [x19, #3]\n   tbnz w0, #0, 47f\n   ldrh w0, [x19, #4]\n   add x0, x10, x0, lsl #4\n   sub x0, x20, x0\n"
-    "lsr x0, x0, #4\n   ldrb w2, [x19, #8]\n   cmp x0, x2\n   b.lo 80f\n"
-    "47: ldrb w21, [x19, #10]\n   cbz w21, 80f\n   ldrh w22, [x19, #12]\n   ldrb w0, [x19, #9]\n   add w22, w22, w0\n"
-    "mov w23, #1\n   b 55f\n"
-    "50: ldrb w21, [x19, #9]\n   ldrh w22, [x19, #12]\n   mov w23, #0\n"
-    "55: ldrh w0, [x11, x14, lsl #1]\n   mov x24, #24\n   madd x24, x0, x24, x1\n"
-    "ldrb w2, [x19, #3]\n   tbz w2, #1, 56f\n   ldrb w2, [x24, #17]\n   cbnz w2, 80f\n"
-    "56: ldr w2, [x19, #16]\n   cbz w2, 57f\n   ldr w0, [x24, #8]\n   cbz w0, 57f\n   mov x0, #16960\n   movk x0, #15, lsl #16\n"
-    "mul x2, x2, x0\n   ldr x0, [x3, #8]\n   ldr x20, [x24]\n   sub x0, x0, x20\n   cmp x0, x2\n   b.ge 57f\n"
-    "ldr w0, [x24, #12]\n   add w0, w0, #1\n   str w0, [x24, #12]\n   b 80f\n"
-    "57: ldrh w0, [x11, x14, lsl #1]\n   orr x0, x0, x22, lsl #16\n   orr x0, x0, x21, lsl #32\n   orr x0, x0, x23, lsl #40\n"
-    "str x0, [x5, x15, lsl #3]\n   ldr w0, [x24, #8]\n   add w0, w0, #1\n   str w0, [x24, #8]\n   ldr x0, [x3, #8]\n   str x0, [x24]\n"
-    "ldrb w0, [x19, #3]\n   tbz w0, #1, 58f\n   mov w0, #1\n   strb w0, [x24, #17]\n"
-    "58: add x15, x15, #1\n   cmp x15, x17\n   b.hs 90f\n"
-    "80: add x14, x14, #1\n   b 10b\n"
-    "90: mov x0, x15\n   b 99f\n"
-    "95: lsl x0, x14, #32\n   orr x0, x0, x15\n   orr x0, x0, #0x8000000000000000\n"
-    "99: ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #48\n"
-    ASM_RET
-    ASM_END(rover_walk_numbers)
-);
-#define ROVER_WALKER 1
-#undef ROVER_WALK_SIDE
-#else
-#define ROVER_WALKER 0
 #endif
 
 //      The page the evaluator reads where a caller has none: every state on it is 0, the empty word.
@@ -1163,9 +928,7 @@ static inline INLINE positive rover_key_next(const p32 address_to keys, positive
         if (count - at >= ROVER_KEY_SCAN)
                 return at + memory_first_of_either_u32(keys + at, count - at, want, ROVER_KEY_ANY);
 #endif
-        while (at < count && keys[at] != want && keys[at] != ROVER_KEY_ANY)
-                at++;
-        return at;
+        return rover_eval_key_next(keys, at, count, want);
 }
 
 /*
@@ -1238,8 +1001,11 @@ static inline INLINE positive rover_fire(const struct rover_table address_to tab
         if ((rules & ROVER_SPAN_NUMBERS) && (rules & ROVER_SPAN_COUNT) < ROVER_WALK_MOST && room && ROVER_WALKER_ASKED)
         {
                 const p8 address_to seen[ROVER_PAGES] = {pages[0] ? pages[0] : rover_zero_page, pages[1] ? pages[1] : rover_zero_page, pages[2] ? pages[2] : rover_zero_page};
-                positive walked = rover_walk_numbers(table, runs, seen, event,
-                                                     place | (room > 0xffffffffu ? 0xffffffffu : room) << 32, hits);
+                positive walked = rover_walk_numbers((const struct rover_eval_table address_to)table,
+                                                     (struct rover_eval_run address_to)runs, seen,
+                                                     (const struct rover_eval_event address_to)event,
+                                                     place | (room > 0xffffffffu ? 0xffffffffu : room) << 32,
+                                                     (struct rover_eval_hit address_to)hits);
 
                 if (!(walked & ROVER_WALK_STOPPED))
                         return (p32)walked;
@@ -1262,13 +1028,27 @@ static positive rover_edges(const struct rover_table address_to table, struct ro
                             const struct rover_event address_to event, p8 place, struct rover_hit address_to hits,
                             positive room)
 {
-        positive made = 0;
+        positive made = 0, at;
         struct rover_span span = table->index[0];
+        positive count = span.count & ROVER_SPAN_COUNT;
         const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page, given[1] ? given[1] : rover_zero_page, given[2] ? given[2] : rover_zero_page};
 
+        if (!count)
+                return 0;
+        {
+                positive walked = rover_eval_edges_numbers((const struct rover_eval_table address_to)table,
+                                                           (struct rover_eval_run address_to)runs, pages, changed,
+                                                           (const struct rover_eval_event address_to)event,
+                                                           place | (room > 0xffffffffu ? 0xffffffffu : room) << 32,
+                                                           (struct rover_eval_hit address_to)hits);
+                if (!(walked & ROVER_WALK_STOPPED))
+                        return (p32)walked;
+                made = (p32)walked;
+                at = (positive)span.first + ((walked >> 32) & 0xffff);
+        }
         //      Room caps the hits and never the state: a rule past it keeps the edge it had, so it is reported at the next
         //      ask rather than marked as told and lost (the 17th of 17 when rules was never fired again).
-        for (positive at = span.first; at < (positive)span.first + (span.count & ROVER_SPAN_COUNT); at++)
+        for (; at < (positive)span.first + count; at++)
         {
                 p16 number = table->order[at];
                 const struct rover_rule address_to rule = table->rule + number;
