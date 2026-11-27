@@ -7762,88 +7762,27 @@ static struct ui_ramp address_to ui_ramp_for(unsigned int colour, unsigned int a
         return ramp;
 }
 
+#ifndef CANVAS_UI_TEXT_BLIT_ASM_NO_IMPL
+#define CANVAS_UI_TEXT_BLIT_ASM_IMPLEMENTATION
+#endif
+#include "ui_text_blit.asm.c"
+
+_Static_assert(sizeof(struct ui_ramp) == sizeof(struct ui_text_ramp) &&
+               offset_of(struct ui_ramp, colour) == offset_of(struct ui_text_ramp, colour) &&
+               offset_of(struct ui_ramp, alpha)  == offset_of(struct ui_text_ramp, alpha) &&
+               offset_of(struct ui_ramp, ground) == offset_of(struct ui_text_ramp, ground) &&
+               offset_of(struct ui_ramp, set)    == offset_of(struct ui_text_ramp, set) &&
+               offset_of(struct ui_ramp, tone)   == offset_of(struct ui_text_ramp, tone) &&
+               offset_of(struct ui_ramp, over)   == offset_of(struct ui_text_ramp, over) &&
+               offset_of(struct ui_ramp, known)  == offset_of(struct ui_text_ramp, known) &&
+               offset_of(struct ui_ramp, made)   == offset_of(struct ui_text_ramp, made),
+               "ui_ramp ABI parity with ui_text_blit.asm.c");
+
 // One premultiplied pixel over another, the blend every piece of the kit lays on the picture.
-#if (X64 || ARM64) && !defined(UI_OVER_C)
-#define UI_OVER_ASM 1
-#endif
-
-#ifdef UI_OVER_ASM
-extern CONST unsigned int ui_over_body(unsigned int pixel, unsigned int under) __asm__("ui_over_body")
-        __attribute__((visibility("hidden")));
-
 static inline INLINE CONST unsigned int ui_over(unsigned int pixel, unsigned int under)
 {
-        return ui_over_body(pixel, under);
+        return ui_text_over(pixel, under);
 }
-
-#if X64
-asm(".pushsection .text\n"
-    ".balign 16\n"
-    ".local ui_over_body\n"
-    ".type ui_over_body, " ASM_TYPE "\n"
-    "ui_over_body:\n" ASM_ENDBR
-    // edi pixel, esi under; the result in eax.
-    "mov %edi, %ecx\n   shr $24, %ecx\n   jz 2f\n"
-    "mov $255, %eax\n   sub %ecx, %eax\n   movd %eax, %xmm3\n   pshuflw $0, %xmm3, %xmm3\n"
-    "movd %esi, %xmm0\n   movd %edi, %xmm1\n   pxor %xmm2, %xmm2\n"
-    "punpcklbw %xmm2, %xmm0\n   punpcklbw %xmm2, %xmm1\n"
-    "pmullw %xmm3, %xmm0\n   paddw ui_over_128(%rip), %xmm0\n   pmulhuw ui_over_257(%rip), %xmm0\n"
-    "paddw %xmm1, %xmm0\n   packuswb %xmm0, %xmm0\n   movd %xmm0, %eax\n"
-    ASM_RET
-    "2:  mov %esi, %eax\n   " ASM_RET
-    ".balign 16\n"
-    "ui_over_128: .short 128, 128, 128, 128, 128, 128, 128, 128\n"
-    "ui_over_257: .short 257, 257, 257, 257, 257, 257, 257, 257\n"
-    ".size ui_over_body, .-ui_over_body\n"
-    ".popsection\n");
-#elif ARM64
-asm(".pushsection .text\n"
-    ".balign 16\n"
-    ".local ui_over_body\n"
-    ".type ui_over_body, " ASM_TYPE "\n"
-    "ui_over_body:\n" ASM_ENDBR
-    // w0 pixel, w1 under; the result in w0.
-    "lsr w2, w0, #24\n   cbz w2, 2f\n"
-    "mov w3, #255\n   sub w3, w3, w2\n"
-    "fmov s0, w1\n   uxtl v0.8h, v0.8b\n   dup v1.8h, w3\n   mul v0.8h, v0.8h, v1.8h\n"
-    "movi v2.8h, #128\n   add v0.8h, v0.8h, v2.8h\n"
-    "movz w4, #257\n   dup v3.4h, w4\n   umull v4.4s, v0.4h, v3.4h\n   shrn v4.4h, v4.4s, #16\n"
-    "fmov s5, w0\n   uxtl v5.8h, v5.8b\n   add v4.4h, v4.4h, v5.4h\n   sqxtun v4.8b, v4.8h\n"
-    "fmov w0, s4\n   " ASM_RET
-    "2:  mov w0, w1\n   " ASM_RET
-    ".size ui_over_body, .-ui_over_body\n"
-    ".popsection\n");
-#endif
-
-#else
-// One premultiplied pixel over another.
-static inline INLINE CONST unsigned int ui_over(unsigned int pixel, unsigned int under)
-{
-        unsigned int rest = 255 - (pixel >> 24), out = 0;
-        if (!(pixel >> 24))
-                return under;
-        if (!rest)
-                return pixel;
-        // Over nothing (a picture cleared to the glass), the pixel is the pixel: the blend adds nothing.
-        if (!under)
-                return pixel;
-        // The four channels in two words of 16-bit lanes (red and blue, green and alpha):
-        {
-                unsigned int v_rb = (under & 0x00ff00ffu) * rest + 0x007f007fu;
-                unsigned int v_ag = ((under >> 8) & 0x00ff00ffu) * rest + 0x007f007fu;
-                unsigned int sum_rb = (pixel & 0x00ff00ffu) + ((v_rb + 0x00010001u + ((v_rb >> 8) & 0x00ff00ffu)) >> 8 & 0x00ff00ffu);
-                unsigned int sum_ag = ((pixel >> 8) & 0x00ff00ffu) + ((v_ag + 0x00010001u + ((v_ag >> 8) & 0x00ff00ffu)) >> 8 & 0x00ff00ffu);
-                if (!((sum_rb | sum_ag) & 0x01000100u))
-                        return (sum_rb & 0x00ff00ffu) | (sum_ag & 0x00ff00ffu) << 8;
-        }
-        for (unsigned int shift = 0; shift < 32; shift += 8)
-        {
-                unsigned int channel = (pixel >> shift & 255) + ui_div255((under >> shift & 255) * rest + 127);
-                out |= (channel > 255 ? 255 : channel) << shift;
-        }
-        return out;
-}
-#endif
 
 // A rectangle (pixels, already cut to what may be drawn) recorded for the GPU:
 static void ui_scene_record(struct ui_scene address_to scene, int x0, int y0, int x1, int y1, unsigned int tone, b32 write)
@@ -8242,122 +8181,27 @@ struct ui_walk
         unsigned long stroke;              // the stroke, 0 for none
         struct ui_ramp address_to ramp;
 };
-_Static_assert(offset_of(struct ui_walk, scratch) == 0 && offset_of(struct ui_walk, wide) == 8 &&
-               offset_of(struct ui_walk, rows) == 16 && offset_of(struct ui_walk, top) == 24 &&
-               offset_of(struct ui_walk, first) == 32 && offset_of(struct ui_walk, last) == 40 &&
-               offset_of(struct ui_walk, pixels) == 48 && offset_of(struct ui_walk, pitch) == 56 &&
-               offset_of(struct ui_walk, pen_x) == 64 && offset_of(struct ui_walk, ui_top) == 72 &&
-               offset_of(struct ui_walk, ui_bottom) == 80 && offset_of(struct ui_walk, ui_height) == 88 &&
-               offset_of(struct ui_walk, band_top) == 96 && offset_of(struct ui_walk, band_bottom) == 104 &&
-               offset_of(struct ui_walk, paper) == 112 && offset_of(struct ui_walk, ground) == 120 &&
-               offset_of(struct ui_walk, flip) == 128 && offset_of(struct ui_walk, stroke) == 136 &&
-               offset_of(struct ui_walk, ramp) == 144,
-               "ui_run_walk reads struct ui_walk at fixed offsets");
-_Static_assert(offset_of(struct ui_ramp, tone) == 16 && offset_of(struct ui_ramp, over) == 1040 &&
-               offset_of(struct ui_ramp, known) == 2064 && offset_of(struct ui_ramp, made) == 2096,
-               "ui_run_walk reads struct ui_ramp at fixed offsets");
-
-// The walk's out-of-line parts: a cover's tone, and its over the ground, made the first time it is met, and the blend.
-__attribute__((used, externally_visible, noinline)) void ui_run_make_tone(struct ui_ramp address_to ramp, unsigned int cover)
-{
-        ramp->tone[cover] = ui_tone(ramp->colour, cover * ramp->alpha / 255);
-        ramp->known[cover >> 6] |= 1ull << (cover & 63);
-}
-
-__attribute__((used, externally_visible, noinline)) void ui_run_make_over(struct ui_ramp address_to ramp, unsigned int cover)
-{
-        ramp->over[cover] = ui_over(ui_tone(ramp->colour, cover * ramp->alpha / 255), ramp->ground);
-        ramp->made[cover >> 6] |= 1ull << (cover & 63);
-}
-
-__attribute__((used, externally_visible, noinline)) unsigned int ui_run_blend(unsigned int pixel, unsigned int under)
-{
-        return ui_over(pixel, under);
-}
-
-void ui_run_walk(struct ui_walk address_to walk);
-
-#if X64
-// ui_run_walk on x86-64, in the registers:
-__asm__(
-    ASM_FUNC(ui_run_walk)
-    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $8, %rsp\n"
-    "mov %rdi, %rbx\n"
-    "mov 32(%rbx), %r13\n   cmp 40(%rbx), %r13\n   jge .Lrw_done\n"
-    "xor %r12d, %r12d\n"
-    ".Lrw_row:\n"
-    "cmp 16(%rbx), %r12\n   jge .Lrw_done\n"
-    "mov 24(%rbx), %rax\n   add %r12, %rax\n"
-    "test %rax, %rax\n   js .Lrw_next_row\n"
-    "cmp 72(%rbx), %rax\n   jl .Lrw_next_row\n"
-    "cmp 80(%rbx), %rax\n   jge .Lrw_next_row\n"
-    "cmp 88(%rbx), %rax\n   jge .Lrw_next_row\n"
-    "mov 104(%rbx), %rcx\n   cmp 96(%rbx), %rcx\n   jle .Lrw_band\n"
-    "cmp 96(%rbx), %rax\n   jl .Lrw_next_row\n"
-    "cmp 104(%rbx), %rax\n   jge .Lrw_next_row\n"
-    ".Lrw_band:\n"
-    "mov 56(%rbx), %rcx\n   imul %rax, %rcx\n   add 64(%rbx), %rcx\n   mov 48(%rbx), %r14\n   lea (%r14,%rcx,4), %r14\n"
-    "mov 8(%rbx), %rcx\n   mov %r12, %rdx\n   imul %rcx, %rdx\n   mov (%rbx), %r15\n   lea (%r15,%rdx,4), %r15\n"
-    "mov 32(%rbx), %r13\n"
-    ".Lrw_col:\n"
-    "cmp 40(%rbx), %r13\n   jge .Lrw_next_row\n"
-    "cmpq $0, 136(%rbx)\n   jne .Lrw_value\n"
-    "mov (%r15,%r13,4), %eax\n   mov 112(%rbx), %rdx\n   cmp %edx, %eax\n   jne .Lrw_value\n"
-    "lea (%r15,%r13,4), %rdi\n   mov 40(%rbx), %rsi\n   sub %r13, %rsi\n"
-    "call memory_first_differs_u32\n"
-    "add %rax, %r13\n   cmp 40(%rbx), %r13\n   jge .Lrw_next_row\n"
-    ".Lrw_value:\n"
-    "mov (%r15,%r13,4), %eax\n   shr $8, %eax\n   and $255, %eax\n   xor 128(%rbx), %eax\n"
-    "cmpq $0, 136(%rbx)\n   je .Lrw_cover\n"
-    "cmp $255, %eax\n   jae .Lrw_cover\n"
-    "xor %r9d, %r9d\n"
-    "test %r13, %r13\n   jz .Lrw_s1\n   mov -4(%r15,%r13,4), %edx\n"
-    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
-    ".Lrw_s1:\n"
-    "lea 1(%r13), %rdx\n   cmp 8(%rbx), %rdx\n   jge .Lrw_s2\n   mov 4(%r15,%r13,4), %edx\n"
-    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
-    ".Lrw_s2:\n"
-    "test %r12, %r12\n   jz .Lrw_s3\n"
-    "mov 8(%rbx), %rdx\n   shl $2, %rdx\n   mov %r15, %rsi\n   sub %rdx, %rsi\n   mov (%rsi,%r13,4), %edx\n"
-    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
-    ".Lrw_s3:\n"
-    "lea 1(%r12), %rdx\n   cmp 16(%rbx), %rdx\n   jge .Lrw_s4\n"
-    "mov 8(%rbx), %rdx\n   shl $2, %rdx\n   mov %r15, %rsi\n   add %rdx, %rsi\n   mov (%rsi,%r13,4), %edx\n"
-    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
-    ".Lrw_s4:\n"
-    "mov %r9d, %edx\n   imull 136(%rbx), %edx\n   shr $7, %edx\n   add %edx, %eax\n"
-    "cmp $255, %eax\n   jbe .Lrw_cover\n   mov $255, %eax\n"
-    ".Lrw_cover:\n"
-    "test %eax, %eax\n   jz .Lrw_next\n"
-    "mov %eax, %ebp\n"
-    "mov 144(%rbx), %rsi\n"
-    "mov %ebp, %ecx\n   and $63, %ecx\n"
-    "mov %ebp, %edx\n   shr $6, %edx\n"
-    "mov (%r14,%r13,4), %r8d\n"
-    "cmp 120(%rbx), %r8d\n   jne .Lrw_known\n"
-    "mov 2096(%rsi,%rdx,8), %rax\n   bt %rcx, %rax\n   jnc .Lrw_make_over\n"
-    ".Lrw_have_over:\n"
-    "mov 1040(%rsi,%rbp,4), %eax\n   mov %eax, (%r14,%r13,4)\n   jmp .Lrw_next\n"
-    ".Lrw_make_over:\n"
-    "mov %rsi, %rdi\n   mov %ebp, %esi\n   call ui_run_make_over\n"
-    "mov 144(%rbx), %rsi\n   jmp .Lrw_have_over\n"
-    ".Lrw_known:\n"
-    "mov 2064(%rsi,%rdx,8), %rax\n   bt %rcx, %rax\n   jc .Lrw_blend\n"
-    "mov %rsi, %rdi\n   mov %ebp, %esi\n   call ui_run_make_tone\n"
-    "mov 144(%rbx), %rsi\n"
-    ".Lrw_blend:\n"
-    "mov 16(%rsi,%rbp,4), %edi\n   mov (%r14,%r13,4), %esi\n   call ui_run_blend\n"
-    "mov %eax, (%r14,%r13,4)\n"
-    ".Lrw_next:\n"
-    "inc %r13\n   jmp .Lrw_col\n"
-    ".Lrw_next_row:\n"
-    "inc %r12\n   jmp .Lrw_row\n"
-    ".Lrw_done:\n"
-    "add $8, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
-    ASM_RET
-    ASM_END(ui_run_walk)
-);
-#endif
+_Static_assert(sizeof(struct ui_walk) == sizeof(struct ui_text_walk) &&
+               offset_of(struct ui_walk, scratch)     == offset_of(struct ui_text_walk, scratch) &&
+               offset_of(struct ui_walk, wide)        == offset_of(struct ui_text_walk, wide) &&
+               offset_of(struct ui_walk, rows)        == offset_of(struct ui_text_walk, rows) &&
+               offset_of(struct ui_walk, top)         == offset_of(struct ui_text_walk, top) &&
+               offset_of(struct ui_walk, first)       == offset_of(struct ui_text_walk, first) &&
+               offset_of(struct ui_walk, last)        == offset_of(struct ui_text_walk, last) &&
+               offset_of(struct ui_walk, pixels)      == offset_of(struct ui_text_walk, pixels) &&
+               offset_of(struct ui_walk, pitch)       == offset_of(struct ui_text_walk, pitch) &&
+               offset_of(struct ui_walk, pen_x)       == offset_of(struct ui_text_walk, pen_x) &&
+               offset_of(struct ui_walk, ui_top)      == offset_of(struct ui_text_walk, ui_top) &&
+               offset_of(struct ui_walk, ui_bottom)   == offset_of(struct ui_text_walk, ui_bottom) &&
+               offset_of(struct ui_walk, ui_height)   == offset_of(struct ui_text_walk, ui_height) &&
+               offset_of(struct ui_walk, band_top)    == offset_of(struct ui_text_walk, band_top) &&
+               offset_of(struct ui_walk, band_bottom) == offset_of(struct ui_text_walk, band_bottom) &&
+               offset_of(struct ui_walk, paper)       == offset_of(struct ui_text_walk, paper) &&
+               offset_of(struct ui_walk, ground)      == offset_of(struct ui_text_walk, ground) &&
+               offset_of(struct ui_walk, flip)        == offset_of(struct ui_text_walk, flip) &&
+               offset_of(struct ui_walk, stroke)      == offset_of(struct ui_text_walk, stroke) &&
+               offset_of(struct ui_walk, ramp)        == offset_of(struct ui_text_walk, ramp),
+               "ui_walk ABI parity with ui_text_blit.asm.c");
 
 // A bordered cover bitmap allocated in the scene pool and emitted as op 3: returns the bitmap buffer, or null when out of room.
 static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, int wide, int rows, int x0, int y0, int x1, int y1,
@@ -8417,53 +8261,8 @@ HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int t
         {
                 const unsigned int *restrict s = ui->scratch + (unsigned long)(r0 + row) * (unsigned long)wide + (unsigned long)c0;
                 unsigned char *restrict d = bitmap + (unsigned long)(row + 1) * (unsigned long)pitch + 1;
-                int column = 0;
                 d[-1] = 0, d[cwide] = 0;
-#if defined(__x86_64__) && defined(__SSE2__)
-                if (cwide >= 16)
-                {
-                        unsigned int mask32 = 0x000000ffu;
-                        unsigned int xor32 = (unsigned int)xor_v * 0x01010101u;
-                        long blocks = (long)(cwide >> 4);
-                        const unsigned int *sp = s;
-                        unsigned char *dp = d;
-                        __asm__ volatile(
-                                "movd %[mask], %%xmm4\n\tpshufd $0, %%xmm4, %%xmm4\n\t"
-                                "movd %[xv], %%xmm5\n\tpshufd $0, %%xmm5, %%xmm5\n\t"
-                                "1:\n\t"
-                                "movdqu (%[sp]), %%xmm0\n\tmovdqu 16(%[sp]), %%xmm1\n\t"
-                                "movdqu 32(%[sp]), %%xmm2\n\tmovdqu 48(%[sp]), %%xmm3\n\t"
-                                "psrld $8, %%xmm0\n\tpsrld $8, %%xmm1\n\tpsrld $8, %%xmm2\n\tpsrld $8, %%xmm3\n\t"
-                                "pand %%xmm4, %%xmm0\n\tpand %%xmm4, %%xmm1\n\tpand %%xmm4, %%xmm2\n\tpand %%xmm4, %%xmm3\n\t"
-                                "packssdw %%xmm1, %%xmm0\n\tpackssdw %%xmm3, %%xmm2\n\tpackuswb %%xmm2, %%xmm0\n\t"
-                                "pxor %%xmm5, %%xmm0\n\tmovdqu %%xmm0, (%[dp])\n\t"
-                                "add $64, %[sp]\n\tadd $16, %[dp]\n\tsub $1, %[n]\n\tjnz 1b\n\t"
-                                : [sp] "+r"(sp), [dp] "+r"(dp), [n] "+r"(blocks)
-                                : [mask] "r"(mask32), [xv] "r"(xor32)
-                                : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
-                        column = cwide & ~15;
-                }
-#elif defined(__aarch64__)
-                if (cwide >= 16)
-                {
-                        long blocks = (long)(cwide >> 4);
-                        const unsigned int *sp = s;
-                        unsigned char *dp = d;
-                        __asm__ volatile(
-                                "dup v4.16b, %w[xv]\n\t"
-                                "1:\n\t"
-                                "ld4 {v0.16b, v1.16b, v2.16b, v3.16b}, [%[sp]], #64\n\t"
-                                "eor v1.16b, v1.16b, v4.16b\n\t"
-                                "st1 {v1.16b}, [%[dp]], #16\n\t"
-                                "subs %[n], %[n], #1\n\tb.ne 1b\n\t"
-                                : [sp] "+r"(sp), [dp] "+r"(dp), [n] "+r"(blocks)
-                                : [xv] "r"((unsigned int)xor_v)
-                                : "v0", "v1", "v2", "v3", "v4", "memory", "cc");
-                        column = cwide & ~15;
-                }
-#endif
-                for (; column < cwide; column++)
-                        d[column] = (unsigned char)(((s[column] >> 8) & 255u) ^ xor_v);
+                ui_text_cover_row(s, d, (ui_txt_u64)cwide, xor_v);
         }
 }
 
@@ -8705,94 +8504,15 @@ HOT static fn ui_run_lay(struct ui address_to restrict ui, int wide, int rows, i
                 ui_scene_text(ui, wide, rows, top, pen_x, first, last, colour, alpha, light, stroke);
                 return;
         }
-#if X64
         {
-                struct ui_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
-                                       .last = last, .pixels = ui->pixels, .pitch = (long)ui->pitch, .pen_x = pen_x,
-                                       .ui_top = ui->top < 0 ? 0 : ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
-                                       .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,
-                                       .ground = ground, .flip = light ? 0 : 255, .stroke = stroke, .ramp = ramp};
-                ui_run_walk(&walk);
+                struct ui_text_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
+                                            .last = last, .pixels = ui->pixels, .pitch = (ui_txt_i64)ui->pitch, .pen_x = pen_x,
+                                            .ui_top = ui->top < 0 ? 0 : ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
+                                            .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,
+                                            .ground = ground, .flip = light ? 0 : 255, .stroke = stroke,
+                                            .ramp = (struct ui_text_ramp address_to)ramp};
+                ui_text_run_walk(&walk);
         }
-#else
-        int r0 = 0, r1 = rows;
-        if (-top > r0)
-                r0 = -top;
-        if (ui->top - top > r0)
-                r0 = ui->top - top;
-        if (ui->bottom - top < r1)
-                r1 = ui->bottom - top;
-        if (ui->height - top < r1)
-                r1 = ui->height - top;
-        if (ui->band_bottom > ui->band_top)
-        {
-                if (ui->band_top - top > r0)
-                        r0 = ui->band_top - top;
-                if (ui->band_bottom - top < r1)
-                        r1 = ui->band_bottom - top;
-        }
-        for (int row = r0; row < r1 && first < last; row++)
-        {
-                int y = top + row;
-                const unsigned int address_to restrict coverage = ui->scratch + (unsigned long)row * (unsigned long)wide;
-                unsigned int address_to restrict picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
-                for (int column = first; column < last; column++, picture++)
-                {
-                        unsigned int value, cover, bit;
-                        // Paper no glyph touched (most of the run's rows) is no cover:
-                        if (likely(!stroke) && coverage[column] == paper)
-                        {
-                                int from = column;
-                                column += (int)memory_first_differs_u32(coverage + column, (positive)(last - column), paper);
-                                picture += column - from;
-                                if (column >= last)
-                                        break;
-                        }
-                        value = coverage[column] >> 8 & 255;
-                        cover = light ? value : 255 - value;
-                        if (unlikely(stroke && cover < 255))
-                        {
-                                // The stroke: a pixel takes a share of its strongest neighbour's cover (left, right, above, below, those inside the...
-                                const unsigned int address_to here = coverage + column;
-                                unsigned int most = 0, n[4], have = 0;
-                                if (column > 0)
-                                        n[have++] = here[-1];
-                                if (column + 1 < wide)
-                                        n[have++] = here[1];
-                                if (row > 0)
-                                        n[have++] = here[-wide];
-                                if (row + 1 < rows)
-                                        n[have++] = here[wide];
-                                for (unsigned int k = 0; k < have; k++)
-                                {
-                                        unsigned int v = n[k] >> 8 & 255, c = light ? v : 255 - v;
-                                        most = c > most ? c : most;
-                                }
-                                cover += most * stroke / 128;
-                                cover = cover > 255 ? 255 : cover;
-                        }
-                        bit = cover & 63;
-                        if (!cover)
-                                continue;
-                        if (likely(*picture == ground))
-                        {
-                                if (unlikely(!(ramp->made[cover >> 6] >> bit & 1)))
-                                {
-                                        ramp->over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
-                                        ramp->made[cover >> 6] |= 1ull << bit;
-                                }
-                                *picture = ramp->over[cover];
-                                continue;
-                        }
-                        if (unlikely(!(ramp->known[cover >> 6] >> bit & 1)))
-                        {
-                                ramp->tone[cover] = ui_tone(colour, cover * alpha / 255);
-                                ramp->known[cover >> 6] |= 1ull << bit;
-                        }
-                        *picture = ui_over(ramp->tone[cover], *picture);
-                }
-        }
-#endif
 }
 
 static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom);
