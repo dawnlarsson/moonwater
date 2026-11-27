@@ -6665,74 +6665,30 @@ static fn tls_transcript_add(tls_conn address_to tls, p8 address_to msg,
         crypto_sha256_write(address_of tls->transcript, msg, length);
 }
 
+#define NET_ASN1_DER_IMPLEMENTATION
+#include "asn1_der.asm.c"
+_Static_assert(sizeof(positive) == sizeof(der_u64), "positive must be 8 bytes for asn1_der");
+_Static_assert(sizeof(p64) == sizeof(der_u64), "p64 must be 8 bytes for asn1_der");
+_Static_assert(sizeof(bool) == sizeof(der_u8), "bool must be 1 byte for asn1_der");
+_Static_assert(ASN1_DER_OK == TLS_OK && ASN1_DER_FAIL == TLS_FAIL, "ASN1_DER_* mismatch");
+
 static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,
                                positive address_to at, positive address_to length)
 {
-        byte_reader reader = byte_reader_open(bytes, size);
-        byte_reader lead;
-        p8 first;
-        positive count;
-        positive value = 0;
-
-        (void)byte_reader_skip(&reader, address_to at);
-        first = byte_reader_u8(&reader);
-        if (!byte_reader_ok(&reader))
-                return TLS_FAIL;
-
-        if (first < 0x80)
-        {
-                address_to length = first;
-                address_to at = size - byte_reader_left(&reader);
-                return TLS_OK;
-        }
-
-        //      Long form: one to three length bytes, the first not zero, and
-        //      a value the short form could not have said.
-        count = first & 0x7f;
-        lead = reader;
-        if (!count || count > 3 || !byte_reader_u8(&lead))
-                return TLS_FAIL;
-        for (positive taken = 0; taken < count; taken++)
-                value = (value << 8) | byte_reader_u8(&reader);
-        if (!byte_reader_ok(&reader) || value < 0x80)
-                return TLS_FAIL;
-        address_to length = value;
-        address_to at = size - byte_reader_left(&reader);
-        return TLS_OK;
+        return (bipolar)asn1_der_length(bytes, size, at, length);
 }
 
 static COLD bipolar tls_asn1_enter(p8 address_to bytes, positive size, p8 tag,
                               positive address_to at, positive address_to stop)
 {
-        byte_reader reader = byte_reader_open(bytes, size);
-        positive length = 0;
-
-        (void)byte_reader_skip(&reader, address_to at);
-        if (byte_reader_u8(&reader) != tag || !byte_reader_ok(&reader))
-                return TLS_FAIL;
-        address_to at = size - byte_reader_left(&reader);
-        if (tls_asn1_length(bytes, size, at, address_of length) ||
-            length > size - address_to at)
-                return TLS_FAIL;
-        address_to stop = address_to at + length;
-        return TLS_OK;
+        return (bipolar)asn1_der_enter(bytes, size, tag, at, stop);
 }
 
 /* Past one value of whatever tag it carries: entering it and then taking its
    end for the next value's start is the whole of skipping it. */
 static COLD bipolar tls_asn1_skip(p8 address_to bytes, positive size, positive address_to at)
 {
-        byte_reader reader = byte_reader_open(bytes, size);
-        positive stop = 0;
-
-        (void)byte_reader_skip(&reader, address_to at);
-        if (tls_asn1_enter(bytes, size, byte_reader_u8(&reader), at,
-                           address_of stop) ||
-            !byte_reader_ok(&reader))
-                return TLS_FAIL;
-
-        address_to at = stop;
-        return TLS_OK;
+        return (bipolar)asn1_der_skip(bytes, size, at);
 }
 
 /* One whole value of the given tag, header included, and past it. */
@@ -6741,18 +6697,8 @@ static COLD bipolar tls_asn1_take(p8 address_to bytes, positive size, p8 tag,
                                   p8 address_to address_to value,
                                   positive address_to length)
 {
-        byte_reader reader = byte_reader_open(bytes, size);
-        positive start = address_to at;
-        positive stop = 0;
-
-        (void)byte_reader_skip(&reader, start);
-        if (tls_asn1_enter(bytes, size, tag, at, address_of stop) ||
-            !byte_reader_ok(&reader))
-                return TLS_FAIL;
-        address_to value = (p8 address_to)byte_reader_here(&reader);
-        address_to length = stop - start;
-        address_to at = stop;
-        return TLS_OK;
+        return (bipolar)asn1_der_take(bytes, size, tag, at,
+                                      (const der_u8 **)value, length);
 }
 
 /* A BOOLEAN DEFAULT FALSE: basicConstraints' cA, an Extension's critical.
@@ -6764,23 +6710,14 @@ static COLD bipolar tls_asn1_take(p8 address_to bytes, positive size, p8 tag,
 static COLD bipolar tls_asn1_true(p8 address_to bytes, positive stop,
                                   positive address_to at, bool address_to value)
 {
-        positive boolean_stop = 0;
-
-        if (address_to at >= stop || bytes[address_to at] != 0x01)
-                return TLS_OK;
-        if (tls_asn1_enter(bytes, stop, 0x01, at, address_of boolean_stop) ||
-            address_to at + 1 != boolean_stop || bytes[address_to at] != 0xff)
-                return TLS_FAIL;
-        address_to value = true;
-        address_to at = boolean_stop;
-        return TLS_OK;
+        return (bipolar)asn1_der_true(bytes, stop, at, (der_u8 *)value);
 }
 
 /* RSA AlgorithmIdentifier parameters: the historical NULL, or nothing. */
 static COLD bool tls_null_or_absent(p8 address_to der, positive at,
                                     positive stop)
 {
-        return at == stop || (at + 2 == stop && der[at] == 0x05 && !der[at + 1]);
+        return asn1_der_null_or_absent(der, at, stop) != 0;
 }
 
 static COLD bool tls_oid_is(const p8 address_to bytes, positive length,
@@ -6822,30 +6759,13 @@ static COLD bipolar tls_parse_version(p8 address_to der, positive size,
    length is already refused by tls_asn1_length. */
 static COLD bool tls_oid_content_der(const p8 address_to bytes, positive length)
 {
-        positive at = 0;
-
-        if (!length)
-                return false;
-        while (at < length)
-        {
-                if (bytes[at] == 0x80)
-                        return false;
-                while (bytes[at++] & 0x80)
-                        if (at == length)
-                                return false;
-        }
-        return true;
+        return asn1_der_oid_content(bytes, length) != 0;
 }
 
 static COLD bipolar tls_asn1_enter_oid(p8 address_to bytes, positive size,
                                   positive address_to at, positive address_to stop)
 {
-        if (tls_asn1_enter(bytes, size, 0x06, at, stop))
-                return TLS_FAIL;
-        if (!tls_oid_content_der(bytes + address_to at,
-                                 address_to stop - address_to at))
-                return TLS_FAIL;
-        return TLS_OK;
+        return (bipolar)asn1_der_enter_oid(bytes, size, at, stop);
 }
 
 /*
@@ -6900,17 +6820,10 @@ static COLD p8 address_to tls_der_whole(byte_reader address_to reader, p8 tag,
    repeats the sign of the next (X.690 8.3.2). */
 static COLD bool tls_der_integer(byte_reader contents)
 {
-        positive length = byte_reader_left(&contents);
-        p8 first = byte_reader_u8(&contents);
-        p8 second;
-
         if (!byte_reader_ok(&contents))
                 return false;
-        if (length == 1)
-                return true;
-        second = byte_reader_u8(&contents);
-        return !(first == 0 && !(second & 0x80)) &&
-               !(first == 0xff && (second & 0x80));
+        return asn1_der_integer((const der_u8 *)byte_reader_here(&contents),
+                                byte_reader_left(&contents)) != 0;
 }
 
 /* The one INTEGER whose contents are a single octet below 0x80 and the one
@@ -6945,24 +6858,10 @@ static COLD bool tls_der_flag(byte_reader address_to reader, p8 tag)
    one octet, 0. */
 static COLD bool tls_der_named_bits(byte_reader contents)
 {
-        p8 unused = byte_reader_u8(&contents);
-        p8 final;
-        p8 zeros = 0;
-
-        if (!byte_reader_ok(&contents) || unused > 7)
+        if (!byte_reader_ok(&contents))
                 return false;
-        if (!byte_reader_left(&contents))
-                return !unused;
-        (void)byte_reader_skip(&contents, byte_reader_left(&contents) - 1);
-        final = byte_reader_u8(&contents);
-        if (!final)
-                return false;
-        while (!(final & 1))
-        {
-                zeros++;
-                final >>= 1;
-        }
-        return zeros == unused;
+        return asn1_der_named_bits((const der_u8 *)byte_reader_here(&contents),
+                                   byte_reader_left(&contents)) != 0;
 }
 
 /* GeneralNames' contents (RFC 5280 4.2.1.6): one name or more, each a whole
@@ -7024,19 +6923,8 @@ static COLD bool tls_positive_integer(p8 address_to bytes, positive at,
                                  positive stop, positive address_to value_at,
                                  positive address_to value_length)
 {
-        if (at >= stop || (bytes[at] & 0x80))
-                return false;
-
-        if (!bytes[at])
-        {
-                if (at + 1 >= stop || !(bytes[at + 1] & 0x80))
-                        return false;
-                at++;
-        }
-
-        address_to value_at = at;
-        address_to value_length = stop - at;
-        return true;
+        return asn1_der_positive_integer(bytes, at, stop, value_at,
+                                         value_length) != 0;
 }
 
 /* The certificate signature algorithms: ecdsa-with-SHA256/384/512
@@ -7957,70 +7845,7 @@ typedef struct
 static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
                            p64 address_to value)
 {
-        static const p8 days_in_month[12] = {31, 28, 31, 30, 31, 30,
-                                              31, 31, 30, 31, 30, 31};
-        positive year_digits;
-        positive year = 0;
-        positive month;
-        positive day;
-        positive hour;
-        positive minute;
-        positive second;
-        positive i;
-        positive limit;
-        p64 answer;
-
-        if (tag == 0x17)
-                year_digits = 2;
-        else if (tag == 0x18)
-                year_digits = 4;
-        else
-                return false;
-        if (length != year_digits + 11 || text[length - 1] != 'Z')
-                return false;
-        for (i = 0; i + 1 < length; i++)
-                if (!byte_is_digit(text[i]))
-                        return false;
-
-        for (i = 0; i < year_digits; i++)
-                year = year * 10 + text[i] - '0';
-        if (year_digits == 2)
-                year += year >= 50 ? 1900 : 2000;
-        /* RFC 5280 fixes the otherwise overlapping ASN.1 time choices:
-           1950..2049 use UTCTime and 2050 onward uses GeneralizedTime. A
-           GeneralizedTime spelling of a 20xx year is numerically clear but
-           non-canonical, and accepting it creates a validator differential
-           over signed validity bytes. */
-        if (!year || (tag == 0x18 && year < 2050))
-                return false;
-
-        month = (positive)(text[year_digits] - '0') * 10 +
-                text[year_digits + 1] - '0';
-        day = (positive)(text[year_digits + 2] - '0') * 10 +
-              text[year_digits + 3] - '0';
-        hour = (positive)(text[year_digits + 4] - '0') * 10 +
-               text[year_digits + 5] - '0';
-        minute = (positive)(text[year_digits + 6] - '0') * 10 +
-                 text[year_digits + 7] - '0';
-        second = (positive)(text[year_digits + 8] - '0') * 10 +
-                 text[year_digits + 9] - '0';
-        if (!month || month > 12 || !day || hour > 23 || minute > 59 ||
-            second > 59)
-                return false;
-        limit = days_in_month[month - 1];
-        if (month == 2 && (!(year % 4) && (year % 100 || !(year % 400))))
-                limit++;
-        if (day > limit)
-                return false;
-
-        answer = year;
-        answer = answer * 100 + month;
-        answer = answer * 100 + day;
-        answer = answer * 100 + hour;
-        answer = answer * 100 + minute;
-        answer = answer * 100 + second;
-        address_to value = answer;
-        return true;
+        return asn1_der_date_value(tag, text, length, value) != 0;
 }
 
 /* An OCSP time: GeneralizedTime in every year (RFC 6960 4.2.1), held to the
@@ -8031,18 +7856,7 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
 static COLD bool tls_date_general(p8 address_to text, positive length,
                                   p64 address_to value)
 {
-        p64 answer = 0;
-
-        if (tls_date_value(0x18, text, length, value))
-                return true;
-        if (length != 15 || text[0] < '1' || text[0] > '2' || text[1] < '0' ||
-            text[1] > '9' ||
-            !tls_date_value(0x17, text + 2, 13, address_of answer) ||
-            answer / 1000000000000ull !=
-                (p64)(text[0] - '0') * 10 + (p64)(text[1] - '0'))
-                return false;
-        address_to value = answer;
-        return true;
+        return asn1_der_date_general(text, length, value) != 0;
 }
 
 /* A date as tls_date_value keeps it, YYYYMMDDHHMMSS, as seconds from the
@@ -8051,24 +7865,7 @@ static COLD bool tls_date_general(p8 address_to text, positive length,
    skew a revocation answer is allowed. 0 for 0. */
 static COLD p64 tls_date_seconds(p64 date)
 {
-        p64 year = date / 10000000000ull;
-        p64 month = date / 100000000 % 100;
-        p64 day = date / 1000000 % 100;
-        p64 shifted;
-        p64 era;
-        p64 of_era;
-        p64 of_year;
-        p64 days;
-
-        if (!year || !month || !day)
-                return 0;
-        shifted = month <= 2 ? year - 1 : year;
-        era = shifted / 400;
-        of_era = shifted - era * 400;
-        of_year = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1;
-        days = era * 146097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year;
-        return ((days * 24 + date / 10000 % 100) * 60 + date / 100 % 100) * 60 +
-               date % 100;
+        return asn1_der_date_seconds(date);
 }
 
 static COLD bipolar tls_parse_validity(p8 address_to der, positive size,
