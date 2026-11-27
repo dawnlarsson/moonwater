@@ -112,6 +112,17 @@ enum
 
 struct wayland_rect { long x, y, width, height; };
 
+#define CANVAS_WAYLAND_DIRECT_ASM_IMPLEMENTATION
+#include "wayland_direct.asm.c"
+
+_Static_assert(sizeof(struct wl_direct_rect) == sizeof(struct wayland_rect), "wl_direct_rect != wayland_rect size");
+_Static_assert(WL_DIR_OFFSET(struct wl_direct_rect, x) == WL_DIR_OFFSET(struct wayland_rect, x) &&
+               WL_DIR_OFFSET(struct wl_direct_rect, y) == WL_DIR_OFFSET(struct wayland_rect, y) &&
+               WL_DIR_OFFSET(struct wl_direct_rect, width) == WL_DIR_OFFSET(struct wayland_rect, width) &&
+               WL_DIR_OFFSET(struct wl_direct_rect, height) == WL_DIR_OFFSET(struct wayland_rect, height),
+               "wl_direct_rect != wayland_rect field offsets");
+_Static_assert(WAYLAND_UNIT == 120 && WAYLAND_TEXT == 128, "WAYLAND_UNIT / WAYLAND_TEXT mismatch");
+
 struct wayland_dmabuf_info
 {
         unsigned long device;
@@ -1056,32 +1067,7 @@ static int wayland_input_serial_ok(const struct wayland_client *c, unsigned long
 
 static long wayland_text(char *into, const unsigned char *text, long length)
 {
-        long at = 0, used = 0;
-
-        while (at < length && used < WAYLAND_TEXT - 1)
-        {
-                unsigned char c = text[at];
-                long want = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
-                int good = want && at + want <= length && used + want < WAYLAND_TEXT;
-
-                for (long more = 1; good && more < want; more++)
-                        good = (text[at + more] & 0xc0) == 0x80;
-                if (good && ((want == 2 && c < 0xc2) ||
-                             (want == 3 && ((c == 0xe0 && text[at + 1] < 0xa0) || (c == 0xed && text[at + 1] >= 0xa0))) ||
-                             (want == 4 && ((c == 0xf0 && text[at + 1] < 0x90) || c > 0xf4 || (c == 0xf4 && text[at + 1] >= 0x90)))))
-                        good = 0;
-                if (want == 1 && (c < 0x20 || c == 0x7f))
-                        good = 0;
-                if (!good)
-                {
-                        into[used++] = '?', at++;
-                        continue;
-                }
-                for (long more = 0; more < want; more++)
-                        into[used++] = (char)text[at + more];
-                at += want;
-        }
-        return into[used] = 0, used;
+        return (long)wl_direct_text(into, WAYLAND_TEXT, text, length);
 }
 
 static inline long wayland_min(long a, long b) { return a < b ? a : b; }
@@ -1089,17 +1075,18 @@ static inline long wayland_max(long a, long b) { return a > b ? a : b; }
 static inline long wayland_clamp(long v, long lo, long hi) { return v < lo ? lo : v > hi ? hi : v; }
 static inline long wayland_percent120(long percent) { return (wayland_clamp(percent, 25, 800) * WAYLAND_UNIT + 50) / 100; }
 static inline long wayland_whole_scale(long percent) { return wayland_max(1, (wayland_min(percent, 800) + 99) / 100); }
-static inline long wayland_div120(long v, long pb, long nb) { return v >= 0 ? (v + pb) / WAYLAND_UNIT : -((-v + nb) / WAYLAND_UNIT); }
-static inline long wayland_pixels(long u, long s) { return wayland_div120(u * s, WAYLAND_UNIT / 2, WAYLAND_UNIT / 2); }
-static inline long wayland_pixels_floor(long u, long s) { return wayland_div120(u * s, 0, WAYLAND_UNIT - 1); }
-static inline long wayland_pixels_ceil(long u, long s) { return wayland_div120(u * s, WAYLAND_UNIT - 1, 0); }
-static inline unsigned long wayland_units_fixed(long p, long s) { return (unsigned long)(s == WAYLAND_UNIT || s <= 0 ? p * 256 : p * 256 * WAYLAND_UNIT / s); }
-static inline long wayland_units(long p, long s) { return s == WAYLAND_UNIT || s <= 0 ? p : p * WAYLAND_UNIT / s; }
+static inline long wayland_div120(long v, long pb, long nb) { return (long)wl_direct_div120(v, pb, nb); }
+static inline long wayland_pixels(long u, long s) { return (long)wl_direct_pixels(u, s); }
+static inline long wayland_pixels_floor(long u, long s) { return (long)wl_direct_pixels_floor(u, s); }
+static inline long wayland_pixels_ceil(long u, long s) { return (long)wl_direct_pixels_ceil(u, s); }
+static inline unsigned long wayland_units_fixed(long p, long s) { return (unsigned long)wl_direct_units_fixed(p, s); }
+static inline long wayland_units(long p, long s) { return (long)wl_direct_units(p, s); }
 
 static inline struct wayland_rect wayland_cover(struct wayland_rect r, long s)
 {
-        long x1 = wayland_pixels_floor(r.x, s), y1 = wayland_pixels_floor(r.y, s);
-        return (struct wayland_rect){x1, y1, wayland_pixels_ceil(r.x + r.width, s) - x1, wayland_pixels_ceil(r.y + r.height, s) - y1};
+        struct wayland_rect out;
+        wl_direct_cover((const struct wl_direct_rect *)&r, s, (struct wl_direct_rect *)&out);
+        return out;
 }
 
 static inline long wayland_surface_index(struct wayland_client *c, const struct wayland_surface *s) { return (long)(s - c->surfaces); }

@@ -6,6 +6,8 @@
 #ifndef WAYLAND_HOST_INCLUDED
 #define WAYLAND_HOST_INCLUDED
 
+#include "wayland_direct.asm.c"
+
 #define COMPOSITOR_WL_PATH "/run/moonwater/wayland-0"
 #define COMPOSITOR_WL_BACKLOG 16
 #define COMPOSITOR_WL_READ 16384
@@ -5393,7 +5395,7 @@ static int compositor_wl_direct_try(void)
 HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to, positive micro)
 {
         unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 24];
-        unsigned int length = 0, time;
+        unsigned int length = 0;
         int sent;
 
         if (code >= 256 || !compositor_wl_direct_try())
@@ -5406,13 +5408,10 @@ HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned
         }
         *serial = __atomic_add_fetch(compositor_wl_direct.keys_serial, 1, __ATOMIC_RELAXED);
         *row = compositor_wl_direct.keys_row;
-        time = (unsigned int)(micro / 1000ull);
-        for (long at = 0; at < compositor_wl_direct.keys_count; at++)
         {
-                unsigned int words[6] = {compositor_wl_direct.keys_ids[at], 24u << 16 | 3u, (unsigned int)*serial, time, code, pressed ? 1u : 0u};
-
-                memory_copy(bytes + length, words, sizeof words);
-                length += sizeof words;
+                struct wl_direct_key req = {compositor_wl_direct.keys_ids, compositor_wl_direct.keys_count,
+                                            micro, (unsigned int)*serial, code, pressed, 0};
+                length = wl_direct_pack_key(bytes, sizeof bytes, &req);
         }
         sent = compositor_wl_direct_bytes(compositor_wl_direct.keys_slot, compositor_wl_direct.keys_fd, bytes, length);
         __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
@@ -5451,7 +5450,8 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
                                             positive micro, unsigned long *btn_serial, int *btn_row)
 {
         unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 128];
-        unsigned int length = 0, time_ms;
+        unsigned int length = 0;
+        unsigned long ser = 0;
         long got;
 
         if (!compositor_wl_direct_try())
@@ -5462,81 +5462,21 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
                 __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
                 return 0;
         }
-        time_ms = (unsigned int)(micro / 1000ull);
-        if (dx || dy)
-        {
-                for (long at = 0; at < compositor_wl_direct.relatives; at++)
-                {
-                        // Unaccelerated is the device's own counts, unscaled (wayland_relative_send's rule).
-                        unsigned int words[8] = {compositor_wl_direct.relative[at], 32u << 16, (unsigned int)(micro >> 32), (unsigned int)micro,
-                                                 (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
-                                                 (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120),
-                                                 (unsigned int)(unsigned long)(dx * 256), (unsigned int)(unsigned long)(dy * 256)};
-
-                        memory_copy(bytes + length, words, sizeof words);
-                        length += sizeof words;
-                }
-        }
         if (btn)
         {
-                unsigned long ser = __atomic_add_fetch(compositor_wl_direct.ptr_serial, 1, __ATOMIC_RELAXED);
+                ser = __atomic_add_fetch(compositor_wl_direct.ptr_serial, 1, __ATOMIC_RELAXED);
                 if (btn_serial) *btn_serial = ser;
                 if (btn_row) *btn_row = compositor_wl_direct.row;
-                for (long at = 0; at < compositor_wl_direct.ptrs; at++)
-                {
-                        unsigned int words[6] = {compositor_wl_direct.ptr_ids[at], 24u << 16 | 3u, (unsigned int)ser, time_ms, btn, btn_val ? 1u : 0u};
-
-                        memory_copy(bytes + length, words, sizeof words);
-                        length += sizeof words;
-                }
         }
-        if (wheel_v120)
         {
-                unsigned int axis = wheel_horiz ? 1u : 0u;
-                int v = wheel_horiz ? wheel_v120 : -wheel_v120;
-                unsigned int fixed;
-                int notches;
-
-                // The natural-direction flip is made in input.c (compositor_wheel_turn) before the reader sends the turn.
-                fixed = (unsigned int)((long long)v * 15 * 256 / 120);
-                notches = v / 120;
-
-                for (long at = 0; at < compositor_wl_direct.ptrs; at++)
-                {
-                        unsigned int id = compositor_wl_direct.ptr_ids[at];
-                        unsigned char ver = compositor_wl_direct.ptr_ver[at];
-
-                        if (ver >= 5)
-                        {
-                                unsigned int src[3] = {id, 12u << 16 | 6u, 0u}; // wl_pointer.axis_source = wheel
-                                memory_copy(bytes + length, src, sizeof src);
-                                length += sizeof src;
-                        }
-                        if (ver >= 8)
-                        {
-                                unsigned int v120w[4] = {id, 16u << 16 | 9u, axis, (unsigned int)v}; // wl_pointer.axis_value120
-                                memory_copy(bytes + length, v120w, sizeof v120w);
-                                length += sizeof v120w;
-                        }
-                        else if (ver >= 5 && notches)
-                        {
-                                unsigned int disc[4] = {id, 16u << 16 | 8u, axis, (unsigned int)notches}; // wl_pointer.axis_discrete
-                                memory_copy(bytes + length, disc, sizeof disc);
-                                length += sizeof disc;
-                        }
-                        {
-                                unsigned int ax[5] = {id, 20u << 16 | 4u, time_ms, axis, fixed}; // wl_pointer.axis
-                                memory_copy(bytes + length, ax, sizeof ax);
-                                length += sizeof ax;
-                        }
-                }
-        }
-        for (long at = 0; at < compositor_wl_direct.framed; at++)
-        {
-                unsigned int words[2] = {compositor_wl_direct.frames[at], 8u << 16 | 5u};
-
-                memory_copy(bytes + length, words, sizeof words);
-                length += sizeof words;
+                struct wl_direct_packet pkt = {
+                        dx, dy, micro, compositor_wl_direct.scale120,
+                        compositor_wl_direct.relative, compositor_wl_direct.relatives,
+                        compositor_wl_direct.ptr_ids, compositor_wl_direct.ptr_ver, compositor_wl_direct.ptrs,
+                        compositor_wl_direct.frames, compositor_wl_direct.framed,
+                        btn, btn_val, (unsigned int)ser, wheel_v120, wheel_horiz, 0
+                };
+                length = wl_direct_pack_packet(bytes, sizeof bytes, &pkt);
         }
         got = compositor_wl_direct_bytes(compositor_wl_direct.slot, compositor_wl_direct.fd, bytes, length);
         if (got && (dx || dy) && !__atomic_load_n(&compositor_wl_direct.hop_sent, __ATOMIC_RELAXED))
