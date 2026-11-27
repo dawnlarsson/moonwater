@@ -16,6 +16,9 @@
 
 #include "../lib.util.c"
 
+#define SH_SHELL_GLOB_IMPLEMENTATION
+#include "shell_glob.asm.c"
+
 /*
         What the files beside this one own.
 
@@ -806,28 +809,7 @@ static inline INLINE bool expand_set_inverts(string_address at)
 
 static PURE string_address expand_set_end(string_address at)
 {
-        string_address step = at + 1;
-
-        if (expand_set_inverts(step))
-                step++;
-
-        // The first ] is a member, not the close.
-        if (string_is(step, ']'))
-                step++;
-
-        while (string_get(step) && string_not(step, ']'))
-        {
-                string_address past = byte_class_end(step, null);
-
-                if (past)
-                        step = past;
-                else if (string_is(step, '\\') && string_not(step + 1, end))
-                        step += 2;
-                else
-                        step++;
-        }
-
-        return string_get(step) ? step : null;
+        return (string_address)sh_glob_set_end((const char *)at);
 }
 
 /* Decode only after the shared bounded scanner has validated the width.
@@ -981,20 +963,7 @@ PURE bool shell_extglob_asked()
 */
 static PURE bool glob_extended_anywhere(string_address pattern)
 {
-        string_address at = pattern;
-
-        while (1)
-        {
-                at = string_first_of(at, '(');
-
-                if (!at)
-                        return false;
-
-                if (at > pattern && lex_extended_head(string_get(at - 1)))
-                        return true;
-
-                at++;
-        }
+        return sh_glob_extended_anywhere((const char *)pattern) != 0;
 }
 
 // An escaped byte or a bracket set closed before bound (or the terminator,
@@ -1003,42 +972,15 @@ static PURE bool glob_extended_anywhere(string_address pattern)
 static PURE string_address glob_unit_end(string_address at,
                                          string_address bound)
 {
-        string_address close;
-
-        if (string_is(at, '\\') && string_get(at + 1) &&
-            (!bound || at + 1 < bound))
-                return at + 2;
-        if (string_is(at, '[') && (close = expand_set_end(at)) &&
-            (!bound || close < bound))
-                return close + 1;
-        return null;
+        return (string_address)sh_glob_unit_end((const char *)at,
+                                                (const char *)bound);
 }
 
 // Where the group whose head is at ends, one byte past its parenthesis, or
 // nothing when it never closes.
 static PURE string_address glob_group_end(string_address at)
 {
-        string_address step = at;
-        string_address past;
-        positive depth = 0;
-
-        while (string_get(step))
-        {
-                if ((past = glob_unit_end(step, null)))
-                {
-                        step = past;
-                        continue;
-                }
-
-                if (string_is(step, '('))
-                        depth++;
-                else if (string_is(step, ')') && !--depth)
-                        return step + 1;
-
-                step++;
-        }
-
-        return null;
+        return (string_address)sh_glob_group_end((const char *)at);
 }
 
 /*
@@ -1688,6 +1630,15 @@ static inline INLINE bool shell_match_core(string_address pattern,
         //      shell comes through here.
         if (shell_extglob_on && glob_extended_anywhere(pattern))
                 return glob_extended_match(pattern, text, fold);
+
+        {
+                sh_glob_i32 fast = sh_glob_match(
+                    (const char *)pattern, (const char *)text,
+                    (fold ? SH_GLOB_FOLD : 0u) |
+                        (shell_utf8_on() ? SH_GLOB_UTF8 : 0u));
+                if (fast >= 0)
+                        return fast != 0;
+        }
 
         while (string_get(text))
         {
@@ -10985,29 +10936,8 @@ static bool glob_failed;
 
 static PURE bool glob_magic(string_address pattern)
 {
-        while (string_get(pattern))
-        {
-                if (string_is(pattern, '\\') && string_get(pattern + 1))
-                {
-                        pattern += 2;
-                        continue;
-                }
-
-                if (string_is(pattern, '*') || string_is(pattern, '?') ||
-                    string_is(pattern, '['))
-                        return true;
-
-                //      + @ and ! are ordinary bytes on their own and the head
-                //      of a group in front of a parenthesis, which is a
-                //      pattern to look on disk with like any other.
-                if (shell_extglob_on && string_is(pattern + 1, '(') &&
-                    lex_extended_head(string_get(pattern)))
-                        return true;
-
-                pattern++;
-        }
-
-        return false;
+        return sh_glob_magic((const char *)pattern,
+                             shell_extglob_on ? 1u : 0u) != 0;
 }
 
 static bool glob_add(string_address path)
