@@ -226,19 +226,16 @@ static mwfd_slice mwfd_r_str16(mwfd_reader address_to r)
 /* Constant-time check that big-endian 32-byte scalar s satisfies 1 <= s <= half_order. */
 static bool mwfd_is_low_s(const p8 address_to s)
 {
-        p8 non_zero = 0;
-        for (positive i = 0; i < 32; i++)
-                non_zero |= s[i];
-        if (!non_zero)
-                return false;
+        p32 non_zero = 0, less = 0, greater = 0;
         for (positive i = 0; i < 32; i++)
         {
-                if (s[i] < mwfd_p256_half_order_be[i])
-                        return true;
-                if (s[i] > mwfd_p256_half_order_be[i])
-                        return false;
+                p32 a = s[i], b = mwfd_p256_half_order_be[i];
+                p32 undecided = (p32)((less | greater) == 0);
+                non_zero |= a;
+                less |= undecided & (p32)(a < b);
+                greater |= undecided & (p32)(a > b);
         }
-        return true; // exact equality with floor(n / 2)
+        return non_zero != 0 && greater == 0;
 }
 
 /*

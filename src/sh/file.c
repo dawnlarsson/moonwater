@@ -10508,7 +10508,14 @@ static fn ls_count_columns(address_any text, positive length)
 
         if (!length)
                 length = string_length(at);
-        for (positive i = 0; i < length;)
+        positive i = memory_ascii_span(at, length);
+        if (i == length)
+        {
+                ls_counted += length;
+                return;
+        }
+        ls_counted += i;
+        for (; i < length;)
         {
                 p8 byte = string_get(at + i);
 

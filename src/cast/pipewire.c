@@ -167,19 +167,31 @@ static struct
 
 static void pwire_zero(void *to, long n)
 {
+        if (n <= 0)
+                return;
+#ifdef STANDARD_MODERN_C
+        memory_zero(to, (positive)n);
+#else
         unsigned char *p = to;
 
         while (n-- > 0)
                 *p++ = 0;
+#endif
 }
 
 static void pwire_copy(void *to, const void *from, long n)
 {
+        if (n <= 0)
+                return;
+#ifdef STANDARD_MODERN_C
+        memory_copy(to, (address_any)from, (positive)n);
+#else
         unsigned char *p = to;
         const unsigned char *q = from;
 
         while (n-- > 0)
                 *p++ = *q++;
+#endif
 }
 
 static long pwire_length(const char *s)
