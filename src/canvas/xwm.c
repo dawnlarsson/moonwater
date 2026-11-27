@@ -1586,7 +1586,22 @@ static int compositor_xwm_may_show(struct compositor_xwm *x, const struct compos
         const struct compositor_xwm_window *f;
         unsigned int base = x->resource_mask ? ~x->resource_mask : 0xffe00000u;
 
-        if (source == 2 || focus < 0 || focus >= COMPOSITOR_ROWS || !compositor.showing[focus] || focus == w->row)
+        if (source == 2 || focus == w->row)
+                return 1;
+        if (!compositor_space_row_active(w->row))
+        {
+                // A window on an inactive Scene (e.g. a fullscreen game the person switched away from) must not yank the
+                // active Scene back even when the new Scene is empty (focus < 0), unless another of its own windows has focus.
+                if (focus >= 0 && focus < COMPOSITOR_ROWS && compositor.showing[focus])
+                {
+                        f = xwm_row_lookup(x, focus, 0);
+                        if (f && ((f->owner && f->owner == w->owner) || (!f->owner && (f->id & base) == (w->id & base))))
+                                return 1;
+                }
+                compositor_xwm_counted_refusal();
+                return 0;
+        }
+        if (focus < 0 || focus >= COMPOSITOR_ROWS || !compositor.showing[focus])
                 return 1;
         f = xwm_row_lookup(x, focus, 0);
         if (f && ((f->owner && f->owner == w->owner) || (!f->owner && (f->id & base) == (w->id & base))))

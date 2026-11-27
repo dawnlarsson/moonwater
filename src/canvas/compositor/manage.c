@@ -1462,10 +1462,13 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
                         return;
                 }
                 compositor.fullscreen_was[row] = (unsigned char)was;
-                compositor_raise(row);
-                compositor_focus(row);
-                if (!compositor_wl_locked())
-                        compositor_motion();
+                if (compositor_space_row_active(row))
+                {
+                        compositor_raise(row);
+                        compositor_focus(row);
+                        if (!compositor_wl_locked())
+                                compositor_motion();
+                }
         }
         if (compositor.fullscreen[row] != was_fs)
                 compositor.stack_gen++;
@@ -2849,10 +2852,12 @@ static void compositor_space_enter_fullscreen(int row, int screen)
 {
         unsigned int prev_id;
         struct compositor_space *prev, *fs;
+        int was_active;
 
         if (!compositor.spaces.ready || compositor_row_space_exempt(row) || row < 0 || row >= COMPOSITOR_ROWS)
                 return;
         compositor_spaces_ensure();
+        was_active = compositor_space_row_active(row);
         if (screen < 0 || screen >= compositor_output_count())
                 screen = compositor_screen_of(row);
         for (unsigned int i = 0; i < compositor.spaces.count; i++)
@@ -2860,7 +2865,7 @@ static void compositor_space_enter_fullscreen(int row, int screen)
                 {
                         if (compositor.spaces.list[i].screen != screen)
                                 compositor_space_move_to_screen(compositor.spaces.list[i].id, screen);
-                        else
+                        else if (was_active)
                                 compositor_space_activate(screen, compositor.spaces.list[i].id);
                         return;
                 }
@@ -2876,7 +2881,8 @@ static void compositor_space_enter_fullscreen(int row, int screen)
         for (int c = 0; c < (int)compositor_rows_in_use; c++)
                 if (c != row && compositor_owner[c] == row + 1 && compositor.showing[c] && !compositor_row_space_exempt(c))
                         compositor.row_space[c] = fs->id;
-        compositor_space_activate(screen, fs->id);
+        if (was_active)
+                compositor_space_activate(screen, fs->id);
 }
 
 static void compositor_space_exit_fullscreen(int row, int closing)
