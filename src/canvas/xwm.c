@@ -1555,7 +1555,11 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
                 if (w->state & COMPOSITOR_XWM_ABOVE)
                         compositor_layer_set((int)row, WINDOW_LAYER_ABOVE, -1);
                 if (w->state & COMPOSITOR_XWM_FULLSCREEN)
+                {
                         compositor_fullscreen_on((int)row, covers >= 0 ? covers : compositor_xwm_covers(w));
+                        if (!compositor_xwm_is_popup(w) && !w->transient && !w->no_input)
+                                compositor_reveal((int)row);
+                }
                 else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
                         compositor_arrange((int)row, COMPOSITOR_ROOM);
         }
@@ -3442,7 +3446,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         if (w->row >= 0 && (w->width != prev_w || w->height != prev_h) && compositor_row_shaped(w->row))
                                 xwm_shape_ask(x, w);
                         if ((w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_BORDERLESS)) &&
-                            w->row >= 0 && w->row < COMPOSITOR_ROWS && !(w->state & COMPOSITOR_XWM_FULLSCREEN) &&
+                            w->row >= 0 && w->row < COMPOSITOR_ROWS && !(w->state & COMPOSITOR_XWM_FULLSCREEN) && !w->left_fullscreen &&
                             (w->width != prev_w || w->height != prev_h) && (covers = compositor_xwm_covers(w)) >= 0)
                                 xwm_promote_fullscreen(x, w, prev_w, prev_h), compositor_row_promote_toplevel(w->row, covers);
                         else if ((w->state & COMPOSITOR_XWM_ADOPTED) && compositor_xwm_is_popup(w) && w->row >= 0)
@@ -4075,6 +4079,15 @@ static void xwm_window_turn(struct compositor_xwm *x, struct compositor_xwm_wind
                         w->state |= COMPOSITOR_XWM_RAISED;
                         compositor_owner[w->row] = parent->row + 1;
                         xwm_tab_class(x, w); // its owner has a row now: a part of it has no tab
+                        if (compositor.spaces.ready && !compositor_row_space_exempt(w->row) &&
+                            compositor.row_space[parent->row] && compositor.row_space[w->row] != compositor.row_space[parent->row])
+                        {
+                                compositor.row_space[w->row] = compositor.row_space[parent->row];
+                                compositor.stack_gen++;
+                                rows_add(&compositor.woken, w->row);
+                                compositor_wl_settle(w->row);
+                                compositor_damage_row(w->row);
+                        }
                         compositor_raise(w->row);
                         if ((int)compositor.focus == parent->row && !w->no_input && !compositor_xwm_is_popup(w))
                                 compositor_focus(w->row);
