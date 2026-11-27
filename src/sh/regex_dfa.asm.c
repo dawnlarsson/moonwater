@@ -16,7 +16,13 @@
 #ifndef MOONWATER_SH_REGEX_DFA_ASM_H
 #define MOONWATER_SH_REGEX_DFA_ASM_H
 
-#if defined(__UINT8_TYPE__) && defined(__UINT16_TYPE__) && defined(__UINT32_TYPE__) && \
+#ifdef STANDARD_MODERN_C
+typedef p8  sh_rx_u8;
+typedef p16 sh_rx_u16;
+typedef p32 sh_rx_u32;
+typedef b32 sh_rx_i32;
+typedef p64 sh_rx_u64;
+#elif defined(__UINT8_TYPE__) && defined(__UINT16_TYPE__) && defined(__UINT32_TYPE__) && \
     defined(__INT32_TYPE__) && defined(__UINT64_TYPE__)
 typedef __UINT8_TYPE__  sh_rx_u8;
 typedef __UINT16_TYPE__ sh_rx_u16;

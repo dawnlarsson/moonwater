@@ -16,7 +16,11 @@
 #ifndef MOONWATER_COMPOSITOR_GPU_LIST_ASM_H
 #define MOONWATER_COMPOSITOR_GPU_LIST_ASM_H
 
-#if defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__)
+#ifdef STANDARD_MODERN_C
+typedef p32 gpu_list_u32;
+typedef b32 gpu_list_i32;
+typedef p64 gpu_list_u64;
+#elif defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__)
 typedef __UINT32_TYPE__ gpu_list_u32;
 typedef __INT32_TYPE__  gpu_list_i32;
 typedef __UINT64_TYPE__ gpu_list_u64;

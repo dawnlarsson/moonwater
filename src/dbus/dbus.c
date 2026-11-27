@@ -415,6 +415,9 @@ static unsigned long dbus_get32(const unsigned char *p)
 
 /* ---- grammar: UTF-8, names, paths, signatures ---- */
 
+static int dbus_letter(unsigned char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+static int dbus_digit(unsigned char c) { return c >= '0' && c <= '9'; }
+
 static int dbus_utf8_walk(const unsigned char *s, long n)
 {
         return dbus_wire_utf8_valid(s, n);

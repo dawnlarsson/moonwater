@@ -25,7 +25,13 @@
 #ifndef MOONWATER_NET_ASN1_DER_H
 #define MOONWATER_NET_ASN1_DER_H
 
-#if defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && \
+#ifdef STANDARD_MODERN_C
+typedef p8  der_u8;
+typedef p32 der_u32;
+typedef b32 der_i32;
+typedef p64 der_u64;
+typedef b64 der_i64;
+#elif defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && \
     defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
 typedef __UINT8_TYPE__  der_u8;
 typedef __UINT32_TYPE__ der_u32;

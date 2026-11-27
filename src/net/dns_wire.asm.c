@@ -17,7 +17,13 @@
 #ifndef MOONWATER_NET_DNS_WIRE_H
 #define MOONWATER_NET_DNS_WIRE_H
 
-#if defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && \
+#ifdef STANDARD_MODERN_C
+typedef p8  dw_u8;
+typedef p32 dw_u32;
+typedef b32 dw_i32;
+typedef p64 dw_u64;
+typedef b64 dw_i64;
+#elif defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && \
     defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
 typedef __UINT8_TYPE__  dw_u8;
 typedef __UINT32_TYPE__ dw_u32;

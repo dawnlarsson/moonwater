@@ -205,6 +205,7 @@ _Static_assert(sizeof(struct xwm_utf8_cut) == 8 && XWM_OFF(struct xwm_utf8_cut, 
 /* ---- byte helpers ---- */
 
 XWM_API unsigned int xwm_get16(const unsigned char *p) { return (unsigned int)p[0] | ((unsigned int)p[1] << 8); }
+static int xwm_get_i16(const unsigned char *p) { return (short)xwm_get16(p); }
 XWM_API unsigned int xwm_get32(const unsigned char *p) { return xwm_get16(p) | (xwm_get16(p + 2) << 16); }
 static void xwm_put16(unsigned char *p, unsigned int v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
 XWM_API void xwm_put32(unsigned char *p, unsigned int v) { xwm_put16(p, v); xwm_put16(p + 2, v >> 16); }

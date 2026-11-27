@@ -19,7 +19,14 @@
 #ifndef MOONWATER_ROVER_EVAL_ASM_H
 #define MOONWATER_ROVER_EVAL_ASM_H
 
-#if defined(__UINT8_TYPE__) && defined(__UINT16_TYPE__) && defined(__UINT32_TYPE__) && \
+#ifdef STANDARD_MODERN_C
+typedef p8  rover_u8;
+typedef p16 rover_u16;
+typedef p32 rover_u32;
+typedef b32 rover_i32;
+typedef p64 rover_u64;
+typedef b64 rover_i64;
+#elif defined(__UINT8_TYPE__) && defined(__UINT16_TYPE__) && defined(__UINT32_TYPE__) && \
     defined(__INT32_TYPE__) && defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
 typedef __UINT8_TYPE__  rover_u8;
 typedef __UINT16_TYPE__ rover_u16;

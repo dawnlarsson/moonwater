@@ -26,7 +26,13 @@
 #ifndef MOONWATER_DBUS_WIRE_ASM_H
 #define MOONWATER_DBUS_WIRE_ASM_H
 
-#if defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
+#ifdef STANDARD_MODERN_C
+typedef p8  dbus_u8;
+typedef p32 dbus_u32;
+typedef b32 dbus_i32;
+typedef p64 dbus_u64;
+typedef b64 dbus_i64;
+#elif defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
 typedef __UINT8_TYPE__  dbus_u8;
 typedef __UINT32_TYPE__ dbus_u32;
 typedef __INT32_TYPE__  dbus_i32;

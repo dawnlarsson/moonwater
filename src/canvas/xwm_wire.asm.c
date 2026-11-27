@@ -32,7 +32,12 @@
 #ifndef MOONWATER_CANVAS_XWM_WIRE_ASM_H
 #define MOONWATER_CANVAS_XWM_WIRE_ASM_H
 
-#if defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
+#ifdef STANDARD_MODERN_C
+typedef p32 xwm_u32;
+typedef b32 xwm_i32;
+typedef p64 xwm_u64;
+typedef b64 xwm_i64;
+#elif defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
 typedef __UINT32_TYPE__ xwm_u32;
 typedef __INT32_TYPE__  xwm_i32;
 typedef __UINT64_TYPE__ xwm_u64;

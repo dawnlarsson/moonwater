@@ -17,7 +17,11 @@
 #ifndef MOONWATER_SH_SHELL_GLOB_H
 #define MOONWATER_SH_SHELL_GLOB_H
 
-#if defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__)
+#ifdef STANDARD_MODERN_C
+typedef p32 sh_glob_u32;
+typedef b32 sh_glob_i32;
+typedef p64 sh_glob_u64;
+#elif defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && defined(__UINT64_TYPE__)
 typedef __UINT32_TYPE__ sh_glob_u32;
 typedef __INT32_TYPE__  sh_glob_i32;
 typedef __UINT64_TYPE__ sh_glob_u64;

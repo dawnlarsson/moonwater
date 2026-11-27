@@ -26,7 +26,13 @@
 #ifndef MOONWATER_NET_HTTP_PARSE_H
 #define MOONWATER_NET_HTTP_PARSE_H
 
-#if defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && \
+#ifdef STANDARD_MODERN_C
+typedef p8  hp_u8;
+typedef p32 hp_u32;
+typedef b32 hp_i32;
+typedef p64 hp_u64;
+typedef b64 hp_i64;
+#elif defined(__UINT8_TYPE__) && defined(__UINT32_TYPE__) && defined(__INT32_TYPE__) && \
     defined(__UINT64_TYPE__) && defined(__INT64_TYPE__)
 typedef __UINT8_TYPE__  hp_u8;
 typedef __UINT32_TYPE__ hp_u32;
