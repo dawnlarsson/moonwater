@@ -926,9 +926,7 @@ static positive compositor_flip_wait(positive now);
 */
 static positive compositor_frame_dated(positive last, positive period, positive stamp)
 {
-        positive due = last + period;
-
-        return last && period && stamp >= due && stamp - due < period ? due : stamp;
+        return prows_frame_dated(last, period, stamp);
 }
 
 /*
@@ -1003,27 +1001,22 @@ static void compositor_late_reset(void)
         compositor_late.composed = compositor_late.direct = (struct compositor_lead_step){0, 0, 0};
 }
 
+_Static_assert(sizeof(struct compositor_lead_step) == sizeof(struct prows_lead_step), "lead_step size");
+_Static_assert(sizeof(compositor_late) == sizeof(struct prows_late_state), "compositor_late size");
+_Static_assert(PROWS_LEAD_SPARE == COMPOSITOR_LEAD_SPARE && PROWS_LEAD_CALM == COMPOSITOR_LEAD_CALM &&
+               PROWS_LEAD_CALM_MOST == COMPOSITOR_LEAD_CALM_MOST && PROWS_LEAD_IDLE_NS == COMPOSITOR_LEAD_IDLE_NS &&
+               PROWS_LEAD_WARM == COMPOSITOR_LEAD_WARM, "prows lead constants");
+
 static positive compositor_present_due(positive presented, positive period, positive vblank, positive lead, positive now)
 {
-        positive due = now - presented < period ? presented + period : now, late, least;
-
-        if (!lead || !period || lead >= period || !vblank || now < vblank || now - vblank >= period)
-                return due;
-        late = vblank + period - lead;
-        late = now > late ? now : late;
-        least = presented + period / 2;
-        return late > least ? late : least;
+        return prows_present_due(presented, period, vblank, lead, now);
 }
 
 // What a present is given before its vblank: the longest of the last presents timed (worst), half as much again, a millisecond, and what
 // misses widened it by. 0 (the old rule) when that does not fit in the period, with fewer than four presents timed, or with no period.
 static positive compositor_lead_of(positive worst, unsigned int timed, positive widen, positive period)
 {
-        positive lead = worst + worst / 2 + COMPOSITOR_LEAD_SPARE + widen;
-
-        if (timed < 4 || !period || widen >= period || lead >= period)
-                return 0;
-        return lead;
+        return prows_lead_of(worst, timed, widen, period);
 }
 
 static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
@@ -1047,34 +1040,7 @@ static void compositor_late_begin(positive lead, positive stamp)
 // the first flips after an idle gap is counted and widens nothing.
 static void compositor_late_landed(positive when)
 {
-        struct compositor_lead_step *step = compositor_late.aimed_direct ? &compositor_late.direct : &compositor_late.composed;
-        unsigned int need = step->calm_need ? step->calm_need : COMPOSITOR_LEAD_CALM;
-
-        if (compositor_late.landed && when > compositor_late.landed && when - compositor_late.landed >= COMPOSITOR_LEAD_IDLE_NS)
-                compositor_late.warm = 0;
-        compositor_late.landed = when;
-        if (compositor_late.aim && when > compositor_late.aim && when - compositor_late.aim >= compositor.period / 2)
-        {
-                compositor_late.missed++;
-                if (compositor_late.warm >= COMPOSITOR_LEAD_WARM)
-                {
-                        step->calm = 0;
-                        if (!step->widen)
-                                step->widen = compositor.period / 4;
-                        else
-                                step->widen = compositor.period, step->calm_need = need * 2 < COMPOSITOR_LEAD_CALM_MOST ? need * 2 : COMPOSITOR_LEAD_CALM_MOST;
-                }
-        }
-        else if (step->widen && ++step->calm >= need)
-        {
-                step->calm = 0;
-                if (step->widen >= compositor.period)
-                        step->widen = compositor.period / 4;
-                else
-                        step->widen = 0, step->calm_need = 0;
-        }
-        compositor_late.warm += compositor_late.warm < COMPOSITOR_LEAD_WARM;
-        compositor_late.aim = 0;
+        prows_late_landed((struct prows_late_state *)(void *)&compositor_late, when, compositor.period);
 }
 
 static positive compositor_flip_wait(positive now)

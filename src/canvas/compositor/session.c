@@ -1850,21 +1850,7 @@ static void compositor_door_misc(unsigned int asked)
 // A queued slot taken out of the queue, its bit cleared by this thread alone; -1 when there is none.
 HOT static long compositor_door_next(void)
 {
-        for (unsigned int k = 0, walked = rows_walked(); k < walked; k++)
-        {
-                unsigned int w = rows_walk(k);
-                unsigned long long word = __atomic_load_n(&compositor_doors.queued.word[w], __ATOMIC_ACQUIRE);
-
-                while (word)
-                {
-                        unsigned long long bit = word & (0ull - word);
-
-                        if (__atomic_fetch_and(&compositor_doors.queued.word[w], ~bit, __ATOMIC_ACQ_REL) & bit)
-                                return (long)w * 64 + (long)rows_ctz64(bit);
-                        word = __atomic_load_n(&compositor_doors.queued.word[w], __ATOMIC_ACQUIRE);
-                }
-        }
-        return -1;
+        return (long)prows_door_next(compositor_doors.queued.word, compositor_rows_words(), COMPOSITOR_ROW_WORDS - 1);
 }
 
 // A door thread: a kick is a slot queued; the slot taken whole, its asks worked until none is left, and it is let go.

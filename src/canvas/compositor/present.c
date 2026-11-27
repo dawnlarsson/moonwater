@@ -273,15 +273,7 @@ static void compositor_metric_note(unsigned long long nanoseconds)
 // The worst of the last `last` times of a ring (at: its next slot; count: the times it was given, of which it holds WINDOWS_METRIC_RUN at the most).
 static positive compositor_metric_worst(const unsigned long long *ring, unsigned int at, unsigned int count, unsigned int last)
 {
-        positive worst = 0;
-
-        for (unsigned int back = 1; back <= last && back <= count && back <= WINDOWS_METRIC_RUN; back++)
-        {
-                positive time = ring[(at + WINDOWS_METRIC_RUN - back) % WINDOWS_METRIC_RUN];
-
-                worst = time > worst ? time : worst;
-        }
-        return worst;
+        return prows_metric_worst(ring, WINDOWS_METRIC_RUN, at, count, last);
 }
 
 /*
@@ -307,14 +299,7 @@ HOT static positive compositor_present_lead(void)
         }
         if (compositor_metric_worst_dirty)
         {
-                if (compositor_metric_paths_count)
-                {
-                        unsigned int mask = compositor_metric_paths_count >= 32u ? ~0u : (1u << compositor_metric_paths_count) - 1u;
-                        unsigned int v = compositor_metric_paths & mask;
-                        v -= (v >> 1) & 0x55555555u;
-                        v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
-                        cards = (((v + (v >> 4)) & 0x0f0f0f0fu) * 0x01010101u) >> 24;
-                }
+                cards = prows_popcount_mask(compositor_metric_paths, compositor_metric_paths_count);
                 processors = compositor_metric_paths_count - cards;
                 worst = compositor_metric_worst(compositor_metric_card, compositor_metric_card_at, compositor_metric_card_count, cards);
                 worst_processor = compositor_metric_worst(compositor_metric_processor, compositor_metric_processor_at, compositor_metric_processor_count, processors);
@@ -350,16 +335,14 @@ static int compositor_tearing(void)
 // before that one (half a period without a lead), so a frame that came early waits there and its next callback with it.
 static positive compositor_present_at(int tearing, positive lead, positive now)
 {
-        positive due, slot;
+        positive due;
 
         if (tearing)
                 return now;
         due = compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, now);
-        if (compositor_cadence.k < 2 || compositor.direct_row < 0 || compositor.flip_row != compositor.direct_row || !compositor.flip_when ||
-            !compositor.period)
+        if (compositor.direct_row < 0 || compositor.flip_row != compositor.direct_row)
                 return due;
-        slot = compositor.flip_when + compositor_cadence.k * compositor.period - (lead && lead < compositor.period ? lead : compositor.period / 2);
-        return slot > due ? slot : due;
+        return prows_cadence_slot(due, compositor.flip_when, compositor.period, lead, compositor_cadence.k);
 }
 
 /*

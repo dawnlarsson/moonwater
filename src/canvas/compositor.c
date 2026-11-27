@@ -456,56 +456,33 @@ static inline INLINE void rows_add_atomic(struct compositor_rows *s, long at) { 
 static inline INLINE PURE unsigned long long rows_low(const struct compositor_rows *s) { return s->word[0]; }
 static inline INLINE CONST struct compositor_rows rows_from(unsigned long long low) { struct compositor_rows s = {{0}}; s.word[0] = low; return s; }
 
+#define COMPOSITOR_PACING_ROWS_ASM_IMPLEMENTATION
+#include "compositor/pacing_rows.asm.c"
+
 static inline INLINE PURE int rows_next(const struct compositor_rows *s, int from)
 {
-        unsigned int limit = compositor_rows_in_use, n = compositor_rows_words(), wi;
-        unsigned long long w;
-
-        if (from < 0)
-                from = 0;
-        if ((unsigned int)from >= limit)
-                return -1;
-        wi = (unsigned int)from >> 6;
-        w = s->word[wi] & (~0ULL << ((unsigned int)from & 63u));
-        for (;;)
-        {
-                if (w)
-                {
-                        unsigned int idx = (wi << 6) + rows_ctz64(w);
-                        return idx < limit ? (int)idx : -1;
-                }
-                if (++wi >= n)
-                        return -1;
-                w = s->word[wi];
-        }
+        return (int)prows_next(s->word, compositor_rows_words(), compositor_rows_in_use, from);
 }
 
 static inline INLINE void rows_take(struct compositor_rows *restrict into, struct compositor_rows *restrict from)
 {
-        for (unsigned int k = 0, n = rows_walked(), w; k < n; k++)
-                w = rows_walk(k), into->word[w] = from->word[w] ? __atomic_exchange_n(&from->word[w], 0ULL, __ATOMIC_ACQ_REL) : 0;
+        prows_take(into->word, from->word, compositor_rows_words(), COMPOSITOR_ROW_WORDS - 1);
 }
 static inline INLINE PURE int rows_any(const struct compositor_rows *s)
 {
-        unsigned int n = compositor_rows_words();
-        unsigned long long acc = s->word[COMPOSITOR_ROW_WORDS - 1];
-        for (unsigned int w = 0; w < n; w++)
-                acc |= s->word[w];
-        return acc != 0;
+        return (int)prows_any(s->word, compositor_rows_words(), COMPOSITOR_ROW_WORDS - 1);
 }
 static inline INLINE void rows_none(struct compositor_rows *s)
 {
-        unsigned int n = compositor_rows_words();
-        for (unsigned int w = 0; w < n; w++) s->word[w] = 0;
-        s->word[COMPOSITOR_ROW_WORDS - 1] = 0;
+        prows_none(s->word, compositor_rows_words(), COMPOSITOR_ROW_WORDS - 1);
 }
 static inline INLINE void rows_or(struct compositor_rows *restrict into, const struct compositor_rows *restrict with)
 {
-        for (unsigned int k = 0, n = rows_walked(), w; k < n; k++) w = rows_walk(k), into->word[w] |= with->word[w];
+        prows_or(into->word, with->word, compositor_rows_words(), COMPOSITOR_ROW_WORDS - 1);
 }
 static inline INLINE void rows_and_not(struct compositor_rows *restrict into, const struct compositor_rows *restrict without)
 {
-        for (unsigned int k = 0, n = rows_walked(), w; k < n; k++) w = rows_walk(k), into->word[w] &= ~without->word[w];
+        prows_and_not(into->word, without->word, compositor_rows_words(), COMPOSITOR_ROW_WORDS - 1);
 }
 
 struct compositor_poll { int handle; short events, returned; };
