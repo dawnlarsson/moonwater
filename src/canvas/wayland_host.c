@@ -5125,7 +5125,10 @@ static void compositor_wl_direct_make(void)
                 return;
         if (compositor_wl_locked())
         {
-                int row = compositor_wl.hold_row;
+                int row = compositor_wl.hold_row, menu[4];
+
+                if (compositor_scenes_shown() || compositor_wall_editing() || taskbar_menu_rect(menu) || taskbar_globe_held())
+                        return;
 
                 slot = wayland_pointer_direct(row, compositor_wl_direct.relative, &compositor_wl_direct.relatives,
                                               compositor_wl_direct.frames, &compositor_wl_direct.framed, COMPOSITOR_WL_DIRECT_IDS,
@@ -5256,8 +5259,11 @@ static void compositor_wl_focus_name(void)
 
 static void compositor_wl_direct_publish(void)
 {
-        int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, ov, keys_to;
-        unsigned int mods, keys_any = 0, dirty = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
+        int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, ov, keys_to, menu[4];
+        unsigned int ui_mask = (compositor.scenes.open ? 1u : 0u) | (compositor_scenes_shown() ? 2u : 0u) |
+                               (compositor_wall_editing() ? 4u : 0u) | (taskbar_menu_rect(menu) ? 8u : 0u) |
+                               (taskbar_globe_held() ? 16u : 0u);
+        unsigned int mods, keys_any = 0, dirty = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (ui_mask << 24) ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
 
         if (!compositor_reader.on)
                 return;
@@ -6007,8 +6013,10 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
 */
 static int compositor_wl_pointer_row(void)
 {
-        int tab, row;
+        int tab, row, menu[4];
 
+        if (compositor_scenes_shown() || compositor_wall_editing() || taskbar_menu_rect(menu) || taskbar_globe_held())
+                return -1;
         // A pointer locked to a window is over that window, and stays where it was locked: no other window can be under it, so it is not looked
         // for (compositor_under, which walks the band's tree for a tab first: a third of a game's every report on hasty-tail, 8000 a second).
         if (compositor_wl.hold == 1 && compositor_wl.hold_row >= 0 && compositor.grab < 0 && compositor.drag < 0 && compositor.resize < 0 &&
@@ -6236,9 +6244,13 @@ static void compositor_wl_wake(void)
         // as on X11), and taken again when it closes.
         if (compositor.table)
         {
-                int keys = compositor_wl_key_row();
+                int keys = compositor_wl_key_row(), menu[4];
+                int unhold_row = keys >= 0 ? keys : compositor_wl.hold_row;
+                int unhold = unhold_row >= 0 && (compositor_scenes_shown() || compositor_wall_editing() ||
+                                                 taskbar_menu_rect(menu) || taskbar_globe_held() ||
+                                                 (keys >= 0 && compositor_input_override_query(keys) == 2));
 
-                wayland_unhold_row(keys >= 0 && (compositor_scenes_shown() || compositor_input_override_query(keys) == 2) ? keys : -1);
+                wayland_unhold_row(unhold ? unhold_row : -1);
         }
         if (stats.rows > 0 || stats.clients > 0)
         {

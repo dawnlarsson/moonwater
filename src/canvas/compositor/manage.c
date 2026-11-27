@@ -331,8 +331,9 @@ static int compositor_under(int x, int y, int *tab)
 {
         const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
         positive reach, count = compositor.stacked;
+        int menu[4];
 
-        if (compositor_scenes_point(x, y) || compositor_wall_editor_point(x, y))
+        if (compositor_scenes_point(x, y) || compositor_wall_editor_point(x, y) || taskbar_menu_rect(menu))
         {
                 *tab = TASKBAR_HIT_NONE;
                 return COMPOSITOR_NONE;
