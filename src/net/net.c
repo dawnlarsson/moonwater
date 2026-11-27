@@ -1563,35 +1563,14 @@ static COLD bipolar netlink_leases_on(b32 handle,
         marks a compression pointer, so a longer one would be unreadable
         rather than merely unusual -- and the whole name may not exceed 255.
 */
+#define NET_DNS_WIRE_IMPLEMENTATION
+#include "dns_wire.asm.c"
+_Static_assert(sizeof(positive) == sizeof(dw_u64), "positive must be 8 bytes for dns_wire");
+_Static_assert(sizeof(bipolar) == sizeof(dw_i64), "bipolar must be 8 bytes for dns_wire");
+
 static COLD bipolar dns_write_name(p8 address_to into, positive room, string_address name)
 {
-        positive used = 0;
-        positive mark;
-        positive length;
-
-        while (string_get(name))
-        {
-                string_address dot = string_first_of_or_end(name, '.');
-
-                mark = used++;
-                length = (positive)(dot - name);
-
-                if (used >= room || !length || length > 63 ||
-                    length > room - used)
-                        return DNS_MALFORMED;
-
-                memory_copy_apart(into + used, name, length);
-                into[mark] = (p8)length;
-                used += length;
-                name = dot + string_is(dot, '.');
-        }
-
-        if (used + 1 > room || used + 1 > DNS_NAME_MAX)
-                return DNS_MALFORMED;
-
-        into[used++] = 0;
-
-        return (bipolar)used;
+        return (bipolar)dns_wire_write_name(into, room, (const char *)name);
 }
 
 /*
@@ -1618,79 +1597,14 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive address_to ended,
                              positive address_to pointers)
 {
-        byte_reader reader = byte_reader_open(message, size);
-        byte_store name = {into, min(room, (positive)DNS_NAME_MAX), 0};
-        positive ceiling = size;
-        positive jumps = 0;
-
-        address_to ended = 0;
-        //      A name past the end fails at its first byte, below.
-        (void)byte_reader_skip(&reader, at);
-
-        for (;;)
-        {
-                positive here = ceiling - byte_reader_left(&reader);
-                p8 length = byte_reader_u8(&reader);
-                const p8 address_to label;
-
-                if (!byte_reader_ok(&reader))
-                        return DNS_MALFORMED;
-
-                if ((length & 0xc0) == 0xc0)
-                {
-                        positive target = (positive)(length & 0x3f) << 8 |
-                                          byte_reader_u8(&reader);
-
-                        if (!byte_reader_ok(&reader))
-                                return DNS_MALFORMED;
-
-                        if (!address_to ended)
-                                address_to ended = here + 2;
-
-                        if (target >= here || ++jumps > DNS_POINTER_HOPS)
-                                return DNS_MALFORMED;
-
-                        //      The name goes on at the target, which may
-                        //      read nothing at or past the pointer.
-                        ceiling = here;
-                        reader = byte_reader_open(message, ceiling);
-                        (void)byte_reader_skip(&reader, target);
-                        continue;
-                }
-
-                label = byte_reader_take(&reader, length);
-                if (length & 0xc0 || !label ||
-                    !byte_store_append_exact(address_of name, address_of length,
-                                             1) ||
-                    !byte_store_append_exact(address_of name, (p8 address_to)label,
-                                             length))
-                        return DNS_MALFORMED;
-
-                if (!length)
-                {
-                        if (pointers)
-                        {
-                                if (address_to pointers < jumps)
-                                        return DNS_MALFORMED;
-                                address_to pointers -= jumps;
-                        }
-                        if (!address_to ended)
-                                address_to ended = ceiling -
-                                                   byte_reader_left(&reader);
-                        return (bipolar)name.used;
-                }
-        }
+        return (bipolar)dns_wire_copy_name(message, size, at, into, room,
+                                           ended, pointers);
 }
 
 //      Where a name ends, for a caller with no use for its spelling.
 static COLD bipolar dns_skip_name(p8 address_to message, positive size, positive at)
 {
-        p8 name[256];
-        positive ended;
-
-        return dns_copy_name(message, size, at, name, sizeof name,
-                             address_of ended, null) < 0
-                   ? DNS_MALFORMED : (bipolar)ended;
+        return (bipolar)dns_wire_skip_name(message, size, at);
 }
 
 //      A reader on the message, at a name or a record that a name's end
@@ -1837,20 +1751,8 @@ static COLD bool dns_reply_identity(
     p8 address_to reply, positive size, p16 id,
     p8 address_to request, positive question_length, bool folded)
 {
-        byte_reader reader = byte_reader_open(reply, size);
-        p16 asked = (p16)byte_reader_uint(&reader, 2, true);
-        p16 questions;
-        const p8 address_to question;
-
-        (void)byte_reader_skip(&reader, 2);
-        questions = (p16)byte_reader_uint(&reader, 2, true);
-        (void)byte_reader_skip(&reader, 6);
-        question = byte_reader_take(&reader, question_length);
-        return byte_reader_ok(&reader) && asked == id && questions == 1 &&
-               !(folded ? memory_compare_ascii_case(question, request + DNS_HEADER,
-                                                    question_length)
-                        : memory_compare(question, request + DNS_HEADER,
-                                         question_length));
+        return dns_wire_reply_identity(reply, size, id, request,
+                                       question_length, folded ? 1u : 0u) != 0;
 }
 
 /* Walk every declared resource record, including sections this IPv4 resolver
@@ -1859,29 +1761,8 @@ static COLD bool dns_reply_identity(
 static COLD bipolar dns_records_end(p8 address_to message, positive size,
                                positive at, positive count)
 {
-        positive pointers = DNS_WORK_POINTERS;
-
-        for (positive record = 0; record < count; record++)
-        {
-                p8 owner[256];
-                positive ended;
-                bipolar length = dns_copy_name(message, size, at, owner,
-                                                sizeof owner, address_of ended,
-                                                address_of pointers);
-                byte_reader tail;
-
-                if (length < 0)
-                        return DNS_MALFORMED;
-                //      The type, class and time to live, then the data
-                //      behind its length.
-                tail = dns_message_at(message, size, (positive)ended);
-                (void)byte_reader_skip(&tail, 8);
-                (void)byte_reader_vector16(&tail);
-                if (!byte_reader_ok(&tail))
-                        return DNS_MALFORMED;
-                at = size - byte_reader_left(&tail);
-        }
-        return (bipolar)at;
+        return (bipolar)dns_wire_records_end(message, size, at, count,
+                                             DNS_WORK_POINTERS);
 }
 
 /* UDP and TCP answers pass through the same response, rcode and record

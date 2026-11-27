@@ -2015,9 +2015,9 @@ static positive discovery_mdns_name(const p8 address_to packet, positive length,
                                    positive address_to steps)
 {
         positive ended;
-        bipolar used = dns_copy_name((p8 address_to)packet, length, at, into,
-                                     DISCOVERY_MDNS_NAME_BYTES - 1, address_of ended,
-                                     steps);
+        bipolar used = (bipolar)dns_wire_copy_name(
+            packet, length, at, into, DISCOVERY_MDNS_NAME_BYTES - 1,
+            address_of ended, steps);
 
         if (used < 0)
                 return 0;

@@ -891,32 +891,7 @@ static bool ipp_mdns_split_instance(const p8 address_to name, positive len,
 static positive ipp_mdns_wire_to_host(const p8 address_to wire, positive len,
                                       p8 address_to out, positive room)
 {
-        positive at = 0, used = 0;
-
-        if (!out || !room)
-                return 0;
-        while (at < len)
-        {
-                p8 l = wire[at++];
-
-                if (!l)
-                        break;
-                if (l > 63 || l > len - at)
-                        return 0;
-                if (used)
-                {
-                        if (used + 1 >= room)
-                                return 0;
-                        out[used++] = '.';
-                }
-                if (l >= room - used)
-                        return 0;
-                memory_copy(out + used, wire + at, l);
-                used += l;
-                at += l;
-        }
-        out[used] = end;
-        return used;
+        return dns_wire_to_host(wire, len, out, room);
 }
 
 static fn ipp_mdns_parse_txt(const p8 address_to data, positive len,
@@ -1079,10 +1054,9 @@ static positive ipp_mdns_read(const p8 address_to packet, positive length,
         for (p32 q = 0; q < questions; q++)
         {
                 positive ended = 0;
-                bipolar nlen = dns_copy_name((p8 address_to)packet, length, at,
-                                             name, sizeof(name) - 1,
-                                             address_of ended,
-                                             address_of steps);
+                bipolar nlen = (bipolar)dns_wire_copy_name(
+                    packet, length, at, name, sizeof(name) - 1,
+                    address_of ended, address_of steps);
 
                 if (nlen < 0 || ended + 4 > length)
                         return 0;
@@ -1092,10 +1066,9 @@ static positive ipp_mdns_read(const p8 address_to packet, positive length,
         for (p32 r = 0; r < records; r++)
         {
                 positive ended = 0;
-                bipolar nlen = dns_copy_name((p8 address_to)packet, length, at,
-                                             name, sizeof(name) - 1,
-                                             address_of ended,
-                                             address_of steps);
+                bipolar nlen = (bipolar)dns_wire_copy_name(
+                    packet, length, at, name, sizeof(name) - 1,
+                    address_of ended, address_of steps);
                 p16 type, cls, rdlen;
                 p32 ttl;
                 positive rdata_at;
@@ -1124,8 +1097,8 @@ static positive ipp_mdns_read(const p8 address_to packet, positive length,
                         {
                                 p8 target[256], label[64];
                                 positive t_end = 0, label_len = 0;
-                                bipolar tlen = dns_copy_name(
-                                    (p8 address_to)packet, length, rdata_at,
+                                bipolar tlen = (bipolar)dns_wire_copy_name(
+                                    packet, length, rdata_at,
                                     target, sizeof(target) - 1,
                                     address_of t_end, address_of steps);
                                 bool target_tls = false;
@@ -1188,8 +1161,8 @@ static positive ipp_mdns_read(const p8 address_to packet, positive length,
                                     (p8 address_to)packet + rdata_at + 4);
                                 p8 target[256];
                                 positive t_end = 0;
-                                bipolar tlen = dns_copy_name(
-                                    (p8 address_to)packet, length, rdata_at + 6,
+                                bipolar tlen = (bipolar)dns_wire_copy_name(
+                                    packet, length, rdata_at + 6,
                                     target, sizeof(target) - 1,
                                     address_of t_end, address_of steps);
 
