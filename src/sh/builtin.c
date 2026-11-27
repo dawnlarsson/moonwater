@@ -14,6 +14,9 @@
 */
 
 #include "../lib.util.c"
+#include "shell_arith_test.asm.c"
+
+_Static_assert(sizeof(sh_at_i64) == sizeof(bipolar), "sh_at_i64 != bipolar");
 
 const positive page_size = 4096;
 
@@ -12880,84 +12883,8 @@ static inline INLINE HOT bool test_digits_compare(string_address left,
                                                   string_address right,
                                                   bipolar address_to cmp)
 {
-        string_address a;
-        string_address b;
-        string_address as;
-        string_address bs;
-        p8 ca;
-        p8 cb;
-        positive la;
-        positive lb;
-
-        if (!left || !right)
-                return false;
-
-        ca = string_get(left);
-        cb = string_get(right);
-        if ((p8)(ca - '0') > 9 || (p8)(cb - '0') > 9)
-                return false;
-
-        /* A loop counter and `[ 1 -eq 1 ]` are one or two bytes. Comparing
-           those as numbers through multiply is more work than the bytes. */
-        if (!string_get(left + 1) && !string_get(right + 1))
-        {
-                address_to cmp = ca < cb ? -1 : (ca > cb ? 1 : 0);
-                return true;
-        }
-
-        a = left;
-        b = right;
-        while (ca == '0' && (p8)(string_get(a + 1) - '0') <= 9)
-        {
-                a++;
-                ca = string_get(a);
-        }
-        while (cb == '0' && (p8)(string_get(b + 1) - '0') <= 9)
-        {
-                b++;
-                cb = string_get(b);
-        }
-
-        as = a;
-        do
-                a++;
-        while ((p8)(string_get(a) - '0') <= 9);
-        if (string_get(a))
-                return false;
-
-        bs = b;
-        do
-                b++;
-        while ((p8)(string_get(b) - '0') <= 9);
-        if (string_get(b))
-                return false;
-
-        la = (positive)(a - as);
-        lb = (positive)(b - bs);
-        if (la > 18 || lb > 18)
-                return false;
-
-        if (la != lb)
-        {
-                address_to cmp = la < lb ? -1 : 1;
-                return true;
-        }
-
-        while (as != a)
-        {
-                ca = string_get(as);
-                cb = string_get(bs);
-                if (ca != cb)
-                {
-                        address_to cmp = ca < cb ? -1 : 1;
-                        return true;
-                }
-                as++;
-                bs++;
-        }
-
-        address_to cmp = 0;
-        return true;
+        return sh_test_digits_compare((const char *)left,
+                                      (const char *)right, cmp) != 0;
 }
 
 //      bash's legal_number and dash's getn: strtoimax, blanks either side, and

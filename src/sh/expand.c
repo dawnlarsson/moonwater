@@ -19,6 +19,16 @@
 #define SH_SHELL_GLOB_IMPLEMENTATION
 #include "shell_glob.asm.c"
 #include "shell_escape.asm.c"
+#define SH_SHELL_ARITH_TEST_ASM_IMPLEMENTATION
+#include "shell_arith_test.asm.c"
+
+_Static_assert(sizeof(sh_at_u64) == sizeof(positive), "sh_at_u64 != positive");
+_Static_assert(sizeof(sh_at_i64) == sizeof(bipolar), "sh_at_i64 != bipolar");
+_Static_assert(SH_ARITH_PREC_NONE == 0 && SH_ARITH_PREC_OR_OR == 1 &&
+               SH_ARITH_PREC_AND_AND == 2 && SH_ARITH_PREC_MUL == 10,
+               "SH_ARITH_PREC_* mismatch");
+_Static_assert(SH_BRACKET_EOF == 0 && SH_BRACKET_FOUND == 1 &&
+               SH_BRACKET_QUOTED == 2, "SH_BRACKET_* mismatch");
 
 /*
         What the files beside this one own.
@@ -3676,8 +3686,6 @@ static CONST bipolar arith_product(bipolar left, bipolar right)
 */
 static bipolar arith_power_of(bipolar base, bipolar exponent)
 {
-        bipolar value = 1;
-
         if (!arith_active)
                 return 0;
 
@@ -3687,18 +3695,7 @@ static bipolar arith_power_of(bipolar base, bipolar exponent)
                 return 0;
         }
 
-        while (exponent)
-        {
-                if (exponent & 1)
-                        value = arith_product(value, base);
-
-                exponent = (bipolar)((positive)exponent >> 1);
-
-                if (exponent)
-                        base = arith_product(base, base);
-        }
-
-        return value;
+        return sh_arith_power_of(base, exponent);
 }
 
 static CONST bipolar arith_shift_left(bipolar left, bipolar right)
@@ -4118,46 +4115,9 @@ static bipolar arith_power()
         and the bytes it takes; a level of nought where it does not. An
         operator followed by = is the assignment's, <<= and >>= too.
 */
-static positive arith_operator(p8 op, p8 next, positive address_to width)
+static inline INLINE HOT positive arith_operator(positive address_to width)
 {
-        *width = 1;
-
-        switch (op)
-        {
-        case '*': case '/': case '%':
-                return next != '=' ? 10 : 0;
-        case '+': case '-':
-                return next != '=' ? 9 : 0;
-        case '<': case '>':
-                if (next == op)
-                {
-                        *width = 2;
-                        return string_is(arith_at + 2, '=') ? 0 : 8;
-                }
-                *width = next == '=' ? 2 : 1;
-                return 7;
-        case '=': case '!':
-                *width = 2;
-                return next == '=' ? 6 : 0;
-        case '&':
-                if (next == '&')
-                {
-                        *width = 2;
-                        return 2;
-                }
-                return next != '=' ? 5 : 0;
-        case '^':
-                return next != '=' ? 4 : 0;
-        case '|':
-                if (next == '|')
-                {
-                        *width = 2;
-                        return 1;
-                }
-                return next != '=' ? 3 : 0;
-        }
-
-        return 0;
+        return sh_arith_operator((const char *)arith_at, width);
 }
 
 /*
@@ -4180,7 +4140,7 @@ static bipolar arith_binary(positive floor)
                 p8 op = string_get(arith_at);
                 p8 next = op ? string_get(arith_at + 1) : 0;
                 positive width;
-                positive level = arith_operator(op, next, address_of width);
+                positive level = arith_operator(address_of width);
 
                 if (level < floor || !level)
                         return value;
@@ -4930,41 +4890,17 @@ static inline INLINE HOT PURE string_address expand_bracket_end_mode(
         string_address at, p8 open, p8 close, bool posix_double,
         bool parameter)
 {
-        string_address start = at;
-        positive depth = 1;
-        bool dollar_brace = parameter && open == '{';
-        const b8 address_to plain = expand_bracket_plain(open, close,
-                                                         dollar_brace);
+        const char *found = null;
+        sh_at_i32 hit = sh_expand_bracket_end_fast(
+            (const char *)at, (sh_at_u32)open, (sh_at_u32)close,
+            (sh_at_u32)(parameter && open == '{'), address_of found);
 
-        while (1)
-        {
-                p8 value;
-
-                if (plain)
-                        at += string_span(at, plain);
-                value = string_get(at);
-
-                if (value == close)
-                {
-                        if (!--depth)
-                                return at;
-                }
-                else if (!value)
-                        return null;
-                else if (value == '\'' || value == '"' || value == '\\' ||
-                         value == '$' ||
-                         (dollar_brace &&
-                          (value == '`' ||
-                           ((value == '<' || value == '>') &&
-                            string_is(at + 1, '(')))))
-                        return expand_bracket_end_quoted(start, open, close,
-                                                        posix_double,
-                                                        parameter);
-                else if (value == open && !dollar_brace)
-                        depth++;
-
-                at++;
-        }
+        if (hit == SH_BRACKET_FOUND)
+                return (string_address)found;
+        if (hit == SH_BRACKET_QUOTED)
+                return expand_bracket_end_quoted(at, open, close,
+                                                 posix_double, parameter);
+        return null;
 }
 
 static PURE string_address expand_bracket_end(string_address at, p8 open,
