@@ -4241,6 +4241,8 @@ static void compositor_swipe_hand(unsigned int at, positive now, const struct ui
                 compositor.screen_touch[at].was[compositor.swipe.slot] = -1;
         memory_copy(&report, frame, sizeof(report));
         compositor_touch_feed(at, now, &compositor.swipe.landing, &report);
+        if (at < COMPOSITOR_INPUTS && compositor.swipe.slot >= 0 && compositor.swipe.slot < UI_TOUCH_SLOTS)
+                compositor.screen_touch[at].was[compositor.swipe.slot] = compositor.screen_touch[at].id[compositor.swipe.slot];
 }
 
 static void compositor_swipe_act(unsigned int at, positive now, const struct ui_touch_frame *frame)

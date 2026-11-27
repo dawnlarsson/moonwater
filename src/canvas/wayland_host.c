@@ -5165,9 +5165,13 @@ static void compositor_wl_direct_keys_make(void)
         if (!compositor_reader.on || !compositor_wl.started || (row = compositor_wl_key_row()) < 0 || row != wayland.keyboard_row)
                 return;
         modifiers = compositor_modifiers();
-        if ((modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_ALTGR | WINDOW_KEY_SUPER)) || compositor.drag >= 0 || compositor.resize >= 0 ||
-            compositor.assist_armed || compositor.cycle)
-                return;
+        {
+                int menu[4];
+                if ((modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_ALTGR | WINDOW_KEY_SUPER)) || compositor.drag >= 0 || compositor.resize >= 0 ||
+                    compositor.assist_armed || compositor.cycle || compositor.scenes.open || compositor_wall_editing() ||
+                    taskbar_menu_rect(menu) || taskbar_globe_held())
+                        return;
+        }
         if (compositor.keys_to != row)
                 for (unsigned int k = 0; k < sizeof compositor.keys_down; k++)
                         if (compositor.keys_down[k])
