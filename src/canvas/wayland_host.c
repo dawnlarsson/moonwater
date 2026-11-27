@@ -7,6 +7,8 @@
 #define WAYLAND_HOST_INCLUDED
 
 #include "wayland_direct.asm.c"
+#define CANVAS_HTAB_ASM_IMPLEMENTATION
+#include "canvas_htab.asm.c"
 
 #define COMPOSITOR_WL_PATH "/run/moonwater/wayland-0"
 #define COMPOSITOR_WL_BACKLOG 16
@@ -233,28 +235,25 @@ static const struct wayland_host compositor_wl_host;
 
 /* ---- shared open-addressing hash index (used by wayland_host map_index [64-bit key] and xwm window_index/atom_index [32-bit key]) ---- */
 
-static unsigned long canvas_htab_key(const struct wayland_table *records, long slot, int key64)
-{
-        const void *p = records->at + (unsigned long)slot * records->unit;
+_Static_assert(sizeof(struct chtab_table) == sizeof(struct wayland_table), "chtab_table != wayland_table size");
+_Static_assert(CHTAB_OFFSET(struct chtab_table, at) == CHTAB_OFFSET(struct wayland_table, at) &&
+               CHTAB_OFFSET(struct chtab_table, unit) == CHTAB_OFFSET(struct wayland_table, unit) &&
+               CHTAB_OFFSET(struct chtab_table, count) == CHTAB_OFFSET(struct wayland_table, count),
+               "chtab_table != wayland_table offsets");
 
-        return key64 ? *(const volatile unsigned long *)p : (unsigned long)*(const unsigned int *)p;
+static inline unsigned long canvas_htab_key(const struct wayland_table *records, long slot, int key64)
+{
+        return (unsigned long)chtab_key((const struct chtab_table *)(const void *)records, (chtab_i64)slot, key64);
 }
 
-static unsigned long canvas_htab_hash(unsigned long key, long buckets, int key64)
+static inline unsigned long canvas_htab_hash(unsigned long key, long buckets, int key64)
 {
-        if (key64)
-                return ((key >> 12) * 0x9e3779b97f4a7c15ul >> 20) & (unsigned long)(buckets - 1);
-        return wayland_u32_hash((unsigned int)key, buckets);
+        return (unsigned long)chtab_hash((chtab_u64)key, (chtab_i64)buckets, key64);
 }
 
-static void canvas_htab_put(struct wayland_table *index, unsigned long key, long slot, int key64)
+static inline void canvas_htab_put(struct wayland_table *index, unsigned long key, long slot, int key64)
 {
-        unsigned int *bucket = (unsigned int *)(void *)index->at;
-        unsigned long b = canvas_htab_hash(key, index->count, key64);
-
-        while (bucket[b])
-                b = (b + 1) & (unsigned long)(index->count - 1);
-        bucket[b] = (unsigned int)(slot + 1);
+        chtab_put((struct chtab_table *)(void *)index, (chtab_u64)key, (chtab_i64)slot, key64);
 }
 
 static int canvas_htab_grow(struct wayland_table *index, const struct wayland_table *records, long used, long skip, int key64)
@@ -279,51 +278,22 @@ static int canvas_htab_grow(struct wayland_table *index, const struct wayland_ta
         return 1;
 }
 
-static long canvas_htab_find(const struct wayland_table *index, const struct wayland_table *records, unsigned long key,
-                             int first, unsigned long *at, int key64)
+static inline long canvas_htab_find(const struct wayland_table *index, const struct wayland_table *records, unsigned long key,
+                                    int first, unsigned long *at, int key64)
 {
-        long buckets = index->count, found = -1;
-        const unsigned int *bucket = (const unsigned int *)(const void *)index->at;
+        chtab_u64 pos = 0;
+        long slot = (long)chtab_find((const struct chtab_table *)(const void *)index,
+                                     (const struct chtab_table *)(const void *)records,
+                                     (chtab_u64)key, first, at ? &pos : 0, key64);
 
-        for (unsigned long b = buckets ? canvas_htab_hash(key, buckets, key64) : 0, n = 0; buckets && n < (unsigned long)buckets;
-             n++, b = (b + 1) & (unsigned long)(buckets - 1))
-        {
-                if (!bucket[b])
-                        return found;
-                if (canvas_htab_key(records, (long)bucket[b] - 1, key64) == key)
-                {
-                        long slot = (long)bucket[b] - 1;
-
-                        if (!first)
-                        {
-                                if (at)
-                                        *at = b;
-                                return slot;
-                        }
-                        if (found < 0 || slot < found)
-                                found = slot;
-                }
-        }
-        return found;
+        if (at && slot >= 0 && !first)
+                *at = (unsigned long)pos;
+        return slot;
 }
 
-static void canvas_htab_del(struct wayland_table *index, const struct wayland_table *records, unsigned long hole, int key64)
+static inline void canvas_htab_del(struct wayland_table *index, const struct wayland_table *records, unsigned long hole, int key64)
 {
-        long buckets = index->count;
-        unsigned int *bucket = (unsigned int *)(void *)index->at;
-
-        bucket[hole] = 0;
-        for (unsigned long b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
-        {
-                unsigned long home = canvas_htab_hash(canvas_htab_key(records, (long)bucket[b] - 1, key64), buckets, key64);
-
-                if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
-                {
-                        bucket[hole] = bucket[b];
-                        bucket[b] = 0;
-                        hole = b;
-                }
-        }
+        chtab_del((struct chtab_table *)(void *)index, (const struct chtab_table *)(const void *)records, (chtab_u64)hole, key64);
 }
 
 /*
