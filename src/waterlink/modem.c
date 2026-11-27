@@ -428,22 +428,15 @@ sized modem_encode(const p8 *key, sized klen, p32 seq, const p8 *payload, sized 
         return n;
 }
 
+#ifndef WATERLINK_MODEM_SYNC_ASM_IMPLEMENTATION
+#define WATERLINK_MODEM_SYNC_ASM_IMPLEMENTATION
+#endif
+#include "modem_sync.asm.c"
+
 /* Reads count bytes, least significant bit first, from the bit array at bit position p. */
 static int modem_read_bytes(const p8 *bits, sized nb, sized p, p8 *dst, sized count)
 {
-        sized i, j;
-
-        if (p > nb || count > (nb - p) / 8)
-                return 0;
-        for (i = 0; i < count; i++)
-        {
-                p8 v = 0;
-
-                for (j = 0; j < 8; j++)
-                        v |= (p8)(bits[p + 8 * i + j] << j);
-                dst[i] = v;
-        }
-        return 1;
+        return (int)modem_sync_read_bytes(bits, nb, p, dst, count);
 }
 
 /* Notes that the bits before bit are a frame the search refused, so a consumer of the capture may move past it. */
@@ -457,29 +450,18 @@ static void modem_cut(sized *cut_bit, sized bit)
    at many phases with the same bytes, and its tag is the same test at each: a frame whose bytes (length, sequence, payload
    and tag) are one already checked is taken from here, not by another HMAC. The key is the call's, so a verdict holds. */
 #define MODEM_MEMO 4
+#define MODEM_MEMO_STRIDE (MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG)
 typedef struct
 {
-        p8 frame[MODEM_MEMO][MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
-        sized total[MODEM_MEMO];
+        p8 frame[MODEM_MEMO][MODEM_MEMO_STRIDE];
+        ms_u64 total[MODEM_MEMO];
         unsigned count, next;
 } modem_memo;
 
 static int modem_memo_has(const modem_memo *m, const p8 *bytes, sized total)
 {
-        unsigned i;
-        sized t;
-
-        for (i = 0; i < m->count; i++) {
-                unsigned diff = 0;
-
-                if (m->total[i] != total)
-                        continue;
-                for (t = 0; t < total; t++)
-                        diff |= (unsigned)(m->frame[i][t] ^ bytes[t]);
-                if (!diff)
-                        return 1;
-        }
-        return 0;
+        return (int)modem_sync_memo_has(&m->frame[0][0], m->total, m->count,
+                                        MODEM_MEMO_STRIDE, bytes, total);
 }
 
 static void modem_memo_add(modem_memo *m, const p8 *bytes, sized total)
@@ -499,22 +481,21 @@ static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
                             p8 *out, sized cap, p32 *seq, int *refusal, int gated, p32 last, sized *end_bit, sized *cut_bit,
                             modem_memo *memo)
 {
-        p32 window = 0;
-        sized i;
+        sized start = 0;
 
-        if (nb < 32)
-                return -1;
-        for (i = 0; i < 32; i++)
-                window |= (p32)bits[i] << i;
-
-        for (i = 0;; i++)
+        for (;;)
         {
+                ms_i64 hit = modem_sync_find(bits, nb, start, MODEM_SYNC_WORD);
                 p8 buf[MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
                 p8 tag[MODEM_TAG];
-                sized len, p = i + 32, t;
+                sized i, len, p, t;
                 unsigned diff = 0;
 
-                if (window == MODEM_SYNC_WORD && modem_read_bytes(bits, nb, p, buf, MODEM_HDR))
+                if (hit < 0)
+                        return -1;
+                i = (sized)hit;
+                p = i + 32;
+                if (modem_read_bytes(bits, nb, p, buf, MODEM_HDR))
                 {
                         len = buf[0];
                         if (len <= MODEM_PAYLOAD_MAX && modem_read_bytes(bits, nb, p, buf, MODEM_HDR + len + MODEM_TAG))
@@ -551,11 +532,8 @@ static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
                                 }
                         }
                 }
-                if (p >= nb)
-                        break;
-                window = (window >> 1) | ((p32)bits[p] << 31);
+                start = i + 1;
         }
-        return -1;
 }
 
 /* The symbol decisions run through modem_tone_scan (lib.c) wherever lib.c is part of the build (MOONWATER_ASSEMBLY) or a
@@ -731,17 +709,12 @@ static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
            over a frame that comes earlier in time at another phase. A refused candidate at any phase is passed over, not
            the end of the search. */
         for (off = 0; off < MODEM_SYM; off++) {
-                sized nb = 0, at, endbit = 0, frame_end, cut_bit = 0;
+                sized nb, endbit = 0, frame_end, cut_bit = 0;
                 p8 cand[MODEM_PAYLOAD_MAX];
                 p32 cand_seq = 0;
                 int r;
 
-                for (at = off; at + MODEM_SYM <= n; at += MODEM_SYM) {
-                        unsigned j, v = modem_best[at];
-
-                        for (j = 0; j < MODEM_SYM_BITS; j++)
-                                modem_bits[nb++] = (p8)((v >> j) & 1);
-                }
+                nb = (sized)modem_sync_unpack(modem_best, n, off, MODEM_SYM, MODEM_SYM_BITS, modem_bits);
 
                 r = modem_find_frame(modem_bits, nb, mac, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit, &memo);
                 if (r < 0) {
