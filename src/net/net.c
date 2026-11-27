@@ -3134,69 +3134,11 @@ static bool crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
         return true;
 }
 
-/* The AES state and key are secret, so an ordinary S-box table exposes them
-   through the cache.  Invert in GF(2^8) with a fixed addition chain, then
-   apply the AES affine transform.  Every input follows the same operations
-   and addresses. */
-static p8 crypto_aes_field_multiply(p8 left, p8 right)
-{
-        p8 product = 0;
-        positive bit;
-
-        for (bit = 0; bit < 8; bit++)
-        {
-                p8 selected = (p8)(0 - (right & 1));
-                p8 high = left >> 7;
-
-                product ^= left & selected;
-                left = (p8)((left << 1) ^
-                            (0x1b & (p8)(0 - high)));
-                right >>= 1;
-        }
-
-        return product;
-}
-
-/* x^254, which is the inverse of x and 0 for 0: the addition chain both
-   S-boxes run, the same operations for every input. */
-static p8 crypto_aes_field_inverse(p8 value)
-{
-        p8 x2 = crypto_aes_field_multiply(value, value);
-        p8 x3 = crypto_aes_field_multiply(x2, value);
-        p8 x6 = crypto_aes_field_multiply(x3, x3);
-        p8 x12 = crypto_aes_field_multiply(x6, x6);
-        p8 x15 = crypto_aes_field_multiply(x12, x3);
-        p8 x30 = crypto_aes_field_multiply(x15, x15);
-        p8 x60 = crypto_aes_field_multiply(x30, x30);
-        p8 x120 = crypto_aes_field_multiply(x60, x60);
-        p8 x240 = crypto_aes_field_multiply(x120, x120);
-
-        return crypto_aes_field_multiply(
-            crypto_aes_field_multiply(x240, x12), x2);
-}
-
-static p8 crypto_aes_substitute(p8 value)
-{
-        p8 inverse = crypto_aes_field_inverse(value);
-
-        return (p8)(inverse ^
-                    ((inverse << 1) | (inverse >> 7)) ^
-                    ((inverse << 2) | (inverse >> 6)) ^
-                    ((inverse << 3) | (inverse >> 5)) ^
-                    ((inverse << 4) | (inverse >> 4)) ^ 0x63);
-}
-
-/* The inverse S-box: the affine transform undone, then the same inversion.
-   The state it runs on is a key being unwrapped, so no table indexed by it
-   either: the one a decrypt wants was built from the forward box and read
-   back by the secret itself. */
-static p8 crypto_aes_unsubstitute(p8 value)
-{
-        return crypto_aes_field_inverse(
-            (p8)(((value << 1) | (value >> 7)) ^
-                 ((value << 3) | (value >> 5)) ^
-                 ((value << 6) | (value >> 2)) ^ 0x05));
-}
+/* Constant-time AES-128, SIV doubling, and authenticator comparison in pure
+   assembly (zero S-box tables, zero secret-dependent branches). */
+#define NET_AES_CORE_ASM_IMPLEMENTATION
+#include "aes_core.asm.c"
+_Static_assert(sizeof(positive) == sizeof(ac_u64), "positive must be 8 bytes for aes_core");
 
 /* Two authenticators compared without telling the peer where they first
    differed.  memory_compare stops at the first differing byte, which turns a
@@ -3207,12 +3149,7 @@ static p8 crypto_aes_unsubstitute(p8 value)
 static bool crypto_same(const p8 address_to left, const p8 address_to right,
                         positive length)
 {
-        p8 diff = 0;
-
-        for (positive at = 0; at < length; at++)
-                diff |= (p8)(left[at] ^ right[at]);
-
-        return !diff;
+        return aes_core_ct_equal(left, right, length) != 0;
 }
 
 /* Unlike memory_fill alone, these stores cannot be discarded after the final
@@ -3230,97 +3167,14 @@ static fn crypto_forget(address_any secret, positive length)
 
 static fn crypto_aes128_expand(p8 address_to key, p8 address_to round)
 {
-        static const p8 rcon[10] = {0x01, 0x02, 0x04, 0x08, 0x10,
-                                    0x20, 0x40, 0x80, 0x1b, 0x36};
-        positive i;
-
-        memory_copy(round, key, 16);
-        for (i = 16; i < 176; i += 4)
-        {
-                p8 t0 = round[i - 4];
-                p8 t1 = round[i - 3];
-                p8 t2 = round[i - 2];
-                p8 t3 = round[i - 1];
-
-                if (i % 16 == 0)
-                {
-                        p8 k = t0;
-                        t0 = crypto_aes_substitute(t1) ^ rcon[i / 16 - 1];
-                        t1 = crypto_aes_substitute(t2);
-                        t2 = crypto_aes_substitute(t3);
-                        t3 = crypto_aes_substitute(k);
-                }
-
-                round[i] = round[i - 16] ^ t0;
-                round[i + 1] = round[i - 15] ^ t1;
-                round[i + 2] = round[i - 14] ^ t2;
-                round[i + 3] = round[i - 13] ^ t3;
-        }
-}
-
-/* One byte of InvMixColumns of a column. The matrix's four rows are the same
-   four coefficients rotated, so the row it is wanted for says where to start
-   reading them, and the multiply is the constant-time one the S-box runs in. */
-static p8 crypto_aes_unmix(const p8 address_to column, positive row)
-{
-        static const p8 factor[4] = {0x0e, 0x0b, 0x0d, 0x09};
-        p8 mixed = 0;
-
-        for (positive at = 0; at < 4; at++)
-                mixed ^= crypto_aes_field_multiply(
-                    column[at], factor[(4 + at - row) & 3]);
-
-        return mixed;
+        aes_core_128_expand(key, round);
 }
 
 /* One block back through the schedule crypto_aes128_expand made. */
 static fn crypto_aes128_decrypt(const p8 address_to round,
                                 const p8 address_to in, p8 address_to out)
 {
-        p8 state[16];
-        p8 hold[16];
-        positive step;
-        positive at;
-        positive row;
-        p8 temp;
-
-        memory_copy(state, in, 16);
-        for (at = 0; at < 16; at++)
-                state[at] ^= round[160 + at];
-
-        /* The last round is every other round without InvMixColumns, so the
-           loop runs once more and leaves from the middle rather than
-           repeating its first three steps underneath itself. */
-        for (step = 9;; step--)
-        {
-                //      InvShiftRows: row r of the state -- the bytes r, r+4,
-                //      r+8 and r+12 -- rotates right by r.
-                for (row = 1; row < 4; row++)
-                        for (positive turn = 0; turn < row; turn++)
-                        {
-                                temp = state[row + 12];
-                                state[row + 12] = state[row + 8];
-                                state[row + 8] = state[row + 4];
-                                state[row + 4] = state[row];
-                                state[row] = temp;
-                        }
-
-                for (at = 0; at < 16; at++)
-                        state[at] = crypto_aes_unsubstitute(state[at]) ^
-                                    round[step * 16 + at];
-                if (!step)
-                        break;
-
-                memory_copy(hold, state, 16);
-                for (positive column = 0; column < 4; column++)
-                        for (row = 0; row < 4; row++)
-                                state[column * 4 + row] =
-                                    crypto_aes_unmix(hold + column * 4, row);
-        }
-
-        memory_copy(out, state, 16);
-        crypto_forget(state, sizeof(state));
-        crypto_forget(hold, sizeof(hold));
+        aes_core_128_decrypt(round, in, out);
 }
 
 /*
@@ -3553,11 +3407,7 @@ typedef struct
 //      Multiplication by x in GF(2^128) (RFC 5297 2.3, RFC 4493 2.3).
 static fn crypto_siv_double(p8 address_to block)
 {
-        p8 carry = (p8)(block[0] >> 7);
-
-        for (positive at = 0; at < 15; at++)
-                block[at] = (p8)((block[at] << 1) | (block[at + 1] >> 7));
-        block[15] = (p8)((block[15] << 1) ^ (0x87 & (p8)(0 - carry)));
+        aes_core_siv_double(block);
 }
 
 static fn crypto_cmac_prepare(crypto_cmac_key address_to key,
