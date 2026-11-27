@@ -23,6 +23,13 @@ static bipolar net_resolve_v4_apart(string_address name, p32 address_to found,
 #include "../net/wait.c"
 #endif
 
+#define SH_SHELL_DIFF_ASM_IMPLEMENTATION
+#include "shell_diff.asm.c"
+
+_Static_assert(sizeof(b32) == sizeof(sh_diff_i32), "b32 must match sh_diff_i32");
+_Static_assert(sizeof(positive) == sizeof(sh_diff_u64), "positive must match sh_diff_u64");
+_Static_assert(sizeof(bipolar) == sizeof(sh_diff_i64), "bipolar must match sh_diff_i64");
+
 // The usage hint every coreutils complaint about a command line ends with.
 #define TOOLS_TRY(program) "Try '" program " --help' for more information.\n"
 
@@ -14315,63 +14322,21 @@ static positive diff_middle;
 static fn diff_meet(positive xoff, positive xlim, positive yoff, positive ylim,
                     positive address_to xmid, positive address_to ymid)
 {
-        b32 address_to xv = diff_files[0].kept;
-        b32 address_to yv = diff_files[1].kept;
-        bipolar low = (bipolar)xoff - (bipolar)ylim;
-        bipolar high = (bipolar)xlim - (bipolar)yoff;
-        bipolar front = (bipolar)xoff - (bipolar)yoff;
-        bipolar back = (bipolar)xlim - (bipolar)ylim;
-        bipolar first[2] = {front, back}, last[2] = {front, back};
-        b32 address_to frontier[2] = {diff_forward, diff_backward};
-        bool odd = (front - back) & 1;
-        positive shift = diff_middle;
-
-        diff_forward[shift + front] = (b32)xoff;
-        diff_backward[shift + back] = (b32)xlim;
-
-        for (;;)
-                for (positive reverse = 0; reverse < 2; reverse++)
-                {
-                        b32 address_to edge = frontier[reverse] + shift;
-                        b32 address_to other = frontier[1 - reverse] + shift;
-                        b32 outside = reverse ? 0x7fffffff : -1;
-                        bipolar step = reverse ? -1 : 1;
-
-                        if (first[reverse] > low)
-                                edge[--first[reverse] - 1] = outside;
-                        else
-                                first[reverse]++;
-                        if (last[reverse] < high)
-                                edge[++last[reverse] + 1] = outside;
-                        else
-                                last[reverse]--;
-
-                        for (bipolar d = last[reverse]; d >= first[reverse]; d -= 2)
-                        {
-                                bipolar lower = edge[d - 1], upper = edge[d + 1];
-                                bipolar x = reverse ? (lower < upper ? lower : upper - 1)
-                                                     : (lower < upper ? upper : lower + 1);
-                                bipolar y = x - d;
-
-                                while (reverse ? ((bipolar)xoff < x && (bipolar)yoff < y)
-                                               : (x < (bipolar)xlim && y < (bipolar)ylim))
-                                {
-                                        if (xv[x - reverse] != yv[y - reverse])
-                                                break;
-                                        x += step;
-                                        y += step;
-                                }
-                                edge[d] = (b32)x;
-                                if (odd != reverse && first[1 - reverse] <= d &&
-                                    d <= last[1 - reverse] &&
-                                    (reverse ? x <= other[d] : other[d] <= x))
-                                {
-                                        *xmid = (positive)x;
-                                        *ymid = (positive)y;
-                                        return;
-                                }
-                        }
-                }
+        struct sh_diff_req req = {
+                .xv = diff_files[0].kept,
+                .yv = diff_files[1].kept,
+                .fwd = diff_forward,
+                .bwd = diff_backward,
+                .shift = diff_middle,
+                .xoff = xoff,
+                .xlim = xlim,
+                .yoff = yoff,
+                .ylim = ylim,
+                .limit = 0,
+        };
+        sh_diff_meet(address_of req);
+        *xmid = req.xmid;
+        *ymid = req.ymid;
 }
 
 // The high half is looped rather than recursed, which is what keeps the
@@ -14383,17 +14348,20 @@ static fn diff_compare(positive xoff, positive xlim, positive yoff, positive yli
 
         while (1)
         {
-                while (xoff < xlim && yoff < ylim && xv[xoff] == yv[yoff])
-                {
-                        xoff++;
-                        yoff++;
-                }
+                positive span = xlim - xoff;
+                positive yspan = ylim - yoff;
 
-                while (xoff < xlim && yoff < ylim && xv[xlim - 1] == yv[ylim - 1])
-                {
-                        xlim--;
-                        ylim--;
-                }
+                if (yspan < span)
+                        span = yspan;
+
+                positive pre = sh_diff_common_prefix_u32(xv + xoff, yv + yoff, span);
+                xoff += pre;
+                yoff += pre;
+                span -= pre;
+
+                positive suf = sh_diff_common_suffix_u32(xv + xlim, yv + ylim, span);
+                xlim -= suf;
+                ylim -= suf;
 
                 if (xoff == xlim)
                 {
