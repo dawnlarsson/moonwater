@@ -2341,17 +2341,40 @@ struct compositor_shape
         const unsigned char *outer, *outer_right, *inner, *inner_right;
 };
 
+#define COMPOSITOR_SCENE_PLAN_ASM_IMPLEMENTATION
+#if defined(__has_include)
+# if __has_include("scene_plan.asm.c")
+#  include "scene_plan.asm.c"
+# elif __has_include("compositor/scene_plan.asm.c")
+#  include "compositor/scene_plan.asm.c"
+# else
+#  include "src/canvas/compositor/scene_plan.asm.c"
+# endif
+#else
+# include "scene_plan.asm.c"
+#endif
+
+_Static_assert(COMPOSITOR_RADIUS_MOST == SPLAN_RADIUS_MOST, "COMPOSITOR_RADIUS_MOST != SPLAN_RADIUS_MOST");
+_Static_assert(sizeof(struct compositor_shape) == sizeof(struct splan_shape), "compositor_shape != splan_shape size");
+_Static_assert(SPLAN_OFFSET(struct compositor_shape, x)           == SPLAN_OFFSET(struct splan_shape, x) &&
+               SPLAN_OFFSET(struct compositor_shape, r)           == SPLAN_OFFSET(struct splan_shape, r) &&
+               SPLAN_OFFSET(struct compositor_shape, line)        == SPLAN_OFFSET(struct splan_shape, line) &&
+               SPLAN_OFFSET(struct compositor_shape, fill)        == SPLAN_OFFSET(struct splan_shape, fill) &&
+               SPLAN_OFFSET(struct compositor_shape, edge)        == SPLAN_OFFSET(struct splan_shape, edge) &&
+               SPLAN_OFFSET(struct compositor_shape, outer)       == SPLAN_OFFSET(struct splan_shape, outer) &&
+               SPLAN_OFFSET(struct compositor_shape, outer_right) == SPLAN_OFFSET(struct splan_shape, outer_right) &&
+               SPLAN_OFFSET(struct compositor_shape, inner)       == SPLAN_OFFSET(struct splan_shape, inner) &&
+               SPLAN_OFFSET(struct compositor_shape, inner_right) == SPLAN_OFFSET(struct splan_shape, inner_right),
+               "compositor_shape != splan_shape layout");
+_Static_assert(SPLAN_OFFSET(struct compositor_frame, x)      == 0 &&
+               SPLAN_OFFSET(struct compositor_frame, y)      == 4 &&
+               SPLAN_OFFSET(struct compositor_frame, width)  == 8 &&
+               SPLAN_OFFSET(struct compositor_frame, height) == 12,
+               "compositor_frame rect layout");
+
 static void compositor_shape_covers(const struct compositor_shape *s, int px, int my, unsigned int *ce, unsigned int *cf)
 {
-        int ri = s->r - s->line, right = px >= s->x + s->w - s->r, col = right ? px - (s->x + s->w - s->r) : px - s->x;
-        unsigned int outer = (right ? s->outer_right : s->outer)[my * s->r + col], inner = 0;
-        int iy = my - s->line, ix = right ? col : col - s->line;
-
-        if (ri > 0 && iy >= 0 && iy < ri && ix >= 0 && ix < ri)
-                inner = (right ? s->inner_right : s->inner)[iy * ri + ix];
-        inner = inner > outer ? outer : inner;
-        *ce = ((outer - inner) * (s->edge >> 24) + 127) / 255;
-        *cf = (inner * (s->fill >> 24) + 127) / 255;
+        splan_shape_covers((const struct splan_shape *)s, px, my, ce, cf);
 }
 
 // Unified pure-geometry tint decomposition shared by CPU (compositor_tint) and GPU (compositor_gpu_tint).
@@ -2363,55 +2386,27 @@ struct canvas_tint_sink
 
 static void canvas_tint_clamp(int w, int h, int radius, int edge_line, unsigned int edge, int *out_r, int *out_line)
 {
-        radius = radius > w / 2 ? w / 2 : radius;
-        radius = radius > h / 2 ? h / 2 : radius;
-        radius = radius > COMPOSITOR_RADIUS_MOST ? COMPOSITOR_RADIUS_MOST : radius < 0 ? 0 : radius;
-        edge_line = edge_line < 0 || !(edge >> 24) ? 0 : edge_line > radius && radius ? radius : edge_line;
-        *out_r = radius;
-        *out_line = edge_line;
+        int out[2];
+
+        splan_tint_clamp(w, h, radius, edge_line, edge, out);
+        *out_r = out[0];
+        *out_line = out[1];
 }
 
 static int canvas_emit_tint(const struct canvas_tint_sink *sink, void *ctx, const int *rect, unsigned int ink,
                             int radius, int edge_line, unsigned int edge)
 {
-        int x = rect[0], y = rect[1], w = rect[2], h = rect[3], r, line;
+        struct splan_tint_plan tp;
 
-        if (w <= 0 || h <= 0)
-                return 1;
-        canvas_tint_clamp(w, h, radius, edge_line, edge, &r, &line);
-        if (r > 0)
-                for (int corner = 0; corner < 4; corner++)
-                {
-                        int cx = corner & 1 ? x + w - r : x, cy = corner & 2 ? y + h - r : y;
-
-                        if (!sink->corner(ctx, corner, cx, cy, r, line, ink, edge))
-                                return 0;
-                }
-        for (int py = y; py < y + h;)
-        {
-                int top = py - y, bottom = y + h - 1 - py, my = top < bottom ? top : bottom, corner = my < r, edge_row = my < line, stop = py + 1;
-                int from = corner ? x + r : x + line, to = corner ? x + w - r : x + w - line;
-
-                for (; stop < y + h; stop++)
-                {
-                        int t = stop - y, b = y + h - 1 - stop, m = t < b ? t : b;
-
-                        if ((m < r) != (corner != 0) || (m < line) != (edge_row != 0))
-                                break;
-                }
-                if (to > from && !sink->rect(ctx, from, py, to, stop, edge_row ? edge : ink, edge_row))
+        if (!splan_tint_decompose(rect, ink, radius, edge_line, edge, &tp))
+                return 0;
+        for (unsigned int c = 0; c < tp.corner_count; c++)
+                if (!sink->corner(ctx, (int)c, tp.corner_xy[c][0], tp.corner_xy[c][1], tp.r, tp.line, ink, edge))
                         return 0;
-                if (!corner && line > 0)
-                {
-                        int left_to = x + line < x + w ? x + line : x + w;
-                        int right_from = x + w - line > left_to ? x + w - line : left_to;
-
-                        if ((left_to > x && !sink->rect(ctx, x, py, left_to, stop, edge, 1)) ||
-                            (x + w > right_from && !sink->rect(ctx, right_from, py, x + w, stop, edge, 1)))
-                                return 0;
-                }
-                py = stop;
-        }
+        for (unsigned int i = 0; i < tp.rect_count; i++)
+                if (!sink->rect(ctx, tp.rect[i].x0, tp.rect[i].y0, tp.rect[i].x1, tp.rect[i].y1,
+                                tp.rect[i].argb, tp.rect[i].is_edge))
+                        return 0;
         return 1;
 }
 
@@ -2428,16 +2423,11 @@ struct canvas_cpu_tint_ctx
 
 static void canvas_cpu_tint_cut(const struct canvas_cpu_tint_ctx *c, int py, int x2, int *hide_from, int *hide_to)
 {
-        *hide_from = *hide_to = x2;
-        if (c->owner && py >= c->owner->y && py < c->owner->y + c->owner->height)
-        {
-                int inside = py >= c->owner->y + c->ri && py < c->owner->y + c->owner->height - c->ri;
+        int out[2];
 
-                *hide_from = inside ? c->owner->x : c->owner->x + c->ri;
-                *hide_to = inside ? c->owner->x + c->owner->width : c->owner->x + c->owner->width - c->ri;
-                if (*hide_to <= *hide_from)
-                        *hide_from = *hide_to = x2;
-        }
+        splan_cpu_tint_cut(c->owner ? &c->owner->x : 0, c->ri, py, x2, out);
+        *hide_from = out[0];
+        *hide_to = out[1];
 }
 
 static int canvas_cpu_tint_corner(void *raw, int corner, int cx, int cy, int r, int line, unsigned int ink, unsigned int edge)
@@ -2795,6 +2785,14 @@ struct compositor_plan
         unsigned int edges;
 };
 
+_Static_assert(sizeof(struct compositor_plan) == sizeof(struct splan_plan), "compositor_plan != splan_plan size");
+_Static_assert(SPLAN_OFFSET(struct compositor_plan, box)    == SPLAN_OFFSET(struct splan_plan, box) &&
+               SPLAN_OFFSET(struct compositor_plan, owner)  == SPLAN_OFFSET(struct splan_plan, owner) &&
+               SPLAN_OFFSET(struct compositor_plan, pieces) == SPLAN_OFFSET(struct splan_plan, pieces) &&
+               SPLAN_OFFSET(struct compositor_plan, edge)   == SPLAN_OFFSET(struct splan_plan, edge) &&
+               SPLAN_OFFSET(struct compositor_plan, edges)  == SPLAN_OFFSET(struct splan_plan, edges),
+               "compositor_plan != splan_plan layout");
+
 /*
         The one plan's memory (a plan is made on the loop's thread, one damage at a time), and each band's edges and spans (the band
         threads' COMPOSITOR_BANDS, and the loop's own scene after them): arrays of the rows' reservation (compositor_rows_make), each with
@@ -2829,62 +2827,27 @@ static int *compositor_scene_radii;
 static void compositor_plan_make(struct compositor_plan *plan, const struct compositor_target *t,
                                  const struct compositor_frame *frames, unsigned int count, const int *radii)
 {
-        int (*box)[4], *edge;
-        unsigned int *owner;
-        unsigned int edges = 2, pieces = 0;
+        unsigned int piece_cap = 3 * count, edge_cap = 6 * count + 2;
 
-        plan->box = compositor_plan_box, plan->owner = compositor_plan_owner, plan->edge = compositor_plan_edge;
-        box = plan->box, edge = plan->edge, owner = plan->owner;
-
-        edge[0] = t->y1;
-        edge[1] = t->y2;
+        plan->box = compositor_plan_box;
+        plan->owner = compositor_plan_owner;
+        plan->edge = compositor_plan_edge;
+        plan->pieces = 0;
+        plan->edge[0] = t->y1;
+        plan->edge[1] = t->y2;
+        plan->edges = 2;
 
         for (unsigned int at = 0; at < count; at++)
         {
-                const struct compositor_frame *f = &frames[at];
-                int r = radii[at], fx, fy, fw, fh, x2, y2;
-                unsigned int first = pieces;
+                int fx, fy, fw, fh;
+                struct splan_add req;
 
-                compositor_outline(f, &fx, &fy, &fw, &fh);
-                x2 = fx + fw, y2 = fy + fh;
-                if (x2 <= t->x1 || fx >= t->x2 || y2 <= t->y1 || fy >= t->y2)
-                        continue;
-                if (!r)
-                {
-                        box[pieces][0] = fx, box[pieces][1] = fy, box[pieces][2] = x2, box[pieces][3] = y2;
-                        owner[pieces++] = at;
-                }
-                else
-                {
-                        box[pieces][0] = fx + r, box[pieces][1] = fy, box[pieces][2] = x2 - r, box[pieces][3] = y2;
-                        owner[pieces++] = at;
-                        box[pieces][0] = fx, box[pieces][1] = fy + r, box[pieces][2] = fx + r, box[pieces][3] = y2 - r;
-                        owner[pieces++] = at;
-                        box[pieces][0] = x2 - r, box[pieces][1] = fy + r, box[pieces][2] = x2, box[pieces][3] = y2 - r;
-                        owner[pieces++] = at;
-                }
-
-                for (unsigned int piece = first; piece < pieces; piece++)
-                        for (unsigned int side = 1; side < 4; side += 2)
-                        {
-                                int ey = box[piece][side];
-
-                                if (ey > t->y1 && ey < t->y2)
-                                {
-                                        unsigned int place = edges;
-
-                                        while (place && edge[place - 1] > ey)
-                                                place--;
-                                        if (place && edge[place - 1] == ey)
-                                                continue;
-                                        memory_copy(edge + place + 1, edge + place, (edges - place) * sizeof(edge[0]));
-                                        edge[place] = ey;
-                                        edges++;
-                                }
-                        }
+                compositor_outline(&frames[at], &fx, &fy, &fw, &fh);
+                req.fx = fx, req.fy = fy, req.x2 = fx + fw, req.y2 = fy + fh;
+                req.tx1 = t->x1, req.ty1 = t->y1, req.tx2 = t->x2, req.ty2 = t->y2;
+                req.radius = radii[at], req.at = at, req.piece_cap = piece_cap, req.edge_cap = edge_cap;
+                splan_plan_add((struct splan_plan *)plan, &req);
         }
-        plan->pieces = pieces;
-        plan->edges = edges;
 }
 
 // The scene of a band (or slice) of a damage, from its plan: the band's edges are its top and bottom and the plan's
@@ -2922,11 +2885,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
                 }
         }
 
-        edge[edges++] = t->y1;
-        for (unsigned int k = 0; k < plan->edges; k++)
-                if (plan->edge[k] > t->y1 && plan->edge[k] < t->y2)
-                        edge[edges++] = plan->edge[k];
-        edge[edges++] = t->y2;
+        edges = splan_band_edges(plan->edge, plan->edges, t->y1, t->y2, edge, plan->edges + 2);
 
         for (unsigned int band = 0; band + 1 < edges; band++)
         {
@@ -2942,52 +2901,46 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
 
                 for (unsigned int at = pieces; at-- && spans;)
                 {
+                        struct splan_sub_req req;
+                        int vis[64][2];
+
                         if (box[at][1] >= bottom || box[at][3] <= top || box[at][2] <= box[at][0])
                                 continue;
 
-                        for (unsigned int s = 0; s < spans; s++)
+                        req.span = span;
+                        req.spans = spans;
+                        req.span_cap = pieces + 1;
+                        req.bx0 = box[at][0];
+                        req.bx2 = box[at][2];
+                        req.vis = vis;
+                        req.vis_cap = 64;
+                        req.cursor = 0;
+                        while (req.cursor < req.spans)
                         {
-                                int low = span[s][0], high = span[s][1];
-                                int x1 = low > box[at][0] ? low : box[at][0];
-                                int x2 = high < box[at][2] ? high : box[at][2];
-                                struct compositor_target cell = *t;
+                                unsigned int nv = splan_span_subtract(&req);
 
-                                if (x2 <= x1)
-                                        continue;
-
-                                cell.x1 = x1;
-                                cell.y1 = top;
-                                cell.x2 = x2;
-                                cell.y2 = bottom;
-                                if (frames[owner[at]].blend)
+                                for (unsigned int v = 0; v < nv; v++)
                                 {
-                                        struct compositor_frame alone = frames[owner[at]];
+                                        struct compositor_target cell = *t;
 
-                                        alone.blend = 2;
-                                        compositor_draw_with(&cell, &alone, radii[owner[at]]);
-                                }
-                                else
-                                        compositor_draw_with(&cell, &frames[owner[at]], radii[owner[at]]);
+                                        cell.x1 = vis[v][0];
+                                        cell.y1 = top;
+                                        cell.x2 = vis[v][1];
+                                        cell.y2 = bottom;
+                                        if (frames[owner[at]].blend)
+                                        {
+                                                struct compositor_frame alone = frames[owner[at]];
 
-                                if (low < x1 && x2 < high)
-                                {
-                                        span[s][1] = x1;
-                                        span[spans][0] = x2;
-                                        span[spans++][1] = high;
+                                                alone.blend = 2;
+                                                compositor_draw_with(&cell, &alone, radii[owner[at]]);
+                                        }
+                                        else
+                                                compositor_draw_with(&cell, &frames[owner[at]], radii[owner[at]]);
                                 }
-                                else if (low < x1)
-                                        span[s][1] = x1;
-                                else if (x2 < high)
-                                        span[s][0] = x2;
-                                else
-                                {
-                                        // Claimed whole; the last span takes its place.
-                                        spans--;
-                                        span[s][0] = span[spans][0];
-                                        span[s][1] = span[spans][1];
-                                        s--;
-                                }
+                                if (!nv)
+                                        break;
                         }
+                        spans = req.spans;
                 }
 
                 for (unsigned int s = 0; s < spans; s++)
@@ -3010,19 +2963,8 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
 
                         if (square.x2 <= square.x1 || square.y2 <= square.y1)
                                 continue;
-                        {
-                                int occluded = 0;
-
-                                for (unsigned int p = 0; p < pieces; p++)
-                                        if (owner[p] > at && box[p][0] <= square.x1 && box[p][1] <= square.y1 &&
-                                            box[p][2] >= square.x2 && box[p][3] >= square.y2)
-                                        {
-                                                occluded = 1;
-                                                break;
-                                        }
-                                if (occluded)
-                                        continue;
-                        }
+                        if (splan_corner_occluded((const struct splan_plan *)plan, at, square.x1, square.y1, square.x2, square.y2))
+                                continue;
                         compositor_ground_fill(&square, cx, cy, r, r);
                         for (unsigned int each = 0; each < count; each++)
                                 compositor_draw_with(&square, &frames[each], radii[each]);
