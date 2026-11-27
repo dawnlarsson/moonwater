@@ -1781,122 +1781,20 @@ static void compositor_gpu_late_tick(positive now)
         has no text. Answers how many ops were written to `to` (room of them at most), or ~0 for a list that is refused: any other kind, a box whose records
         are not 8 or 9, a run outside what it may read, a count past the room. An op that draws nothing is left out.
 */
-#define COMPOSITOR_GPU_LIST_REACH 4096ul
-#define COMPOSITOR_GPU_LIST_REFUSED (~0u)
-#define COMPOSITOR_GPU_LIST_COORD (1 << 24) // a box's place, size and radii in 256ths: a card does not take more (65536 pixels)
+#define COMPOSITOR_GPU_LIST_ASM_IMPLEMENTATION
+#include "gpu_list.asm.c"
+
 static inline INLINE CONST int compositor_gpu_list_cut(unsigned int word, int low, int high)
 {
-        int value = (int)word;
-
-        return value < low ? low : value > high ? high : value;
+        return gpu_list_cut(word, low, high);
 }
 
 HOT static unsigned int compositor_gpu_list_ops(const unsigned int *restrict from, unsigned int count, positive cover_at, positive cover_used, positive list_bytes, int width,
                                                 int height, unsigned int slot, unsigned int *restrict to, unsigned int room)
 {
-        struct op8 { unsigned int v[8]; };
-        unsigned int n = 0;
-        b32 text_room = cover_at >= COMPOSITOR_GPU_LIST_REACH && cover_at <= list_bytes && cover_used <= list_bytes - cover_at &&
-                        list_bytes - cover_at - cover_used >= COMPOSITOR_GPU_LIST_REACH;
+        struct gpu_list_spec spec = {from, to, (gpu_list_u64)cover_at, (gpu_list_u64)cover_used, (gpu_list_u64)list_bytes, count, room, width, height, slot, 0};
 
-        if (unlikely(width <= 0 || height <= 0 || slot < 1 || slot > 255))
-                return COMPOSITOR_GPU_LIST_REFUSED;
-        for (unsigned int i = 0; i < count; i++)
-        {
-                struct op8 snap = *(const volatile struct op8 *)(from + 8 * (positive)i);
-                unsigned int *w = snap.v, kind;
-
-                kind = w[0] & 255;
-                if (kind <= 1)
-                {
-                        int x0 = compositor_gpu_list_cut(w[1], 0, width), y0 = compositor_gpu_list_cut(w[2], 0, height);
-                        int x1 = compositor_gpu_list_cut(w[3], 0, width), y1 = compositor_gpu_list_cut(w[4], 0, height);
-
-                        if (unlikely(w[0] >> 8))
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        if (x0 >= x1 || y0 >= y1)
-                                continue;
-                        if (unlikely(n >= room))
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        to[8 * n] = kind, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
-                        to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = to[8 * n + 7] = 0;
-                        n++;
-                }
-                else if (kind == 2)
-                {
-                        unsigned int records = w[0] >> 8;
-
-                        if (unlikely(records > 3 || records > count - 1 - i || n + 1 + records > room))
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        for (unsigned int k = 0; k <= records; k++)
-                        {
-                                struct op8 rsnap;
-                                unsigned int *r = rsnap.v;
-
-                                if (k)
-                                {
-                                        rsnap = *(const volatile struct op8 *)(from + 8 * (positive)(i + k));
-                                        if (unlikely(r[0] != 8 && r[0] != 9))
-                                                return COMPOSITOR_GPU_LIST_REFUSED;
-                                }
-                                else
-                                        rsnap = snap;
-                                to[8 * n] = k ? r[0] : 2u | records << 8;
-                                to[8 * n + 1] = (unsigned int)compositor_gpu_list_cut(r[1], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
-                                to[8 * n + 2] = (unsigned int)compositor_gpu_list_cut(r[2], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
-                                to[8 * n + 3] = (unsigned int)compositor_gpu_list_cut(r[3], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
-                                to[8 * n + 4] = (unsigned int)compositor_gpu_list_cut(r[4], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
-                                to[8 * n + 5] = r[5];
-                                to[8 * n + 6] = (unsigned int)compositor_gpu_list_cut(r[6], 0, COMPOSITOR_GPU_LIST_COORD);
-                                to[8 * n + 7] = (unsigned int)compositor_gpu_list_cut(r[7], 0, COMPOSITOR_GPU_LIST_COORD);
-                                n++;
-                        }
-                        i += records;
-                }
-                else if (kind == 3)
-                {
-                        positive pitch = w[0] >> 8, bytes_from;
-                        int x0 = (int)w[1], y0 = (int)w[2], x1 = (int)w[3], y1 = (int)w[4];
-
-                        if (!text_room || pitch < 3 || pitch > 3500 || x0 < 0 || y0 < 0 || x1 > width || y1 > height)
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        if (x0 >= x1 || y0 >= y1)
-                                continue;
-                        if (n >= room || (positive)(x1 - x0) + 2 > pitch)
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        // The bitmap's bytes, a row above and below the rows and a byte past either end: all of them cover bytes.
-                        bytes_from = (positive)w[7] - pitch - 1;
-                        if (w[7] < pitch + 1 || bytes_from < cover_at || (positive)w[7] > cover_at + cover_used ||
-                            (positive)(y1 - y0) * pitch + (positive)(x1 - x0) + 1 > cover_at + cover_used - (positive)w[7])
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        to[8 * n] = 3u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
-                        to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = (w[6] & 0xffffu) | slot << 16, to[8 * n + 7] = w[7];
-                        n++;
-                }
-                else if (kind == 10)
-                {
-                        // A glyph translated through 256 tones (font_cell's cell on its ground): the rectangle in the picture, the coverage bytes (rows of pitch, the first
-                        // pixel's at word 7) and the tones (256 words at word 5, aligned) both in the cover bytes; the lanes read round the coverage as a text run's do.
-                        positive pitch = w[0] >> 8, cols, rows, table = w[5], at = w[7];
-                        int x0 = (int)w[1], y0 = (int)w[2], x1 = (int)w[3], y1 = (int)w[4];
-
-                        if (!text_room || x0 < 0 || y0 < 0 || x1 > width || y1 > height)
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        if (x0 >= x1 || y0 >= y1)
-                                continue;
-                        cols = (positive)(x1 - x0), rows = (positive)(y1 - y0);
-                        if (n >= room || pitch < cols || pitch > 3500 || (table & 3) || table < cover_at || table > cover_at + cover_used ||
-                            1024 > cover_at + cover_used - table || at < cover_at || at > cover_at + cover_used ||
-                            (rows - 1) * pitch + cols > cover_at + cover_used - at)
-                                return COMPOSITOR_GPU_LIST_REFUSED;
-                        to[8 * n] = 10u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
-                        to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = slot << 16, to[8 * n + 7] = w[7];
-                        n++;
-                }
-                else
-                        return COMPOSITOR_GPU_LIST_REFUSED;
-        }
-        return n;
+        return gpu_list_ops(&spec);
 }
 
 /*
