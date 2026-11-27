@@ -9844,25 +9844,24 @@ static struct ui_box ui_box_transform(struct ui_box box, b64 sx, b64 sy, b32 ox,
         return out;
 }
 
+#ifndef CANVAS_UI_BOX_AA_ASM_NO_IMPL
+#define CANVAS_UI_BOX_AA_ASM_IMPLEMENTATION
+#endif
+#include "ui_box_aa.asm.c"
+
+_Static_assert(sizeof(struct ui_box) == sizeof(struct ui_aa_box) &&
+               offset_of(struct ui_box, x0) == offset_of(struct ui_aa_box, x0) &&
+               offset_of(struct ui_box, y0) == offset_of(struct ui_aa_box, y0) &&
+               offset_of(struct ui_box, x1) == offset_of(struct ui_aa_box, x1) &&
+               offset_of(struct ui_box, y1) == offset_of(struct ui_aa_box, y1) &&
+               offset_of(struct ui_box, rx) == offset_of(struct ui_aa_box, rx) &&
+               offset_of(struct ui_box, ry) == offset_of(struct ui_aa_box, ry),
+               "ui_box ABI parity with ui_box_aa.asm.c");
+
 // A box's radii as CSS draws them:
 static fn ui_box_radii(const struct ui_box address_to box, b32 address_to rx, b32 address_to ry)
 {
-        p64 w, h, f = 65536;
-        if (box->x1 <= box->x0 || box->y1 <= box->y0)
-        {
-                *rx = *ry = 0;
-                return;
-        }
-        w = (p64)(box->x1 - box->x0), h = (p64)(box->y1 - box->y0);
-        if (*rx > 0 && 2 * (p64)*rx > w)
-                f = (w << 16) / (2 * (p64)*rx);
-        if (*ry > 0 && 2 * (p64)*ry > h && (h << 16) / (2 * (p64)*ry) < f)
-                f = (h << 16) / (2 * (p64)*ry);
-        if (f < 65536)
-        {
-                *rx = (b32)(((p64)*rx * f) >> 16);
-                *ry = (b32)(((p64)*ry * f) >> 16);
-        }
+        ui_box_aa_radii((const struct ui_aa_box address_to)box, rx, ry);
 }
 
 static inline b32 ui_box_straight(const struct ui_box address_to box, b32 ry, b32 y)
@@ -9874,8 +9873,7 @@ static inline b32 ui_box_straight(const struct ui_box address_to box, b32 ry, b3
 // A corner's half-width at a line, as the unit circle's:
 static p64 ui_arc(p64 u)
 {
-        // 2^32 less u squared is at most 2^32, well inside a double's 53 bits, and a root just short of a whole number k is...
-        return (unsigned int)square_root((f64)((1ull << 32) - u * u));
+        return ui_box_aa_arc(u);
 }
 
 // One line's span of a box, at y (256ths): false when the line misses it.
@@ -9902,12 +9900,6 @@ static b32 ui_box_span(const struct ui_box address_to box, b32 y, b32 address_to
         return 1;
 }
 
-#if defined(__SSE2__) || defined(__aarch64__)
-// Four lines at a time, in GCC and clang's vector extensions (SSE2 on x86-64, NEON on arm64); elsewhere one line at a time.
-typedef int ui_lanes4 __attribute__((vector_size(16), may_alias));
-#define UI_SPANS_LANES 1
-#endif
-
 // A box over one row of pixels as its lines' spans, the cover a line would make worked out pixel by pixel only at...
 struct ui_spans
 {
@@ -9917,163 +9909,20 @@ struct ui_spans
         b32 left[UI_SUB] __attribute__((aligned(16))), right[UI_SUB] __attribute__((aligned(16)));
 };
 
-// The insets of a corner's lines:
-#if defined(__x86_64__) && defined(__SSE2__)
-#define UI_INSETS_X64 1
-static void ui_insets_x64(const int address_to dy, int rx, int ry, int address_to inset)
-{
-        double rxd = (double)rx, ryd = (double)ry, scale = 65536.0, full = 4294967296.0, back = 1.0 / 65536.0;
-        long i = 0;
-        __asm__ volatile(
-                "movsd %[rxd], %%xmm14\n\tunpcklpd %%xmm14, %%xmm14\n\t"
-                "movsd %[ryd], %%xmm15\n\tunpcklpd %%xmm15, %%xmm15\n\t"
-                "movsd %[scale], %%xmm13\n\tunpcklpd %%xmm13, %%xmm13\n\t"
-                "movsd %[full], %%xmm12\n\tunpcklpd %%xmm12, %%xmm12\n\t"
-                "movsd %[back], %%xmm11\n\tunpcklpd %%xmm11, %%xmm11\n\t"
-                "1:\n\t"
-                "movq (%[dy],%[i],4), %%xmm0\n\t"
-                "cvtdq2pd %%xmm0, %%xmm0\n\t"
-                "mulpd %%xmm13, %%xmm0\n\t"
-                "divpd %%xmm15, %%xmm0\n\t"
-                "cvttpd2dq %%xmm0, %%xmm1\n\t"
-                "cvtdq2pd %%xmm1, %%xmm1\n\t"
-                "mulpd %%xmm1, %%xmm1\n\t"
-                "movapd %%xmm12, %%xmm2\n\t"
-                "subpd %%xmm1, %%xmm2\n\t"
-                "sqrtpd %%xmm2, %%xmm2\n\t"
-                "cvttpd2dq %%xmm2, %%xmm2\n\t"
-                "cvtdq2pd %%xmm2, %%xmm2\n\t"
-                "mulpd %%xmm14, %%xmm2\n\t"
-                "mulpd %%xmm11, %%xmm2\n\t"
-                "cvttpd2dq %%xmm2, %%xmm2\n\t"
-                "movq %%xmm2, (%[inset],%[i],4)\n\t"
-                "add $2, %[i]\n\t"
-                "cmp $16, %[i]\n\t"
-                "jb 1b\n\t"
-                : [i] "+r"(i)
-                : [dy] "r"(dy), [inset] "r"(inset), [rxd] "m"(rxd), [ryd] "m"(ryd), [scale] "m"(scale), [full] "m"(full), [back] "m"(back)
-                : "xmm0", "xmm1", "xmm2", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
-}
-#elif defined(__aarch64__)
-#define UI_INSETS_A64 1
-static void ui_insets_a64(const int address_to dy, int rx, int ry, int address_to inset)
-{
-        double rxd = (double)rx, ryd = (double)ry, scale = 65536.0, full = 4294967296.0, back = 1.0 / 65536.0;
-        long i = 0;
-        __asm__ volatile(
-                "ld1r {v3.2d}, [%[rxd]]\n\tld1r {v4.2d}, [%[ryd]]\n\tld1r {v5.2d}, [%[scale]]\n\t"
-                "ld1r {v6.2d}, [%[full]]\n\tld1r {v7.2d}, [%[back]]\n\t"
-                "1:\n\t"
-                "ldr d0, [%[dy], %[i]]\n\t"
-                "sxtl v0.2d, v0.2s\n\tscvtf v0.2d, v0.2d\n\t"
-                "fmul v0.2d, v0.2d, v5.2d\n\tfdiv v0.2d, v0.2d, v4.2d\n\t"
-                "fcvtzs v1.2d, v0.2d\n\tscvtf v1.2d, v1.2d\n\tfmul v1.2d, v1.2d, v1.2d\n\t"
-                "fsub v2.2d, v6.2d, v1.2d\n\tfsqrt v2.2d, v2.2d\n\t"
-                "fcvtzs v2.2d, v2.2d\n\tscvtf v2.2d, v2.2d\n\t"
-                "fmul v2.2d, v2.2d, v3.2d\n\tfmul v2.2d, v2.2d, v7.2d\n\t"
-                "fcvtzs v2.2d, v2.2d\n\txtn v2.2s, v2.2d\n\t"
-                "str d2, [%[inset], %[i]]\n\t"
-                "add %[i], %[i], #8\n\tcmp %[i], #64\n\tb.lo 1b\n\t"
-                : [i] "+r"(i)
-                : [dy] "r"(dy), [inset] "r"(inset), [rxd] "r"(&rxd), [ryd] "r"(&ryd), [scale] "r"(&scale), [full] "r"(&full), [back] "r"(&back)
-                : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "memory", "cc");
-}
-#endif
-
-static void ui_insets(const int address_to dy, int rx, int ry, int address_to inset)
-{
-#ifdef UI_INSETS_X64
-        ui_insets_x64(dy, rx, ry, inset);
-#elif defined(UI_INSETS_A64)
-        ui_insets_a64(dy, rx, ry, inset);
-#else
-        for (b32 sub = 0; sub < UI_SUB; sub++)
-        {
-                p64 u = ((p64)dy[sub] << 16) / (p64)ry;
-                inset[sub] = u >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(u)) >> 16);
-        }
-#endif
-}
+_Static_assert(sizeof(struct ui_spans) == sizeof(struct ui_aa_spans) &&
+               offset_of(struct ui_spans, lo)     == offset_of(struct ui_aa_spans, lo) &&
+               offset_of(struct ui_spans, hi)     == offset_of(struct ui_aa_spans, hi) &&
+               offset_of(struct ui_spans, a)      == offset_of(struct ui_aa_spans, a) &&
+               offset_of(struct ui_spans, b)      == offset_of(struct ui_aa_spans, b) &&
+               offset_of(struct ui_spans, inside) == offset_of(struct ui_aa_spans, inside) &&
+               offset_of(struct ui_spans, count)  == offset_of(struct ui_aa_spans, count) &&
+               offset_of(struct ui_spans, left)   == offset_of(struct ui_aa_spans, left) &&
+               offset_of(struct ui_spans, right)  == offset_of(struct ui_aa_spans, right),
+               "ui_spans ABI parity with ui_box_aa.asm.c");
 
 HOT static b32 ui_box_spans_radii(const struct ui_box address_to restrict box, b32 rx, b32 ry, b32 y, b32 first, b32 width, struct ui_spans address_to restrict s)
 {
-        b32 top = y * 256, bottom = top + 256, low = 0, high = 0, inner_low = 0, inner_high = 0, base = first * 256, reach = width * 256;
-        b32 straight, corner, outside = 0;
-        int dys[UI_SUB] __attribute__((aligned(16))), inset[UI_SUB] __attribute__((aligned(16)));
-        s->count = 0;
-        if (bottom <= box->y0 || top >= box->y1 || box->x1 <= box->x0)
-                return 0;
-        // A row in the straight middle, all of it inside, is every line the box's own span.
-        straight = ui_box_straight(box, ry, y);
-        if (likely(straight))
-        {
-                b32 left = box->x0 - base, right = box->x1 - base;
-                left = left < 0 ? 0 : left;
-                right = right > reach ? reach : right;
-                if (right <= left)
-                        return 0;
-                for (b32 sub = 0; sub < UI_SUB; sub++)
-                        s->left[sub] = left, s->right[sub] = right;
-                s->count = UI_SUB;
-                s->lo = left >> 8, s->hi = (right + 255) >> 8;
-                s->a = (left + 255) >> 8, s->b = right >> 8;
-                if (s->b <= s->a)
-                        s->a = s->b = s->hi;
-                s->inside = (unsigned int)UI_SUB * 256;
-                return 1;
-        }
-        corner = ry > 0 && rx > 0;
-        // Each line's dy over the radius (ui_box_span's), and the lines outside the box, which take no part.
-        for (b32 sub = 0; sub < UI_SUB; sub++)
-        {
-                b32 at = top + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, dy = 0;
-                if (!straight)
-                {
-                        if (at < box->y0 || at >= box->y1)
-                                outside |= 1u << sub;
-                        else if (at < box->y0 + ry)
-                                dy = box->y0 + ry - at;
-                        else if (at >= box->y1 - ry)
-                                dy = at - (box->y1 - ry) + 1;
-                }
-                dys[sub] = dy;
-        }
-        if (corner)
-                ui_insets(dys, rx, ry, inset);
-        else
-                for (b32 sub = 0; sub < UI_SUB; sub++)
-                        inset[sub] = rx;
-        for (b32 sub = 0; sub < UI_SUB; sub++)
-        {
-                b32 left, right;
-                if (outside >> sub & 1)
-                        continue;
-                left = box->x0 + rx - inset[sub], right = box->x1 - rx + inset[sub];
-                if (right <= left)
-                        continue;
-                left -= base, right -= base;
-                left = left < 0 ? 0 : left;
-                right = right > reach ? reach : right;
-                if (right <= left)
-                        continue;
-                if (!s->count)
-                        low = inner_low = left, high = inner_high = right;
-                low = left < low ? left : low, high = right > high ? right : high;
-                inner_low = left > inner_low ? left : inner_low, inner_high = right < inner_high ? right : inner_high;
-                s->left[s->count] = left, s->right[s->count] = right;
-                s->count++;
-        }
-        // The lines past count are nothing (0 to 0), which the cover sum takes as none.
-        for (b32 k = s->count; k < UI_SUB; k++)
-                s->left[k] = s->right[k] = 0;
-        if (!s->count)
-                return 0;
-        s->lo = low >> 8, s->hi = (high + 255) >> 8;
-        s->a = (inner_low + 255) >> 8, s->b = inner_high >> 8;
-        if (s->b <= s->a)
-                s->a = s->b = s->hi;
-        s->inside = (unsigned int)s->count * 256;
-        return 1;
+        return ui_box_aa_spans_radii((const struct ui_aa_box address_to)box, rx, ry, y, first, width, (struct ui_aa_spans address_to)s);
 }
 
 // ui_box_spans_radii with the box's radii as drawn (ui_box_radii), for a caller that has not resolved them.
@@ -10087,33 +9936,7 @@ static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b3
 // The cover of pixel x of a row's spans: what each line covers of it, summed.
 HOT static inline INLINE PURE unsigned int ui_spans_cover(const struct ui_spans address_to restrict s, b32 x)
 {
-        b32 p0 = x * 256, p1 = p0 + 256;
-        unsigned int cover = 0;
-        if (x >= s->a && x < s->b)
-                return s->inside;
-#ifdef UI_SPANS_LANES
-        {
-                ui_lanes4 low = {p0, p0, p0, p0}, high = {p1, p1, p1, p1}, sum = {0, 0, 0, 0};
-                for (int k = 0; k < UI_SUB; k += 4)
-                {
-                        ui_lanes4 l = *(const ui_lanes4 address_to)&s->left[k], r = *(const ui_lanes4 address_to)&s->right[k], m, from, to, d;
-                        m = l > low;
-                        from = (l & m) | (low & ~m);
-                        m = r < high;
-                        to = (r & m) | (high & ~m);
-                        d = to - from;
-                        sum += d & (d > 0);
-                }
-                cover = (unsigned int)(sum[0] + sum[1] + sum[2] + sum[3]);
-        }
-#else
-        for (int k = 0; k < s->count; k++)
-        {
-                b32 from = s->left[k] > p0 ? s->left[k] : p0, to = s->right[k] < p1 ? s->right[k] : p1;
-                cover += to > from ? (unsigned int)(to - from) : 0;
-        }
-#endif
-        return cover;
+        return ui_box_aa_spans_cover((const struct ui_aa_spans address_to)s, x);
 }
 
 // A straight colour (0xaarrggbb) at a cover of UI_FULL, as the premultiplied pixel ui_over takes.
@@ -10135,17 +9958,7 @@ static inline b32 ui_box_ry(const struct ui_box address_to box)
 static inline b32 ui_span_ends(b32 first, b32 width, b32 left, b32 right, b32 address_to p0, b32 address_to p1, unsigned int address_to c0,
                                unsigned int address_to c1)
 {
-        left -= first * 256, right -= first * 256;
-        left = left < 0 ? 0 : left;
-        right = right > width * 256 ? width * 256 : right;
-        if (right <= left)
-                return false;
-        *p0 = left >> 8, *p1 = (right - 1) >> 8;
-        if (*p0 == *p1)
-                *c0 = *c1 = (unsigned int)(right - left) * UI_SUB;
-        else
-                *c0 = (unsigned int)(256 - (left & 255)) * UI_SUB, *c1 = (unsigned int)(right - *p1 * 256) * UI_SUB;
-        return true;
+        return ui_box_aa_span_ends(first, width, left, right, p0, p1, c0, c1);
 }
 
 // A pixel of a row at a cover of a colour (0xaarrggbb), over what is there:
