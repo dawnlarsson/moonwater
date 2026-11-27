@@ -24,6 +24,8 @@
 
         The windows go bottom to top, and the tabs over all of them.
 */
+static int compositor_cast_has_stale(void);
+
 static void compositor_present_frames(void);
 static void compositor_dark_set(void); // kms.c: the screens put out again after a mode set, while display-off holds
 // cast.c: the capture engine's rings, composed into after a present; while a screen is shared every present is composed
@@ -622,6 +624,8 @@ static void compositor_card_abandon(void)
         compositor_plane_carried(0);
         compositor_card_fence_close();
         compositor_card.on = 0;
+        if (!compositor_roll.on || compositor_roll.old_wall_stale)
+                compositor_roll_wall_drop();
         compositor_card_release();
         if (compositor_card.flip_own && compositor_spare.fb)
         {
@@ -691,6 +695,8 @@ static void compositor_card_done(void)
                 compositor_card_abandon();
                 return;
         }
+        if (!compositor_roll.on || compositor_roll.old_wall_stale)
+                compositor_roll_wall_drop();
         compositor_card_release();
         compositor_present_tell((const unsigned short (*)[4])compositor_card.clip, compositor_card.clips, compositor_card.turning, compositor_card.composed,
                                 compositor_card.flip_own, compositor_card.back, compositor_card.plane_off);
@@ -1344,12 +1350,16 @@ static fn compositor_wall_run(address_any context)
                 compositor_call(syscall(write), (positive)compositor_wall_knock, (positive)&one, sizeof one, 0, 0, 0);
 }
 
+static unsigned int compositor_wall_gen;
+
 static void compositor_wall_take(void)
 {
         struct compositor_wall_job *job = &compositor_wall_job;
 
         if (job->worker)
                 thread_join(job->worker), job->worker = null;
+        if (compositor_roll.old_wall_stale)
+                compositor_roll_wall_drop();
         if (compositor_roll.on && !compositor_roll.from_fs && !compositor_roll.old_wall && compositor_wall)
         {
                 compositor_roll.old_wall = compositor_wall;
@@ -1362,6 +1372,7 @@ static void compositor_wall_take(void)
         else
                 compositor_wall_drop();
         compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height, compositor_wall_pitch = job->pitch;
+        compositor_wall_gen++;
         memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
         job->pixels = null, job->done = 0, compositor_wall_turn = job->turn;
         if (job->step)
@@ -1820,6 +1831,8 @@ static void present_count_composed(int direct, int turning, const unsigned int *
         compositor.table->direct_why[why < WINDOWS_DIRECT_WHY ? why : 0]++;
 }
 
+static int compositor_cast_has_stale(void);
+
 static void compositor_present_frames(void)
 {
         struct compositor_frame *frames = compositor_present_frame_room, preview;
@@ -1835,8 +1848,8 @@ static void compositor_present_frames(void)
         if (compositor.direct_row >= 0 && compositor_visible(compositor.direct_row) && !compositor_turning() &&
             (compositor_space_is_fs_row(compositor.direct_row) ||
              (compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row)) &&
-            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_overview_drawn() && taskbar_shift() >= UI_ONE &&
-            !compositor_record_until && !compositor_cast_screens())
+            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_overview_drawn() && !compositor_roll.on && taskbar_shift() >= UI_ONE &&
+            !compositor_record_until && !compositor_cast_screens() && !compositor_cast_has_stale())
         {
                 int row = compositor.direct_row, menu[4];
 
@@ -1864,10 +1877,10 @@ static void compositor_present_frames(void)
         compositor_record_scene(frames, windows);
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
-        direct = turning || compositor_overview_drawn() || compositor_cast_screens() ? -1 : compositor_direct_candidate(frames, rows, windows);
+        direct = turning || compositor_overview_drawn() || compositor_roll.on || compositor_cast_screens() || compositor_cast_has_stale() ? -1 : compositor_direct_candidate(frames, rows, windows);
         // None at the top: a fullscreen window under pop-ups is shown straight, they on the overlay's band over it (compositor_direct_under).
         over = windows;
-        if (direct < 0 && !turning && !compositor_overview_drawn() && !compositor_cast_screens() &&
+        if (direct < 0 && !turning && !compositor_overview_drawn() && !compositor_roll.on && !compositor_cast_screens() && !compositor_cast_has_stale() &&
             (direct = compositor_direct_under(frames, rows, windows, &over)) >= 0)
         {
                 // The glass of what is over it is made from it before the band is composed: its rows under the band and the blur's reach
@@ -1944,7 +1957,7 @@ static void compositor_present_frames(void)
         compositor.screen_stale = 0;
 
         // No window is lifted onto a plane while Scenes roll: the plane shows a window where it is, and the roll draws it on its way.
-        plane = !back && !turning && !compositor_overview_drawn() && !compositor_roll.on && !compositor_cast_screens()
+        plane = !back && !turning && !compositor_overview_drawn() && !compositor_roll.on && !compositor_cast_screens() && !compositor_cast_has_stale()
                     ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
         if (plane < 0 && compositor.table)
                 compositor.table->unscanned_by[compositor.table->unscanned < WINDOWS_UNSCANNED ? compositor.table->unscanned : 0]++;

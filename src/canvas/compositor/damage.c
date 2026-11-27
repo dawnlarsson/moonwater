@@ -723,7 +723,7 @@ static struct
         int rect[4];           // the rolling screen's rectangle (x, y, w, h)
         unsigned char from_fs, to_fs; // whether the outgoing / incoming Scene is a Fullscreen Space
         positive at;           // the roll's first present, 0 before it
-        unsigned char on;
+        unsigned char on, old_wall_stale;
         unsigned int *old_wall; // outgoing Scene's wallpaper if compositor_wall was replaced mid-roll
         unsigned long old_wall_bytes;
         int old_wall_w, old_wall_h, old_wall_pitch;
@@ -746,11 +746,14 @@ static void compositor_roll_wall_drop(void)
         compositor_roll.old_wall = null;
         compositor_roll.old_wall_bytes = 0;
         compositor_roll.old_wall_w = compositor_roll.old_wall_h = compositor_roll.old_wall_pitch = 0;
+        compositor_roll.old_wall_stale = 0;
 }
 
 static void compositor_roll_begin(int screen, unsigned int from, unsigned int to, int dir, const int rect[4], int from_fs, int to_fs)
 {
         compositor_roll_wall_drop();
+        if (compositor_roll.old_wall)
+                compositor_roll.old_wall_stale = 1;
         compositor_roll.from = from, compositor_roll.to = to, compositor_roll.screen = screen;
         compositor_roll.dir = dir < 0 ? -1 : 1, compositor_roll.width = rect[2];
         memory_copy(compositor_roll.rect, rect, sizeof(compositor_roll.rect));
@@ -869,7 +872,7 @@ static unsigned int compositor_roll_wall_frames(struct compositor_frame *frames,
                         continue;
                 if (at + added >= room)
                         break;
-                if (!incoming && compositor_roll.old_wall)
+                if (!incoming && compositor_roll.old_wall && !compositor_roll.old_wall_stale)
                         wall = compositor_roll.old_wall, ww = compositor_roll.old_wall_w, wh = compositor_roll.old_wall_h, wp = compositor_roll.old_wall_pitch;
                 else
                         wall = compositor_wall, ww = compositor_wall_w, wh = compositor_wall_h, wp = compositor_wall_pitch;

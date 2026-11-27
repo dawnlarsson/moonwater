@@ -326,6 +326,23 @@ static void compositor_cast_look(int always)
         A present composed: its damage (x1, y1, x2, y2 in the space) joined to every live ring's slots, and the next slot of each
         that has any composed from the present's frames (`windows` of them the rows', each of `rows`) and published.
 */
+static int compositor_cast_has_stale(void)
+{
+        if (compositor_cast_rings <= compositor_cast_screens_live)
+                return 0;
+        for (unsigned int at = 0; at < WINDOWS_CASTS; at++)
+        {
+                const struct compositor_cast *c = &compositor_casts[at];
+
+                if (!c->ticket || c->kind == WINDOWS_CAST_SCREEN)
+                        continue;
+                for (unsigned int k = 0; k < WINDOWS_CAST_SLOTS; k++)
+                        if (c->stale[k][2] > c->stale[k][0] && c->stale[k][3] > c->stale[k][1])
+                                return 1;
+        }
+        return 0;
+}
+
 static void compositor_cast_present(const struct compositor_frame *frames, unsigned int count, const unsigned int *rows, unsigned int windows,
                                     const int (*damage)[4], unsigned int damages)
 {
@@ -399,8 +416,11 @@ static void compositor_cast_present(const struct compositor_frame *frames, unsig
                 else if (c->kind == WINDOWS_CAST_SCENE)
                 {
                         struct compositor_frame *scene;
+                        unsigned char saved_roll = compositor_roll.on;
 
+                        compositor_roll.on = 0;
                         drawn_count = compositor_cast_scene_frames(c->target, &scene);
+                        compositor_roll.on = saved_roll;
                         drawn = scene;
                         compositor_corner_masks_ready(scene, drawn_count);
                 }
@@ -413,7 +433,10 @@ static void compositor_cast_present(const struct compositor_frame *frames, unsig
                                                       s[0], s[1], s[2], s[3], c->x, c->y, 0, 0};
                         int done[2];
 
+                        if (c->kind == WINDOWS_CAST_SCENE)
+                                compositor_cast_desktop_ground = 1;
                         compositor_scene_banded(&t, drawn, drawn_count, 0, done);
+                        compositor_cast_desktop_ground = 0;
                         if (c->kind == WINDOWS_CAST_SCREEN && compositor_spots_any(0))
                                 compositor_spots_compose(&t, drawn, drawn_count);
                         if (c->kind == WINDOWS_CAST_SCREEN && (row->cursor & WINDOWS_CAST_CURSOR_EMBEDDED))

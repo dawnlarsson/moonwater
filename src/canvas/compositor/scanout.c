@@ -1586,7 +1586,9 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
                 return compositor_direct_why = COMPOSITOR_DIRECT_NONE, -1;
         if (compositor_busy_wait())
                 return compositor_direct_why = COMPOSITOR_DIRECT_BUSY, -1;
-        row = rows[windows - 1];
+        row = (int)rows[windows - 1];
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return compositor_direct_why = COMPOSITOR_DIRECT_NONE, -1;
         if (!compositor_client_scans(row) &&
             (compositor.direct_refused || !compositor.table_memfd || (compositor.driver_flags & DRV_SCANS_PAST_CACHE) ||
              __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)))
@@ -2789,7 +2791,7 @@ static int compositor_direct_under(const struct compositor_frame *frames, const 
 
         if (windows < 2)
                 return -1;
-        for (at = windows; at > 0 && !(compositor.fullscreen[rows[at - 1]] && compositor_client_scans((int)rows[at - 1])); at--)
+        for (at = windows; at > 0 && !(rows[at - 1] < (unsigned int)COMPOSITOR_ROWS && compositor.fullscreen[rows[at - 1]] && compositor_client_scans((int)rows[at - 1])); at--)
                 ;
         if (!at || at == windows || compositor_busy_wait() || compositor_planes_off() || !compositor_overlay_ready())
                 return -1;

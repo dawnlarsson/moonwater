@@ -509,7 +509,8 @@ static int compositor_band_covers(const struct compositor_frame *windows, unsign
         int x1 = band->x - across, y1 = band->y - down, x2 = band->x + band->width + across, y2 = band->y + band->height + down;
 
         for (unsigned int at = 0; at < count; at++)
-                if (windows[at].x < x2 && x1 < windows[at].x + windows[at].width && windows[at].y < y2 && y1 < windows[at].y + windows[at].height)
+                if (!(windows[at].layer && !windows[at].row_plus1) &&
+                    windows[at].x < x2 && x1 < windows[at].x + windows[at].width && windows[at].y < y2 && y1 < windows[at].y + windows[at].height)
                         return 1;
         return 0;
 }

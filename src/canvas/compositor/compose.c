@@ -248,11 +248,12 @@ static inline unsigned long compositor_whole_lines(int width)
 
 static int compositor_space_all_fullscreen(void);
 static int compositor_roll_active(void);
+static int compositor_cast_desktop_ground;
 
 // The ground at a point of the space: solid black on Fullscreen Spaces (and behind rolling 2.5D wallpaper planes), else the wallpaper's pixel or colour.
 static inline unsigned int compositor_ground_at(int x, int y)
 {
-        if (compositor_space_all_fullscreen() || compositor_roll_active())
+        if (!compositor_cast_desktop_ground && (compositor_space_all_fullscreen() || compositor_roll_active()))
                 return 0xff000000u;
         return compositor_wall && x >= 0 && y >= 0 && x < compositor_wall_w && y < compositor_wall_h
                        ? compositor_wall[(long)y * compositor_wall_pitch + x]
@@ -266,7 +267,7 @@ static void compositor_ground_fill(const struct compositor_target *t, int x, int
 
         if (!target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
-        if (compositor_space_all_fullscreen() || compositor_roll_active())
+        if (!compositor_cast_desktop_ground && (compositor_space_all_fullscreen() || compositor_roll_active()))
         {
                 compositor_fill(t, x1, y1, x2 - x1, y2 - y1, 0xff000000u);
                 return;
@@ -334,7 +335,7 @@ HOT static void compositor_over_ground(unsigned int *restrict into, unsigned lon
         fn (*over)(p32 address_to, positive, const p32 address_to, positive, const p32 address_to, positive, positive, positive) =
             out ? memory_over_under_out_u32_rect : memory_over_under_u32_rect;
 
-        int fs = compositor_space_all_fullscreen() || compositor_roll_active();
+        int fs = !compositor_cast_desktop_ground && (compositor_space_all_fullscreen() || compositor_roll_active());
         unsigned int fill = fs ? 0xff000000u : compositor_ground;
 
         // Over the wallpaper: its rows under the picture's, where the space has them.
@@ -2128,7 +2129,8 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
                         compositor_gpu_rect(4, 0, 0, (int)g->width, (int)g->height, 0, &wall, 0, 0);
                 }
                 else
-                        compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
+                        compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height,
+                                            (compositor_space_all_fullscreen() || compositor_roll_active()) ? 0xff000000u : ground, 0, 0, 0);
         }
         for (unsigned int k = first; k < count; k++)
                 if (!compositor_gpu_frame(&frames[k]))
