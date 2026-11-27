@@ -177,12 +177,35 @@ struct xwm_attributes_reply
         unsigned int override, colormap, all_masks, your_mask, do_not_propagate;
 };
 struct xwm_configure { unsigned int mask; int x, y; unsigned int width, height, border, sibling, stack_mode; };
+struct xwm_utf8_cut { unsigned int need, code; };
+
+#ifndef XWM_WIRE_ASM_NO_IMPL
+#define XWM_WIRE_ASM_IMPLEMENTATION
+#endif
+#include "xwm_wire.asm.c"
+
+#ifdef offset_of
+#define XWM_OFF(T, M) offset_of(T, M)
+#else
+#define XWM_OFF(T, M) ((unsigned long)&(((T *)0)->M))
+#endif
+
+_Static_assert(sizeof(struct xwm_error) == 20 && XWM_OFF(struct xwm_error, major) == 16, "xwm_error ABI");
+_Static_assert(sizeof(struct xwm_atom_reply) == 8 && XWM_OFF(struct xwm_atom_reply, atom) == 4, "xwm_atom_reply ABI");
+_Static_assert(sizeof(struct xwm_atom_name_reply) == 24 && XWM_OFF(struct xwm_atom_name_reply, name) == 8 && XWM_OFF(struct xwm_atom_name_reply, name_len) == 16, "xwm_atom_name_reply ABI");
+_Static_assert(sizeof(struct xwm_extension_reply) == 20 && XWM_OFF(struct xwm_extension_reply, first_error) == 16, "xwm_extension_reply ABI");
+_Static_assert(sizeof(struct xwm_property_reply) == 40 && XWM_OFF(struct xwm_property_reply, elements) == 16 && XWM_OFF(struct xwm_property_reply, value) == 24 && XWM_OFF(struct xwm_property_reply, value_len) == 32, "xwm_property_reply ABI");
+_Static_assert(sizeof(struct xwm_geometry_reply) == 32 && XWM_OFF(struct xwm_geometry_reply, x) == 24 && XWM_OFF(struct xwm_geometry_reply, y) == 28, "xwm_geometry_reply ABI");
+_Static_assert(sizeof(struct xwm_attributes_reply) == 52 && XWM_OFF(struct xwm_attributes_reply, colormap) == 36 && XWM_OFF(struct xwm_attributes_reply, do_not_propagate) == 48, "xwm_attributes_reply ABI");
+_Static_assert(sizeof(struct xwm_configure) == 32 && XWM_OFF(struct xwm_configure, stack_mode) == 28, "xwm_configure ABI");
+_Static_assert(sizeof(struct xwm_setup) == 116 && XWM_OFF(struct xwm_setup, formats) == 40 && XWM_OFF(struct xwm_setup, root) == 72 && XWM_OFF(struct xwm_setup, height_mm) == 112, "xwm_setup ABI");
+_Static_assert(sizeof(struct xwm_event) == 132 && XWM_OFF(struct xwm_event, event) == 20 && XWM_OFF(struct xwm_event, mode) == 52 && XWM_OFF(struct xwm_event, owner) == 68 && XWM_OFF(struct xwm_event, x) == 92 && XWM_OFF(struct xwm_event, data) == 112, "xwm_event ABI");
+_Static_assert(sizeof(struct xwm_utf8_cut) == 8 && XWM_OFF(struct xwm_utf8_cut, code) == 4, "xwm_utf8_cut ABI");
 
 /* ---- byte helpers ---- */
 
 XWM_API unsigned int xwm_get16(const unsigned char *p) { return (unsigned int)p[0] | ((unsigned int)p[1] << 8); }
 XWM_API unsigned int xwm_get32(const unsigned char *p) { return xwm_get16(p) | (xwm_get16(p + 2) << 16); }
-static int xwm_get_i16(const unsigned char *p) { unsigned int v = xwm_get16(p); return v >= 0x8000u ? (int)v - 0x10000 : (int)v; }
 static void xwm_put16(unsigned char *p, unsigned int v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
 XWM_API void xwm_put32(unsigned char *p, unsigned int v) { xwm_put16(p, v); xwm_put16(p + 2, v >> 16); }
 static unsigned long xwm_pad4(unsigned long n) { return (n + 3ul) & ~3ul; }
@@ -213,29 +236,13 @@ static int xwm_name_is(const unsigned char *name, unsigned long len, const char 
 
 XWM_API long xwm_request_start(unsigned char *out, unsigned long cap, unsigned long bytes, unsigned int opcode)
 {
-        if (!out)
-                return XWM_ERR_ARG;
-        if (bytes / XWM_UNIT > XWM_UNITS_MAX)
-                return XWM_ERR_CAP;
-        if (bytes > cap)
-                return XWM_ERR_SPACE;
-        xwm_zero(out, bytes);
-        out[0] = (unsigned char)opcode;
-        xwm_put16(out + 2, (unsigned int)(bytes / XWM_UNIT));
-        return (long)bytes;
+        return (long)xwm_asm_request_start(out, cap, bytes, opcode);
 }
 
 static long xwm_request_words(unsigned char *out, unsigned long cap, unsigned int opcode, unsigned char data,
                               const unsigned int *words, unsigned long count)
 {
-        long n = xwm_request_start(out, cap, 4 + XWM_UNIT * count, opcode);
-
-        if (n < 0)
-                return n;
-        out[1] = data;
-        for (unsigned long i = 0; i < count; i++)
-                xwm_put32(out + 4 + XWM_UNIT * i, words[i]);
-        return n;
+        return (long)xwm_asm_request_words(out, cap, (opcode & 0xffu) | ((unsigned int)data << 8), words, count);
 }
 
 static long xwm_ext_words(unsigned char *out, unsigned long cap, unsigned int major, unsigned char minor,
@@ -247,32 +254,13 @@ static long xwm_ext_words(unsigned char *out, unsigned long cap, unsigned int ma
 static long xwm_request_name(unsigned char *out, unsigned long cap, unsigned int opcode, unsigned char data,
                              const unsigned char *name, unsigned long name_len, unsigned long max_len)
 {
-        long n;
-
-        if (!name || !name_len)
-                return XWM_ERR_ARG;
-        if (name_len > max_len)
-                return XWM_ERR_CAP;
-        if ((n = xwm_request_start(out, cap, XWM_REQUEST_SHORT + xwm_pad4(name_len), opcode)) < 0)
-                return n;
-        out[1] = data;
-        xwm_put16(out + 4, (unsigned int)name_len);
-        xwm_copy_bytes(out + XWM_REQUEST_SHORT, name, name_len);
-        return n;
+        return (long)xwm_asm_request_name(out, cap, (opcode & 0xffu) | ((unsigned int)data << 8), name, name_len, max_len);
 }
 
 static long xwm_event_words(unsigned char *out, unsigned long cap, unsigned char type, unsigned char detail,
                             const unsigned int *words, unsigned long count)
 {
-        if (!out)
-                return XWM_ERR_ARG;
-        if (cap < XWM_EVENT_SIZE)
-                return XWM_ERR_SPACE;
-        xwm_zero(out, XWM_EVENT_SIZE);
-        out[0] = type, out[1] = detail;
-        for (unsigned long i = 0; i < count; i++)
-                xwm_put32(out + 4 + XWM_UNIT * i, words[i]);
-        return XWM_EVENT_SIZE;
+        return (long)xwm_asm_event_words(out, cap, (unsigned int)type | ((unsigned int)detail << 8), words, count);
 }
 
 XWM_API long xwm_enc_setup_request(unsigned char *out, unsigned long cap)
@@ -365,32 +353,7 @@ XWM_API long xwm_enc_reparent_window(unsigned char *out, unsigned long cap, unsi
 
 XWM_API long xwm_enc_configure_window(unsigned char *out, unsigned long cap, unsigned int window, const struct xwm_configure *c)
 {
-        unsigned int mask, vals[7], count = 0;
-        long n;
-        unsigned char *p;
-
-        if (!c || (c->mask & ~XWM_CONFIGURE_ALL))
-                return XWM_ERR_ARG;
-        mask = c->mask;
-        if (((mask & XWM_CONFIGURE_X) && (c->x < -32768 || c->x > 32767)) ||
-            ((mask & XWM_CONFIGURE_Y) && (c->y < -32768 || c->y > 32767)) ||
-            ((mask & XWM_CONFIGURE_WIDTH) && (!c->width || c->width > 65535)) ||
-            ((mask & XWM_CONFIGURE_HEIGHT) && (!c->height || c->height > 65535)) ||
-            ((mask & XWM_CONFIGURE_BORDER) && c->border > 65535) ||
-            ((mask & XWM_CONFIGURE_STACK_MODE) && c->stack_mode > XWM_STACK_OPPOSITE))
-                return XWM_ERR_ARG;
-        for (unsigned int bit = 0; bit < 7; bit++)
-                count += (mask >> bit) & 1u;
-        if ((n = xwm_request_start(out, cap, 12 + XWM_UNIT * (unsigned long)count, XWM_OP_CONFIGURE_WINDOW)) < 0)
-                return n;
-        xwm_put32(out + 4, window), xwm_put16(out + 8, mask);
-        vals[0] = (unsigned int)c->x, vals[1] = (unsigned int)c->y, vals[2] = c->width, vals[3] = c->height;
-        vals[4] = c->border, vals[5] = c->sibling, vals[6] = c->stack_mode;
-        p = out + 12;
-        for (unsigned int bit = 0; bit < 7; bit++)
-                if (mask & (1u << bit))
-                        xwm_put32(p, vals[bit]), p += 4;
-        return n;
+        return (long)xwm_asm_enc_configure_window(out, cap, window, c);
 }
 
 XWM_API long xwm_enc_set_input_focus(unsigned char *out, unsigned long cap, unsigned int revert_to, unsigned int focus, unsigned int time)
@@ -575,19 +538,7 @@ XWM_API long xwm_enc_configure_notify(unsigned char *out, unsigned long cap, uns
 XWM_API long xwm_enc_change_window_attributes(unsigned char *out, unsigned long cap, unsigned int window, unsigned int mask,
                                               const unsigned int *values, unsigned long count)
 {
-        unsigned long bits = 0;
-        long n;
-
-        if (!window || !mask || (mask & ~XWM_CW_ALL) || !values)
-                return XWM_ERR_ARG;
-        for (unsigned int bit = 0; bit < 15; bit++)
-                bits += (mask >> bit) & 1u;
-        if (bits != count || (n = xwm_request_start(out, cap, 12 + XWM_UNIT * count, XWM_OP_CHANGE_WINDOW_ATTRIBUTES)) < 0)
-                return bits != count ? XWM_ERR_ARG : n;
-        xwm_put32(out + 4, window), xwm_put32(out + 8, mask);
-        for (unsigned long i = 0; i < count; i++)
-                xwm_put32(out + 12 + XWM_UNIT * i, values[i]);
-        return n;
+        return (long)xwm_asm_enc_change_window_attributes(out, cap, window, mask, values, count);
 }
 
 /* ---- framing & parsers ---- */
@@ -597,256 +548,17 @@ XWM_API long xwm_message_type(const unsigned char *buf, unsigned long len)
         return !buf ? XWM_ERR_ARG : len < XWM_HEADER ? XWM_ERR_SHORT : (long)(buf[0] & XWM_TYPE_MASK);
 }
 
-XWM_API long xwm_server_message_size(const unsigned char *buf, unsigned long len)
-{
-        unsigned int type;
-        unsigned long total;
-
-        if (!buf)
-                return XWM_ERR_ARG;
-        if (len < XWM_HEADER)
-                return XWM_ERR_SHORT;
-        type = buf[0] & XWM_TYPE_MASK;
-        if (type != XWM_REPLY && type != XWM_EVENT_GENERIC)
-                return XWM_HEADER;
-        total = XWM_HEADER + (unsigned long)XWM_UNIT * xwm_get32(buf + 4);
-        return total > XWM_REPLY_MAX ? XWM_ERR_CAP : (long)total;
-}
-
-XWM_API long xwm_setup_size(const unsigned char *buf, unsigned long len)
-{
-        unsigned long total;
-
-        if (!buf)
-                return XWM_ERR_ARG;
-        if (len < XWM_SETUP_HEADER)
-                return XWM_ERR_SHORT;
-        total = XWM_SETUP_HEADER + (unsigned long)XWM_UNIT * xwm_get16(buf + 6);
-        return total > XWM_SETUP_MAX ? XWM_ERR_CAP : (long)total;
-}
-
-static int xwm_reply_head(const unsigned char *buf, unsigned long len, const void *out)
-{
-        return !buf || !out ? XWM_ERR_ARG : len < XWM_HEADER ? XWM_ERR_SHORT : buf[0] != XWM_REPLY ? XWM_ERR_TYPE : XWM_OK;
-}
-
-static int xwm_reply_fits(const unsigned char *buf, unsigned long len, const void *out, unsigned long units)
-{
-        int r = xwm_reply_head(buf, len, out);
-
-        if (r != XWM_OK)
-                return r;
-        return (xwm_get32(buf + 4) != units || (len - XWM_HEADER) / XWM_UNIT < units) ? XWM_ERR_LENGTH : XWM_OK;
-}
-
-XWM_API int xwm_parse_setup(const unsigned char *buf, unsigned long len, struct xwm_setup *out)
-{
-        long sz;
-        unsigned long size, p;
-
-        if (!buf || !out)
-                return XWM_ERR_ARG;
-        if ((sz = xwm_setup_size(buf, len)) < 0)
-                return (int)sz;
-        size = (unsigned long)sz;
-        if (len < size)
-                return XWM_ERR_LENGTH;
-        out->status = buf[0];
-        if (buf[0] == XWM_SETUP_FAILED)
-        {
-                out->reason = buf[1], out->major = xwm_get16(buf + 2), out->minor = xwm_get16(buf + 4);
-                return XWM_SETUP_HEADER + (unsigned long)buf[1] > size ? XWM_ERR_LENGTH : XWM_OK;
-        }
-        if (buf[0] == XWM_SETUP_AUTHENTICATE)
-                return XWM_OK;
-        if (buf[0] != XWM_SETUP_SUCCESS)
-                return XWM_ERR_TYPE;
-        if (size < XWM_SETUP_FIXED)
-                return XWM_ERR_LENGTH;
-        out->major = xwm_get16(buf + 2), out->minor = xwm_get16(buf + 4);
-        out->release = xwm_get32(buf + 8), out->resource_base = xwm_get32(buf + 12), out->resource_mask = xwm_get32(buf + 16);
-        out->motion_buffer = xwm_get32(buf + 20), out->vendor = xwm_get16(buf + 24), out->max_request = xwm_get16(buf + 26);
-        out->screens = buf[28], out->formats = buf[29], out->image_order = buf[30], out->bitmap_order = buf[31];
-        out->scanline_unit = buf[32], out->scanline_pad = buf[33], out->min_keycode = buf[34], out->max_keycode = buf[35];
-        if (out->major != XWM_PROTOCOL_MAJOR)
-                return XWM_ERR_TYPE;
-        if (!out->resource_mask || (out->resource_base & out->resource_mask) || !out->screens)
-                return XWM_ERR_ARG;
-        if (out->vendor > XWM_VENDOR_MAX || out->formats > XWM_FORMATS_MAX || out->screens > XWM_SCREENS_MAX)
-                return XWM_ERR_CAP;
-        p = XWM_SETUP_FIXED + xwm_pad4(out->vendor);
-        if (p > size || size - p < 8ul * out->formats)
-                return XWM_ERR_LENGTH;
-        p += 8ul * out->formats;
-        for (unsigned int s = 0; s < out->screens; s++)
-        {
-                const unsigned char *sc = buf + p;
-                unsigned long depths, visuals = 0;
-
-                if (size - p < 40)
-                        return XWM_ERR_LENGTH;
-                if (!(depths = sc[39]))
-                        return XWM_ERR_ARG;
-                if (depths > XWM_DEPTHS_MAX)
-                        return XWM_ERR_CAP;
-                if (s == 0)
-                {
-                        out->root = xwm_get32(sc), out->default_colormap = xwm_get32(sc + 4);
-                        out->white_pixel = xwm_get32(sc + 8), out->black_pixel = xwm_get32(sc + 12);
-                        out->root_events = xwm_get32(sc + 16), out->width = xwm_get16(sc + 20), out->height = xwm_get16(sc + 22);
-                        out->width_mm = xwm_get16(sc + 24), out->height_mm = xwm_get16(sc + 26);
-                        out->root_visual = xwm_get32(sc + 32), out->root_depth = sc[38];
-                }
-                p += 40;
-                for (unsigned long d = 0; d < depths; d++)
-                {
-                        unsigned long nv;
-
-                        if (size - p < 8)
-                                return XWM_ERR_LENGTH;
-                        nv = xwm_get16(buf + p + 2), visuals += nv, p += 8;
-                        if (visuals > XWM_VISUALS_MAX)
-                                return XWM_ERR_CAP;
-                        if (size - p < 24 * nv)
-                                return XWM_ERR_LENGTH;
-                        p += 24 * nv;
-                }
-        }
-        return p != size ? XWM_ERR_LENGTH : XWM_OK;
-}
-
-XWM_API int xwm_parse_error(const unsigned char *buf, unsigned long len, struct xwm_error *out)
-{
-        if (!buf || !out)
-                return XWM_ERR_ARG;
-        if (len < XWM_HEADER)
-                return XWM_ERR_SHORT;
-        if (buf[0] != XWM_ERROR)
-                return XWM_ERR_TYPE;
-        out->code = buf[1], out->sequence = xwm_get16(buf + 2), out->bad_value = xwm_get32(buf + 4);
-        out->minor = xwm_get16(buf + 8), out->major = buf[10];
-        return XWM_OK;
-}
-
-XWM_API int xwm_parse_atom_reply(const unsigned char *buf, unsigned long len, struct xwm_atom_reply *out)
-{
-        int r = xwm_reply_fits(buf, len, out, 0);
-
-        if (r == XWM_OK)
-                out->sequence = xwm_get16(buf + 2), out->atom = xwm_get32(buf + 8);
-        return r;
-}
-
-XWM_API int xwm_parse_atom_name_reply(const unsigned char *buf, unsigned long len, struct xwm_atom_name_reply *out)
-{
-        unsigned long name_len;
-        int r = xwm_reply_head(buf, len, out);
-
-        if (r != XWM_OK)
-                return r;
-        name_len = xwm_get16(buf + 8);
-        if (name_len > XWM_ATOM_NAME_MAX)
-                return XWM_ERR_CAP;
-        if ((r = xwm_reply_fits(buf, len, out, (name_len + XWM_UNIT - 1) / XWM_UNIT)) != XWM_OK)
-                return r;
-        out->sequence = xwm_get16(buf + 2), out->name = buf + XWM_HEADER, out->name_len = name_len;
-        return XWM_OK;
-}
-
-XWM_API int xwm_parse_property_reply(const unsigned char *buf, unsigned long len, struct xwm_property_reply *out)
-{
-        unsigned long unit = 0, bytes;
-        unsigned int format, elements;
-        int r = xwm_reply_head(buf, len, out);
-
-        if (r != XWM_OK)
-                return r;
-        format = buf[1], elements = xwm_get32(buf + 16);
-        if (!format)
-        {
-                if (elements)
-                        return XWM_ERR_ARG;
-        }
-        else if (format == XWM_FORMAT_8 || format == XWM_FORMAT_16 || format == XWM_FORMAT_32)
-        {
-                unit = format / 8;
-                if (elements > XWM_PROPERTY_MAX / unit)
-                        return XWM_ERR_CAP;
-        }
-        else
-                return XWM_ERR_ARG;
-        bytes = (unsigned long)elements * unit;
-        if ((r = xwm_reply_fits(buf, len, out, (bytes + XWM_UNIT - 1) / XWM_UNIT)) != XWM_OK)
-                return r;
-        out->sequence = xwm_get16(buf + 2), out->format = format, out->type = xwm_get32(buf + 8);
-        out->bytes_after = xwm_get32(buf + 12), out->elements = elements, out->value = buf + XWM_HEADER, out->value_len = bytes;
-        return XWM_OK;
-}
-
-XWM_API int xwm_parse_geometry_reply(const unsigned char *buf, unsigned long len, struct xwm_geometry_reply *out)
-{
-        int r = xwm_reply_fits(buf, len, out, 0);
-
-        if (r != XWM_OK)
-                return r;
-        out->sequence = xwm_get16(buf + 2), out->depth = buf[1], out->root = xwm_get32(buf + 8);
-        out->x = xwm_get_i16(buf + 12), out->y = xwm_get_i16(buf + 14);
-        out->width = xwm_get16(buf + 16), out->height = xwm_get16(buf + 18), out->border = xwm_get16(buf + 20);
-        return XWM_OK;
-}
-
-XWM_API int xwm_parse_attributes_reply(const unsigned char *buf, unsigned long len, struct xwm_attributes_reply *out)
-{
-        int r = xwm_reply_fits(buf, len, out, 3);
-
-        if (r != XWM_OK)
-                return r;
-        out->sequence = xwm_get16(buf + 2), out->visual = xwm_get32(buf + 8), out->window_class = xwm_get16(buf + 12);
-        out->bit_gravity = buf[14], out->win_gravity = buf[15], out->save_under = buf[24], out->map_installed = buf[25];
-        out->map_state = buf[26], out->override = buf[27], out->colormap = xwm_get32(buf + 28);
-        out->all_masks = xwm_get32(buf + 32), out->your_mask = xwm_get32(buf + 36), out->do_not_propagate = xwm_get16(buf + 40);
-        return XWM_OK;
-}
-
-XWM_API int xwm_parse_extension_reply(const unsigned char *buf, unsigned long len, struct xwm_extension_reply *out)
-{
-        int r = xwm_reply_fits(buf, len, out, 0);
-
-        if (r != XWM_OK)
-                return r;
-        if (buf[8] > 1)
-                return XWM_ERR_ARG;
-        out->sequence = xwm_get16(buf + 2), out->present = buf[8], out->major_opcode = buf[9];
-        out->first_event = buf[10], out->first_error = buf[11];
-        return XWM_OK;
-}
-
-XWM_API int xwm_parse_xres_client_pid(const unsigned char *buf, unsigned long len, unsigned int *pid)
-{
-        unsigned long units, at = XWM_HEADER, last;
-        int r = xwm_reply_head(buf, len, pid);
-
-        if (r != XWM_OK)
-                return r;
-        units = xwm_get32(buf + 4);
-        if ((r = xwm_reply_fits(buf, len, pid, units)) != XWM_OK)
-                return r;
-        last = XWM_HEADER + units * XWM_UNIT, *pid = 0;
-        for (unsigned int k = 0, ids = xwm_get32(buf + 8); k < ids; k++)
-        {
-                unsigned long length;
-
-                if (last - at < 12)
-                        return XWM_ERR_LENGTH;
-                length = xwm_get32(buf + at + 8);
-                if (length > last - at - 12 || xwm_pad4(length) > last - at - 12)
-                        return XWM_ERR_LENGTH;
-                if ((xwm_get32(buf + at + 4) & XWM_XRES_LOCAL_CLIENT_PID) && length == 4)
-                        *pid = xwm_get32(buf + at + 12);
-                at += 12 + xwm_pad4(length);
-        }
-        return XWM_OK;
-}
+XWM_API long xwm_server_message_size(const unsigned char *buf, unsigned long len) { return (long)xwm_asm_server_message_size(buf, len); }
+XWM_API long xwm_setup_size(const unsigned char *buf, unsigned long len) { return (long)xwm_asm_setup_size(buf, len); }
+XWM_API int xwm_parse_setup(const unsigned char *buf, unsigned long len, struct xwm_setup *out) { return (int)xwm_asm_parse_setup(buf, len, out); }
+XWM_API int xwm_parse_error(const unsigned char *buf, unsigned long len, struct xwm_error *out) { return (int)xwm_asm_parse_error(buf, len, out); }
+XWM_API int xwm_parse_atom_reply(const unsigned char *buf, unsigned long len, struct xwm_atom_reply *out) { return (int)xwm_asm_parse_atom_reply(buf, len, out); }
+XWM_API int xwm_parse_atom_name_reply(const unsigned char *buf, unsigned long len, struct xwm_atom_name_reply *out) { return (int)xwm_asm_parse_atom_name_reply(buf, len, out); }
+XWM_API int xwm_parse_property_reply(const unsigned char *buf, unsigned long len, struct xwm_property_reply *out) { return (int)xwm_asm_parse_property_reply(buf, len, out); }
+XWM_API int xwm_parse_geometry_reply(const unsigned char *buf, unsigned long len, struct xwm_geometry_reply *out) { return (int)xwm_asm_parse_geometry_reply(buf, len, out); }
+XWM_API int xwm_parse_attributes_reply(const unsigned char *buf, unsigned long len, struct xwm_attributes_reply *out) { return (int)xwm_asm_parse_attributes_reply(buf, len, out); }
+XWM_API int xwm_parse_extension_reply(const unsigned char *buf, unsigned long len, struct xwm_extension_reply *out) { return (int)xwm_asm_parse_extension_reply(buf, len, out); }
+XWM_API int xwm_parse_xres_client_pid(const unsigned char *buf, unsigned long len, unsigned int *pid) { return (int)xwm_asm_parse_xres_client_pid(buf, len, pid); }
 
 XWM_API void xwm_event_clear(struct xwm_event *e)
 {
@@ -854,110 +566,10 @@ XWM_API void xwm_event_clear(struct xwm_event *e)
         e->kind = XWM_EV_UNKNOWN;
 }
 
-/* Offset-table event unpacker shared by core events and XFIXES SelectionNotify (portable field offsets). */
-enum { XWM_EW_U8 = 1, XWM_EW_U16 = 2, XWM_EW_I16 = 3, XWM_EW_U32 = 4 };
-#define XWM_EV_F(field, wire_off, width) {(unsigned short)(unsigned long)&((struct xwm_event *)0)->field, (wire_off), (width)}
-struct xwm_ev_field { unsigned short dst; unsigned char off, w; };
-struct xwm_ev_desc { unsigned char code, kind, count; struct xwm_ev_field f[9]; };
-
-static void xwm_event_unpack(const unsigned char *buf, struct xwm_event *out, const struct xwm_ev_desc *d)
-{
-        out->kind = d->kind;
-        for (unsigned int i = 0; i < d->count; i++)
-        {
-                unsigned char *dst = (unsigned char *)out + d->f[i].dst;
-
-                if (d->f[i].w == XWM_EW_I16)
-                        *(int *)dst = xwm_get_i16(buf + d->f[i].off);
-                else
-                        *(unsigned int *)dst = d->f[i].w == XWM_EW_U8  ? buf[d->f[i].off]
-                                             : d->f[i].w == XWM_EW_U16 ? xwm_get16(buf + d->f[i].off)
-                                                                       : xwm_get32(buf + d->f[i].off);
-        }
-}
-
-XWM_API int xwm_parse_event(const unsigned char *buf, unsigned long len, struct xwm_event *out)
-{
-        static const struct xwm_ev_desc descs[] = {
-            {XWM_EVENT_MAP_REQUEST, XWM_EV_MAP_REQUEST, 2, {XWM_EV_F(parent, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32)}},
-            {XWM_EVENT_CONFIGURE_REQUEST, XWM_EV_CONFIGURE_REQUEST, 9,
-             {XWM_EV_F(parent, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32), XWM_EV_F(sibling, 12, XWM_EW_U32),
-              XWM_EV_F(x, 16, XWM_EW_I16), XWM_EV_F(y, 18, XWM_EW_I16), XWM_EV_F(width, 20, XWM_EW_U16),
-              XWM_EV_F(height, 22, XWM_EW_U16), XWM_EV_F(border, 24, XWM_EW_U16), XWM_EV_F(value_mask, 26, XWM_EW_U16)}},
-            {XWM_EVENT_MAP_NOTIFY, XWM_EV_MAP_NOTIFY, 3, {XWM_EV_F(event, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32), XWM_EV_F(override, 12, XWM_EW_U8)}},
-            {XWM_EVENT_UNMAP_NOTIFY, XWM_EV_UNMAP_NOTIFY, 3, {XWM_EV_F(event, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32), XWM_EV_F(from_configure, 12, XWM_EW_U8)}},
-            {XWM_EVENT_DESTROY_NOTIFY, XWM_EV_DESTROY_NOTIFY, 2, {XWM_EV_F(event, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32)}},
-            {XWM_EVENT_CONFIGURE_NOTIFY, XWM_EV_CONFIGURE_NOTIFY, 9,
-             {XWM_EV_F(event, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32), XWM_EV_F(sibling, 12, XWM_EW_U32),
-              XWM_EV_F(x, 16, XWM_EW_I16), XWM_EV_F(y, 18, XWM_EW_I16), XWM_EV_F(width, 20, XWM_EW_U16),
-              XWM_EV_F(height, 22, XWM_EW_U16), XWM_EV_F(border, 24, XWM_EW_U16), XWM_EV_F(override, 26, XWM_EW_U8)}},
-            {XWM_EVENT_PROPERTY_NOTIFY, XWM_EV_PROPERTY_NOTIFY, 4,
-             {XWM_EV_F(window, 4, XWM_EW_U32), XWM_EV_F(atom, 8, XWM_EW_U32), XWM_EV_F(time, 12, XWM_EW_U32), XWM_EV_F(state, 16, XWM_EW_U8)}},
-            {XWM_EVENT_CREATE_NOTIFY, XWM_EV_CREATE_NOTIFY, 8,
-             {XWM_EV_F(parent, 4, XWM_EW_U32), XWM_EV_F(window, 8, XWM_EW_U32), XWM_EV_F(x, 12, XWM_EW_I16),
-              XWM_EV_F(y, 14, XWM_EW_I16), XWM_EV_F(width, 16, XWM_EW_U16), XWM_EV_F(height, 18, XWM_EW_U16),
-              XWM_EV_F(border, 20, XWM_EW_U16), XWM_EV_F(override, 22, XWM_EW_U8)}},
-            {XWM_EVENT_FOCUS_IN, XWM_EV_FOCUS_IN, 2, {XWM_EV_F(event, 4, XWM_EW_U32), XWM_EV_F(mode, 8, XWM_EW_U8)}},
-            {XWM_EVENT_FOCUS_OUT, XWM_EV_FOCUS_OUT, 2, {XWM_EV_F(event, 4, XWM_EW_U32), XWM_EV_F(mode, 8, XWM_EW_U8)}},
-            {XWM_EVENT_ENTER, XWM_EV_ENTER, 2, {XWM_EV_F(event, 12, XWM_EW_U32), XWM_EV_F(mode, 30, XWM_EW_U8)}},
-            {XWM_EVENT_LEAVE, XWM_EV_LEAVE, 2, {XWM_EV_F(event, 12, XWM_EW_U32), XWM_EV_F(mode, 30, XWM_EW_U8)}},
-            {XWM_EVENT_SELECTION_CLEAR, XWM_EV_SELECTION_CLEAR, 3,
-             {XWM_EV_F(time, 4, XWM_EW_U32), XWM_EV_F(owner, 8, XWM_EW_U32), XWM_EV_F(selection, 12, XWM_EW_U32)}},
-            {XWM_EVENT_SELECTION_REQUEST, XWM_EV_SELECTION_REQUEST, 6,
-             {XWM_EV_F(time, 4, XWM_EW_U32), XWM_EV_F(owner, 8, XWM_EW_U32), XWM_EV_F(requestor, 12, XWM_EW_U32),
-              XWM_EV_F(selection, 16, XWM_EW_U32), XWM_EV_F(target, 20, XWM_EW_U32), XWM_EV_F(property, 24, XWM_EW_U32)}},
-            {XWM_EVENT_SELECTION_NOTIFY, XWM_EV_SELECTION_NOTIFY, 5,
-             {XWM_EV_F(time, 4, XWM_EW_U32), XWM_EV_F(requestor, 8, XWM_EW_U32), XWM_EV_F(selection, 12, XWM_EW_U32),
-              XWM_EV_F(target, 16, XWM_EW_U32), XWM_EV_F(property, 20, XWM_EW_U32)}},
-            {XWM_EVENT_EXPOSE, XWM_EV_IGNORED, 0, {{0, 0, 0}}},
-            {XWM_EVENT_REPARENT_NOTIFY, XWM_EV_IGNORED, 0, {{0, 0, 0}}},
-        };
-        unsigned int type;
-
-        if (!buf || !out)
-                return XWM_ERR_ARG;
-        if (len < XWM_HEADER)
-                return XWM_ERR_SHORT;
-        if ((type = buf[0] & XWM_TYPE_MASK) < XWM_EVENT_FIRST)
-                return XWM_ERR_TYPE;
-        xwm_event_clear(out);
-        out->code = type, out->synthetic = (buf[0] & XWM_SEND_EVENT_BIT) ? 1 : 0;
-        out->sequence = xwm_get16(buf + 2), out->detail = buf[1];
-        if (type == XWM_EVENT_CLIENT_MESSAGE)
-        {
-                out->kind = XWM_EV_CLIENT_MESSAGE, out->format = buf[1];
-                if (out->format != XWM_FORMAT_8 && out->format != XWM_FORMAT_16 && out->format != XWM_FORMAT_32)
-                        return XWM_ERR_ARG;
-                out->window = xwm_get32(buf + 4), out->atom = xwm_get32(buf + 8);
-                if (out->format == XWM_FORMAT_32)
-                        for (unsigned long i = 0; i < XWM_DATA_LONGS; i++)
-                                out->data[i] = xwm_get32(buf + 12 + XWM_UNIT * i);
-                return XWM_OK;
-        }
-        for (unsigned int i = 0; i < (unsigned int)(sizeof descs / sizeof descs[0]); i++)
-                if (descs[i].code == type)
-                        return xwm_event_unpack(buf, out, &descs[i]), XWM_OK;
-        return XWM_OK;
-}
-
+XWM_API int xwm_parse_event(const unsigned char *buf, unsigned long len, struct xwm_event *out) { return (int)xwm_asm_parse_event(buf, len, out); }
 XWM_API int xwm_parse_xfixes_selection(const unsigned char *buf, unsigned long len, unsigned int first_event, struct xwm_event *out)
 {
-        static const struct xwm_ev_desc xfixes_desc = {
-            0, XWM_EV_XFIXES_SELECTION, 5,
-            {XWM_EV_F(window, 4, XWM_EW_U32), XWM_EV_F(owner, 8, XWM_EW_U32), XWM_EV_F(selection, 12, XWM_EW_U32),
-             XWM_EV_F(time, 16, XWM_EW_U32), XWM_EV_F(selection_time, 20, XWM_EW_U32)}};
-
-        if (!buf || !out)
-                return XWM_ERR_ARG;
-        if (len < XWM_HEADER)
-                return XWM_ERR_SHORT;
-        if (first_event < XWM_EVENT_LAST + 1 || first_event > 127 || (buf[0] & XWM_TYPE_MASK) != first_event)
-                return XWM_ERR_TYPE;
-        xwm_event_clear(out);
-        out->code = first_event, out->synthetic = (buf[0] & XWM_SEND_EVENT_BIT) ? 1 : 0;
-        out->detail = buf[1], out->sequence = xwm_get16(buf + 2);
-        xwm_event_unpack(buf, out, &xfixes_desc);
-        return XWM_OK;
+        return (int)xwm_asm_parse_xfixes_selection(buf, len, first_event, out);
 }
 
 /* ---- selection targets, text transcoding, INCR, XDND ---- */
@@ -1007,49 +619,12 @@ XWM_API long xwm_target_mime(const unsigned char *name, unsigned long len, unsig
 
 XWM_API unsigned long xwm_latin1_utf8(const unsigned char *in, unsigned long n, unsigned char *out)
 {
-        unsigned long put = 0;
-
-        for (unsigned long at = 0; at < n; at++)
-                if (in[at] < 0x80)
-                        out[put++] = in[at];
-                else
-                        out[put++] = (unsigned char)(0xc0 | (in[at] >> 6)), out[put++] = (unsigned char)(0x80 | (in[at] & 0x3f));
-        return put;
+        return (unsigned long)xwm_asm_latin1_utf8(in, n, out);
 }
-
-struct xwm_utf8_cut { unsigned int need, code; };
 
 XWM_API unsigned long xwm_utf8_latin1(struct xwm_utf8_cut *cut, const unsigned char *in, unsigned long n, unsigned char *out)
 {
-        unsigned long put = 0;
-
-        for (unsigned long at = 0; at < n; at++)
-        {
-                unsigned char c = in[at];
-
-                if (cut->need)
-                {
-                        if ((c & 0xc0) == 0x80)
-                        {
-                                cut->code = (cut->code << 6) | (c & 0x3fu);
-                                if (--cut->need == 0)
-                                        out[put++] = cut->code <= 0xff ? (unsigned char)cut->code : '?';
-                                continue;
-                        }
-                        cut->need = 0, out[put++] = '?';
-                }
-                if (c < 0x80)
-                        out[put++] = c;
-                else if ((c & 0xe0) == 0xc0)
-                        cut->need = 1, cut->code = c & 0x1fu;
-                else if ((c & 0xf0) == 0xe0)
-                        cut->need = 2, cut->code = c & 0x0fu;
-                else if ((c & 0xf8) == 0xf0)
-                        cut->need = 3, cut->code = c & 0x07u;
-                else
-                        out[put++] = '?';
-        }
-        return put;
+        return (unsigned long)xwm_asm_utf8_latin1(cut, in, n, out);
 }
 
 #define XWM_INCR_CHUNK 32768
