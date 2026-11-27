@@ -18,6 +18,7 @@
 
 #define SH_SHELL_GLOB_IMPLEMENTATION
 #include "shell_glob.asm.c"
+#include "shell_escape.asm.c"
 
 /*
         What the files beside this one own.
@@ -7550,6 +7551,55 @@ static fn expand_push_code_point(p8 letter, positive wide, positive code,
 
 static string_address expand_ansi(string_address at, p8 mark, bool source)
 {
+        string_address scan = at;
+        bool complex = false;
+
+        while (string_get(scan) && !(source && string_is(scan, '\'')))
+        {
+                if (string_get(scan) == '\\' && string_get(scan + 1))
+                {
+                        p8 next = string_get(scan + 1);
+
+                        if (next == 'u' || next == 'U' ||
+                            (next == 'x' &&
+                             (shell_dash_compat ||
+                              (shell_bash_compat && string_is(scan + 2, '{')))))
+                        {
+                                complex = true;
+                                break;
+                        }
+                        if (next == 'c' && string_get(scan + 2))
+                        {
+                                scan += (source && string_is(scan + 2, '\\') &&
+                                         string_is(scan + 3, '\\'))
+                                            ? 4
+                                            : 3;
+                                continue;
+                        }
+                        scan += 2;
+                        continue;
+                }
+                scan++;
+        }
+        if (!complex)
+        {
+                positive span = (positive)(scan - at);
+                p8 room[512];
+
+                if (span <= sizeof(room))
+                {
+                        sh_esc_u32 mode = shell_dash_compat ? SH_ESC_MODE_ANSI_DASH
+                                                            : SH_ESC_MODE_ANSI_BASH;
+                        if (source)
+                                mode |= SH_ESC_CTRL_DBLBS;
+                        positive made = sh_unescape_c(at, span, (char *)room,
+                                                      sizeof(room), mode);
+                        if (made)
+                                expand_push_run((string_address)room, made, mark);
+                        return scan;
+                }
+        }
+
         bool discard = false;
 
         while (string_get(at) && !(source && string_is(at, '\'')))

@@ -19,6 +19,8 @@
         than the arena has says so.
 */
 
+#include "shell_escape.asm.c"
+
 static DEAD_END fn awk_leave(b32 code);
 static DEAD_END fn awk_die(string_address word, string_address message);
 
@@ -7135,27 +7137,16 @@ static bool awk_input_used;
 
 static awk_text address_to awk_unescape(string_address text, positive length)
 {
-        awk_builder build;
+        if (!length)
+                return address_of awk_empty_text;
 
-        awk_builder_start(address_of build);
+        awk_text address_to made = awk_text_room(length);
+        positive out = sh_unescape_c(text, length, (char *)made->text, length,
+                                     SH_ESC_MODE_AWK);
 
-        for (positive i = 0; i < length;)
-        {
-                p8 address_to slash = memory_first_of(text + i, '\\', length - i);
-                positive plain = slash && slash + 1 < text + length
-                                     ? (positive)(slash - text - i) : length - i;
-                awk_builder_put(address_of build, text + i, plain);
-                i += plain;
-
-                if (i < length)
-                {
-                        i++;
-                        awk_builder_char(address_of build,
-                                         (p8)awk_escape(text, address_of i, length));
-                }
-        }
-
-        return awk_builder_text(address_of build);
+        made->length = out;
+        made->text[out] = '\0';
+        return made;
 }
 
 static awk_text address_to awk_number_key(positive value)

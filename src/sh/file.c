@@ -14,6 +14,9 @@
 
 #include "../lib.util.c"
 
+#define SH_SHELL_ESCAPE_ASM_IMPLEMENTATION
+#include "shell_escape.asm.c"
+
 #define UTILITY_ARENA_BYTES ((positive)4 << 30)
 static memory_arena utility_arena = {.room = UTILITY_ARENA_BYTES};
 static const diagnostic text_diagnostic;
@@ -16684,6 +16687,13 @@ static fn plain_stream_write(positive which, writer through, address_any data,
                         at = (positive)(esc - bytes);
                         if (at > start)
                                 through((address_any)(bytes + start), at - start);
+                        positive skip = sh_ansi_sgr_skip((const char *)(bytes + at), length - at);
+                        if (skip && skip <= sizeof(stream->held))
+                        {
+                                at += skip - 1;
+                                start = at + 1;
+                                continue;
+                        }
                         stream->held[stream->used++] = 0x1b;
                         continue;
                 }

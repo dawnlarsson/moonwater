@@ -13,6 +13,7 @@
 */
 
 #include "../lib.util.c"
+#include "shell_escape.asm.c"
 
 /* sort has its command entry point later in the file.  ptx, comm and join
    consume its same byte comparator without moving or cloning the ordering
@@ -17891,79 +17892,9 @@ static const argument_option ptx_options[] = {
 
 static positive ptx_unescape(p8 address_to text)
 {
-        positive from = 0;
-        positive into = 0;
-
-        while (text[from])
-        {
-                if (text[from] != '\\')
-                {
-                        text[into++] = text[from++];
-                        continue;
-                }
-
-                from++;
-                p8 escaped = text[from];
-
-                if (!escaped)
-                        break;
-
-                if (escaped == 'x')
-                {
-                        positive value = 0;
-                        positive digits = 0;
-                        from++;
-
-                        while (digits < 3 && byte_is_hexadecimal(text[from]))
-                        {
-                                p8 digit = text[from++];
-                                value = value * 16 +
-                                        (digit <= '9'
-                                             ? digit - '0'
-                                             : (digit | 32) - 'a' + 10);
-                                digits++;
-                        }
-
-                        if (digits)
-                                text[into++] = (p8)value;
-                        else
-                        {
-                                text[into++] = '\\';
-                                text[into++] = 'x';
-                        }
-
-                        continue;
-                }
-
-                if (escaped == '0')
-                {
-                        positive value = 0;
-                        positive digits = 0;
-                        from++;
-
-                        while (digits < 3 && text[from] >= '0' &&
-                               text[from] <= '7')
-                        {
-                                value = value * 8 + text[from++] - '0';
-                                digits++;
-                        }
-
-                        text[into++] = (p8)value;
-                        continue;
-                }
-
-                from++;
-
-                if (byte_simple_escape(escaped))
-                        text[into++] = byte_simple_escape(escaped);
-                else if (escaped == 'c')
-                        from += string_length(text + from);
-                else
-                {
-                        text[into++] = '\\';
-                        text[into++] = escaped;
-                }
-        }
+        positive length = string_length((string_address)text);
+        positive into = sh_unescape_c((const char *)text, length,
+                                      (char *)text, length, SH_ESC_MODE_PTX);
 
         text[into] = '\0';
         return into;
@@ -23575,6 +23506,14 @@ static bool tr_unquote(string_address spec, positive address_to length)
 
         // Both arrays are one reservation, so the flags follow the text.
         tr_escaped = tr_text + size + 1;
+
+        b64 fast = sh_unescape_tr(spec, size, (char *)tr_text, (char *)tr_escaped, size);
+
+        if (fast >= 0)
+        {
+                address_to length = (positive)fast;
+                return true;
+        }
 
         for (positive i = 0; spec[i]; i++)
         {
@@ -33146,33 +33085,8 @@ static positive sed_take_until(p8 delimiter, p8 address_to into, positive room)
 // have nobody else to expand them.
 static positive sed_unescape(p8 address_to text, positive length)
 {
-        positive have = 0;
-
-        for (positive i = 0; i < length; i++)
-        {
-                p8 value;
-                positive used;
-
-                if (text[i] == '\\' && sed_escape_value(text, length, i, address_of value, address_of used))
-                {
-                        text[have++] = value;
-                        i += used - 1;
-                        continue;
-                }
-
-                if (text[i] == '\\' && i + 1 < length)
-                {
-                        p8 next = text[++i];
-
-                        text[have++] = next == 'n'   ? '\n'
-                                       : next == 't' ? '\t'
-                                       : next == 'r' ? '\r'
-                                                     : next;
-                        continue;
-                }
-
-                text[have++] = text[i];
-        }
+        positive have = sh_unescape_c((const char *)text, length,
+                                      (char *)text, length, SH_ESC_MODE_SED);
 
         text[have] = '\0';
         return have;
