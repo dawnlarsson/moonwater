@@ -121,6 +121,21 @@ typedef struct
         p8 groups, policy, boundary, flags;
 } regex_program;
 
+#define SH_REGEX_DFA_ASM_IMPLEMENTATION
+#include "regex_dfa.asm.c"
+
+_Static_assert(sizeof(rx_node) == sizeof(struct sh_rx_node) &&
+               SH_RX_OFFSET(rx_node, kind) == SH_RX_OFFSET(struct sh_rx_node, kind) &&
+               SH_RX_OFFSET(rx_node, argument) == SH_RX_OFFSET(struct sh_rx_node, argument),
+               "rx_node ABI mismatch with regex_dfa.asm.c");
+_Static_assert(sizeof(regex_program) == sizeof(struct sh_rx_program) &&
+               SH_RX_OFFSET(regex_program, sets) == SH_RX_OFFSET(struct sh_rx_program, sets) &&
+               SH_RX_OFFSET(regex_program, policy) == SH_RX_OFFSET(struct sh_rx_program, policy) &&
+               SH_RX_OFFSET(regex_program, flags) == SH_RX_OFFSET(struct sh_rx_program, flags),
+               "regex_program ABI mismatch with regex_dfa.asm.c");
+_Static_assert(RX_ANY == 2 && RX_SET == 3 && REGEX_DOT_NEWLINE == 1 && RX_IGNORE_CASE == 128,
+               "rx_single enum mismatch with regex_dfa.asm.c");
+
 typedef struct
 {
         positive nodes, sets;
@@ -1571,7 +1586,7 @@ static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positi
         return true;
 }
 
-static bool rx_single(const regex_program *program, const rx_node *node, p8 byte);
+/* rx_single is provided by regex_dfa.asm.c */
 
 /*
         Whether every match begins at a ^: the sequence opens with one, or
@@ -1925,14 +1940,7 @@ static bool rx_slot_put(rx_match *match, p8 slot, positive value)
         return true;
 }
 
-static bool rx_single(const regex_program *program, const rx_node *node, p8 byte)
-{
-        if (node->kind == RX_ANY)
-                return (program->policy & REGEX_DOT_NEWLINE) || byte != '\n';
-        if (node->kind == RX_SET)
-                return program->sets[node->argument][byte];
-        return ((program->flags & RX_IGNORE_CASE) ? byte_to_lower(byte) : byte) == node->argument;
-}
+/* rx_single implemented in pure assembly in regex_dfa.asm.c */
 
 static bool rx_accept(rx_match *match, positive position)
 {
@@ -3163,12 +3171,7 @@ static string_address rx_dfa_scan(rx_dfa_cache *cache, string_address at,
         for (;;)
         {
                 // The whole of the work, while nothing needs deciding.
-                b32 next = 0;
-                while (at < past && (next = trans[row + classes[*at]]) >= 0)
-                {
-                        row = next;
-                        at++;
-                }
+                b32 next = rx_dfa_step1(classes, trans, (const sh_rx_u8 **)&at, past, &row);
                 if (at == past)
                         return null;
                 if (next == RX_DFA_UNKNOWN)
@@ -3237,6 +3240,12 @@ typedef struct
         string_address at, past, begin;
         b32 row;
 } rx_lane;
+
+_Static_assert(sizeof(rx_lane) == sizeof(struct sh_rx_lane) &&
+               SH_RX_OFFSET(rx_lane, at) == SH_RX_OFFSET(struct sh_rx_lane, at) &&
+               SH_RX_OFFSET(rx_lane, row) == SH_RX_OFFSET(struct sh_rx_lane, row) &&
+               RX_ACCEPT_NAME == 1 && RX_ACCEPT_OTHER == 2,
+               "rx_lane / RX_ACCEPT_* ABI mismatch with regex_dfa.asm.c");
 
 enum { RX_LANE_GO, RX_LANE_RESET, RX_LANE_GAVE_UP };
 
@@ -3338,43 +3347,15 @@ static positive rx_dfa_lanes_run(const p8 *classes, const b32 *trans, p8 delimit
                 b32 n[RX_DFA_LANES] = {0};
                 if (m)
                 {
-                        string_address a0 = lane[0].at, a1 = lane[1].at, a2 = lane[2].at,
-                                       a3 = lane[3].at;
-                        b32 r0 = lane[0].row, r1 = lane[1].row, r2 = lane[2].row,
-                            r3 = lane[3].row;
-                        b32 n0 = 0, n1 = 0, n2 = 0, n3 = 0;
-                        bool stopped = false;
-                        while (m--)
-                        {
-                                n0 = trans[r0 + classes[*a0]];
-                                n1 = trans[r1 + classes[*a1]];
-                                n2 = trans[r2 + classes[*a2]];
-                                n3 = trans[r3 + classes[*a3]];
-                                if ((n0 | n1 | n2 | n3) < 0)
-                                {
-                                        stopped = true;
-                                        break;
-                                }
-                                a0++, a1++, a2++, a3++;
-                                r0 = n0, r1 = n1, r2 = n2, r3 = n3;
-                        }
-                        lane[0].at = a0, lane[1].at = a1, lane[2].at = a2, lane[3].at = a3;
-                        lane[0].row = r0, lane[1].row = r1, lane[2].row = r2, lane[3].row = r3;
-                        if (!stopped)
+                        if (!rx_dfa_step4(classes, trans, lane, m, n))
                                 continue;
-                        n[0] = n0, n[1] = n1, n[2] = n2, n[3] = n3;
                 }
                 else
                 {
                         while (lane[one].at == lane[one].past)
                                 one++;
                         rx_lane *l = lane + one;
-                        b32 next = 0;
-                        while (l->at < l->past && (next = trans[l->row + classes[*l->at]]) >= 0)
-                        {
-                                l->row = next;
-                                l->at++;
-                        }
+                        b32 next = rx_dfa_step1(classes, trans, (const sh_rx_u8 **)&l->at, l->past, &l->row);
                         if (l->at == l->past)
                                 continue;
                         n[one] = next;
@@ -3679,10 +3660,17 @@ static positive rx_dfa_first_end(rx_dfa_cache *cache, string_address text, posit
         b32 row = rx_dfa_row_at(cache, text, at, &failed);
         if (failed)
                 return (positive)-2;
-        for (positive p = at;; p++)
+        for (sh_rx_u64 p = at;;)
         {
-                p8 class = p == length ? dfa->delimiter_class : dfa->classes[text[p]];
-                b32 next = cache->trans[row + class];
+                b32 next = rx_dfa_first_fast(dfa->classes, cache->trans, text, &p, length, &row);
+                p8 class;
+                if (p == length)
+                {
+                        class = dfa->delimiter_class;
+                        next = cache->trans[row + class];
+                }
+                else
+                        class = dfa->classes[text[p]];
                 if (next == RX_DFA_UNKNOWN)
                         next = rx_dfa_step(cache, row, class);
                 if (next == RX_DFA_FULL)
@@ -3694,6 +3682,7 @@ static positive rx_dfa_first_end(rx_dfa_cache *cache, string_address text, posit
                 row = next;
                 if (p == length)
                         return (positive)-1;
+                p++;
         }
 }
 
@@ -3704,29 +3693,32 @@ static positive rx_dfa_longest_end(rx_dfa_cache *cache, b32 row, string_address 
                                    positive at, positive length)
 {
         const rx_dfa *dfa = cache->dfa;
-        positive last = (positive)-1;
-        for (positive p = at;; p++)
+        struct sh_rx_longest_ctx ctx = {
+                dfa->classes, dfa->name, cache->accept, cache->trans,
+                dfa->class_rcp, text, length
+        };
+        struct sh_rx_longest_state st = { at, (positive)-1, row, 0 };
+        for (;;)
         {
-                b32 state = (b32)(((p64)row * dfa->class_rcp) >> 32);
-                if (p == length)
+                b32 next = rx_dfa_longest_fast(&ctx, &st);
+                if (st.p == length)
                 {
+                        b32 state = (b32)(((p64)st.row * dfa->class_rcp) >> 32);
                         if (cache->accept[state] & RX_ACCEPT_END)
-                                last = length;
-                        return last;
+                                st.last = length;
+                        return st.last;
                 }
-                p8 class = dfa->classes[text[p]];
-                if (cache->accept[state] & (dfa->name[class] ? RX_ACCEPT_NAME : RX_ACCEPT_OTHER))
-                        last = p;
-                b32 next = cache->trans[row + class];
+                p8 class = dfa->classes[text[st.p]];
                 if (next == RX_DFA_UNKNOWN)
-                        next = rx_dfa_step(cache, row, class);
+                        next = rx_dfa_step(cache, st.row, class);
                 if (next == RX_DFA_FULL)
                         return (positive)-2;
                 if (next == RX_DFA_DEAD)
-                        return last;
+                        return st.last;
                 if (next < 0)
                         return (positive)-2;
-                row = next;
+                st.row = next;
+                st.p++;
         }
 }
 
