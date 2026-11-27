@@ -385,23 +385,7 @@ static CONST inline INLINE bool lex_is_space(p8 value)
    removed its bytes.  The full lexer remains the authority: a false positive
    only asks the parser-owned scanner and a here-string still registers no
    document. */
-static PURE bool lex_dless_candidate(string_address line, string_address at)
-{
-        string_address before = at;
-        positive distance = (positive)(at - line);
-
-        if (string_is(at + 1, '<') && string_not(at + 2, '<'))
-                return true;
-
-        while (distance >= 2 && string_is(before - 1, '\n') &&
-               string_is(before - 2, '\\'))
-        {
-                before -= 2;
-                distance -= 2;
-        }
-
-        return distance && string_is(before - 1, '<');
-}
+#define lex_dless_candidate(line, at) (sh_dless_candidate((const char *)(line), (const char *)(at)) != 0)
 
 /*
         Whether a # standing where a word could begin starts a comment.
@@ -834,48 +818,7 @@ static string_address lex_quote_end_kind(string_address at, p8 quote,
 /* Whether the operator after a parameter name is # or %, the two POSIX
    pattern-removal forms whose words retain single-quote handling inside an
    outer double quote. */
-static PURE bool lex_parameter_pattern(string_address at)
-{
-        string_address step = at;
-
-        if (string_is(step, '!'))
-                step++;
-        if (string_is(step, '#'))
-                step++;
-
-        if (byte_is_alpha(string_get(step)) || string_is(step, '_'))
-                step += string_span(step, string_set_name);
-        else if (byte_is_digit(string_get(step)))
-                step += string_span(step, string_set_digits);
-        else if (string_get(step))
-                step++;
-
-        if (string_is(step, '['))
-        {
-                positive depth = 1;
-
-                step++;
-                while (string_get(step) && depth)
-                {
-                        if (string_is(step, '\\') && string_get(step + 1))
-                                step += 2;
-                        else if (string_is(step, '['))
-                        {
-                                depth++;
-                                step++;
-                        }
-                        else if (string_is(step, ']'))
-                        {
-                                depth--;
-                                step++;
-                        }
-                        else
-                                step++;
-                }
-        }
-
-        return string_is(step, '#') || string_is(step, '%');
-}
+#define lex_parameter_pattern(at) (sh_param_pattern((const char *)(at)) != 0)
 
 /*
         Where a case command inside $( ) stands, so that the ) closing an
@@ -908,16 +851,7 @@ typedef struct
         bool command; // the next word is in command position
 } lex_cases;
 
-static PURE bool lex_word_is(string_address at, const_string word,
-                             positive length)
-{
-        if (string_compare_max(at, (string_address)word, length))
-                return false;
-
-        p8 after = string_get(at + length);
-
-        return !after || lex_is_space(after) || lex_operator[after];
-}
+#define lex_word_is(at, word, length) (sh_word_is((const char *)(at), (const char *)(word), (sh_u64)(length)) != 0)
 
 // A word begins here, in a command substitution: what it does to the cases.
 static fn lex_cases_word(lex_cases address_to cases, string_address at,
@@ -1378,7 +1312,7 @@ static bool lex_line_closed(string_address line)
         }
 }
 
-static PURE bool lex_assignment_head(string_address text, positive length);
+#define lex_assignment_head(text, length) (sh_assign_head((const char *)(text), (sh_u64)(length)) != 0)
 static bool lex_subscript_unclosed(string_address at);
 
 HOT b32 lex_unfinished(string_address line)
@@ -1615,28 +1549,6 @@ HOT b32 lex_unfinished(string_address line)
         definition and a case pattern are all untouched by it. Dash has no
         arrays, so the same bytes stay a name and a parenthesis.
 */
-static PURE bool lex_assignment_head(string_address text, positive length)
-{
-        positive at = 0;
-
-        if (length && text[length - 1] == '+')
-                length--;
-
-        if (!length || byte_is_digit(text[0]))
-                return false;
-
-        at = string_span_max(text, length, string_set_name);
-
-        if (!at)
-                return false;
-
-        if (at == length)
-                return true;
-
-        // A subscript holds anything, but it has to be closed at the end.
-        return text[at] == '[' && text[length - 1] == ']' && length - at > 2;
-}
-
 /*
         Whether the body of a=(...) is still words.
 

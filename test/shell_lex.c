@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #define SH_SHELL_LEX_IMPLEMENTATION
 #include "../src/sh/shell_lex.c"
@@ -265,10 +267,178 @@ static __attribute__((noinline)) sh_i32 ref_sh_assign_split(const char *w, sh_u6
         return 0;
 }
 
-/* ── Test harness helpers ──────────────────────────────────────────────────── */
+static __attribute__((noinline)) sh_i32 ref_sh_param_pattern(const char *at) {
+        if (!at) return 0;
+        const unsigned char *s = (const unsigned char *)at;
+        if (*s == '!') s++;
+        if (*s == '#') s++;
+        if ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || *s == '_') {
+                while ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '_')
+                        s++;
+        } else if (*s >= '0' && *s <= '9') {
+                while (*s >= '0' && *s <= '9') s++;
+        } else if (*s) {
+                s++;
+        }
+        if (*s == '[') {
+                sh_u64 depth = 1;
+                s++;
+                while (*s && depth) {
+                        if (*s == '\\' && s[1]) s += 2;
+                        else if (*s == '[') { depth++; s++; }
+                        else if (*s == ']') { depth--; s++; }
+                        else s++;
+                }
+        }
+        return (*s == '#' || *s == '%') ? 1 : 0;
+}
+
+static __attribute__((noinline)) sh_i32 ref_sh_dless_candidate(const char *line, const char *at) {
+        if (!line || !at || at < line) return 0;
+        if (at[0] && at[1] == '<' && at[2] != '<') return 1;
+        const char *before = at;
+        sh_u64 dist = (sh_u64)(at - line);
+        while (dist >= 2 && before[-1] == '\n' && before[-2] == '\\') {
+                before -= 2;
+                dist -= 2;
+        }
+        return (dist && before[-1] == '<') ? 1 : 0;
+}
+
+static __attribute__((noinline)) sh_i32 ref_sh_word_is(const char *at, const char *word, sh_u64 length) {
+        if (!at || !word) return 0;
+        for (sh_u64 i = 0; i < length; i++) {
+                if (at[i] != word[i] || at[i] == '\0') return 0;
+        }
+        unsigned char a = (unsigned char)at[length];
+        return (a == 0 || a == ' ' || a == '\t' || a == '\n' ||
+                a == '|' || a == '&' || a == ';' || a == '<' || a == '>' || a == '(' || a == ')') ? 1 : 0;
+}
+
+static __attribute__((noinline)) sh_i32 ref_sh_assign_head(const char *text, sh_u64 length) {
+        if (!text || !length) return 0;
+        if (text[length - 1] == '+') length--;
+        if (!length) return 0;
+        unsigned char c = (unsigned char)text[0];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) return 0;
+        sh_u64 at = 1;
+        while (at < length) {
+                c = (unsigned char)text[at];
+                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+                        break;
+                at++;
+        }
+        if (at == length) return 1;
+        return (text[at] == '[' && text[length - 1] == ']' && (length - at) > 2) ? 1 : 0;
+}
+
+/* ── Hardware mmap guard-page OOB read/write trap suite ────────────────────── */
 
 static int g_failures = 0;
 static uint64_t g_checks = 0;
+
+static void run_guard_page_security_tests(void) {
+        long ps = sysconf(_SC_PAGESIZE);
+        size_t page = (ps > 0) ? (size_t)ps : 4096;
+        /* [PROT_NONE guard] [RW data page] [PROT_NONE guard] */
+        char *region = (char *)mmap(NULL, 3 * page, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (region == MAP_FAILED) {
+                fprintf(stderr, "FAIL: mmap guard region failed\n");
+                g_failures++;
+                return;
+        }
+        char *rw = region + page;
+        if (mprotect(rw, page, PROT_READ | PROT_WRITE) != 0) {
+                fprintf(stderr, "FAIL: mprotect rw page failed\n");
+                g_failures++;
+                munmap(region, 3 * page);
+                return;
+        }
+
+        /* 1. End-of-page (1-byte OOB read trap) for bounded & NUL-terminated inputs */
+        const char *edge_inputs[] = {
+                "", "a", "<", "<<", "<<<", "&", "&>", "&>>", ";", ";;", ";;&",
+                "|", "||", "|&", ">", ">>", ">|", ">&", "(", ")", "'", "\"", "\\",
+                "a\\", "\"\\", "'unclosed", "\"unclosed", "a[b]#", "!#a[\\]#",
+                "a+", "a[]+", "a[0]+", "in", "in ", "in|", "in\t", "in\r", "foo=bar", "foo+=bar"
+        };
+        for (size_t i = 0; i < sizeof(edge_inputs) / sizeof(edge_inputs[0]); i++) {
+                size_t len = strlen(edge_inputs[i]);
+                /* Place WITHOUT NUL right at end of RW page for bounded functions */
+                char *end_raw = rw + page - len;
+                if (len) memcpy(end_raw, edge_inputs[i], len);
+                struct sh_token toks[8];
+                char uq[64];
+                g_checks += 6;
+                if (sh_lex_line(end_raw, len, toks, 8) != ref_sh_lex_line(end_raw, len, toks, 8)) g_failures++;
+                if (sh_unquote(end_raw, len, uq, sizeof(uq)) != ref_sh_unquote(end_raw, len, uq, sizeof(uq))) g_failures++;
+                if (sh_valid_name(end_raw, len) != ref_sh_valid_name(end_raw, len)) g_failures++;
+                if (sh_param_name(end_raw, len) != ref_sh_param_name(end_raw, len)) g_failures++;
+                sh_u64 n1 = 0, n2 = 0;
+                if (sh_assign_split(end_raw, len, &n1) != ref_sh_assign_split(end_raw, len, &n2) || n1 != n2) g_failures++;
+                if (sh_assign_head(end_raw, len) != ref_sh_assign_head(end_raw, len)) g_failures++;
+
+                /* Place WITH NUL right at end of RW page for NUL-terminated functions */
+                char *end_nul = rw + page - (len + 1);
+                memcpy(end_nul, edge_inputs[i], len + 1);
+                g_checks += 4;
+                if (sh_escaped_end(end_nul, '"') != ref_sh_escaped_end(end_nul, '"')) g_failures++;
+                if (sh_param_pattern(end_nul) != ref_sh_param_pattern(end_nul)) g_failures++;
+                if (sh_dless_candidate(end_nul, end_nul) != ref_sh_dless_candidate(end_nul, end_nul)) g_failures++;
+                if (sh_word_is(end_nul, "in", 2) != ref_sh_word_is(end_nul, "in", 2)) g_failures++;
+
+                /* Place at START of RW page (1-byte under-read trap for backward scans) */
+                memcpy(rw, edge_inputs[i], len + 1);
+                for (size_t pos = 0; pos <= len; pos++) {
+                        g_checks++;
+                        if (sh_dless_candidate(rw, rw + pos) != ref_sh_dless_candidate(rw, rw + pos)) g_failures++;
+                }
+        }
+
+        /* 2. Exact output-buffer end-of-page (1-byte OOB write trap) */
+        for (sh_u32 cap = 1; cap <= 4; cap++) {
+                struct sh_token *out_end = (struct sh_token *)(rw + page - (size_t)cap * sizeof(struct sh_token));
+                const char *s = "a && b || c <<< d &>> e ;;& f";
+                g_checks++;
+                sh_i32 rc = sh_lex_line(s, strlen(s), out_end, cap);
+                if (rc != (sh_i32)cap) g_failures++;
+        }
+        for (size_t dcap = 1; dcap <= 16; dcap++) {
+                char *dst_end = rw + page - dcap;
+                const char *s = "hello_\"world\"_'test'_\\escaped_long_string";
+                g_checks++;
+                sh_u64 n = sh_unquote(s, strlen(s), dst_end, dcap);
+                if (n != dcap - 1 || dst_end[dcap - 1] != '\0') g_failures++;
+        }
+
+        /* 3. Adversarial deep nesting (4096 brackets) & long \\\n chains (1024 pairs) */
+        {
+                char deep[4104];
+                deep[0] = 'x';
+                for (int i = 0; i < 2048; i++) deep[1 + i] = '[';
+                for (int i = 0; i < 2048; i++) deep[2049 + i] = ']';
+                deep[4097] = '#';
+                deep[4098] = '\0';
+                g_checks += 2;
+                if (sh_param_pattern(deep) != 1) g_failures++;
+                deep[4097] = '\0'; /* unclosed/no-op */
+                if (sh_param_pattern(deep) != 0) g_failures++;
+
+                char cont[2060];
+                cont[0] = '<';
+                for (int i = 0; i < 1024; i++) { cont[1 + 2 * i] = '\\'; cont[2 + 2 * i] = '\n'; }
+                cont[2049] = '<';
+                cont[2050] = '\0';
+                g_checks += 2;
+                if (sh_dless_candidate(cont, cont + 2049) != 1) g_failures++;
+                cont[0] = 'x';
+                if (sh_dless_candidate(cont, cont + 2049) != 0) g_failures++;
+        }
+
+        munmap(region, 3 * page);
+}
+
+/* ── Test harness helpers ──────────────────────────────────────────────────── */
 
 static void check_lex_case(const char *label, const char *src, sh_u64 len, sh_u32 cap) {
         enum { MAX_CAP = 256 };
@@ -511,17 +681,56 @@ int main(void) {
                 sh_u64 dst_cap = rng_u64() % 100;
                 check_unquote_case("fuzz", fuzz_buf, len, dst_cap);
 
-                /* Fuzz sh_valid_name, sh_param_name, sh_escaped_end, sh_assign_split */
-                g_checks += 4;
+                /* Fuzz sh_valid_name, sh_param_name, sh_escaped_end, sh_assign_split,
+                   sh_param_pattern, sh_dless_candidate, sh_word_is, sh_assign_head */
+                g_checks += 8;
                 if (sh_valid_name(fuzz_buf, len) != ref_sh_valid_name(fuzz_buf, len)) g_failures++;
                 if (sh_param_name(fuzz_buf, len) != ref_sh_param_name(fuzz_buf, len)) g_failures++;
-                sh_u32 q = (sh_u32)(rng_u64() & 0xFF);
+                sh_u32 q = (sh_u32)(rng_u64() & 0x3FF); /* includes > 255 to test low-byte masking */
                 if (sh_escaped_end(fuzz_buf, q) != ref_sh_escaped_end(fuzz_buf, q)) g_failures++;
                 sh_u64 nl_a = 0xDEAD, nl_r = 0xDEAD;
                 sh_i32 as_a = sh_assign_split(fuzz_buf, len, &nl_a);
                 sh_i32 as_r = ref_sh_assign_split(fuzz_buf, len, &nl_r);
                 if (as_a != as_r || nl_a != nl_r) g_failures++;
+                if (sh_param_pattern(fuzz_buf) != ref_sh_param_pattern(fuzz_buf)) g_failures++;
+                sh_u64 pos = len ? (rng_u64() % (len + 1)) : 0;
+                if (sh_dless_candidate(fuzz_buf, fuzz_buf + pos) != ref_sh_dless_candidate(fuzz_buf, fuzz_buf + pos)) g_failures++;
+                sh_u64 wlen = len ? (rng_u64() % (len > 6 ? 6 : len)) : 0;
+                if (sh_word_is(fuzz_buf, fuzz_buf, wlen) != ref_sh_word_is(fuzz_buf, fuzz_buf, wlen)) g_failures++;
+                if (sh_assign_head(fuzz_buf, len) != ref_sh_assign_head(fuzz_buf, len)) g_failures++;
         }
+
+        /* Targeted checks for sh_param_pattern, sh_dless_candidate, sh_word_is, sh_assign_head */
+        {
+                const char *pp[] = { "", "a#", "a%", "!a#", "#a%", "!#a[0]#", "a[b[c]d]%", "a[\\]]#", "a[\\]#",
+                                     "123#", "@#", "*%", "a[unclosed", "a[trail\\", "a:b", "a-b", "!#%" };
+                for (size_t i = 0; i < sizeof(pp) / sizeof(pp[0]); i++) {
+                        g_checks++;
+                        if (sh_param_pattern(pp[i]) != ref_sh_param_pattern(pp[i])) g_failures++;
+                }
+                g_checks += 4;
+                if (sh_param_pattern(NULL) != 0) g_failures++;
+                if (sh_dless_candidate(NULL, "a") != 0) g_failures++;
+                if (sh_dless_candidate("abc", NULL) != 0) g_failures++;
+                { const char *s = "abc"; if (sh_dless_candidate(s + 2, s) != 0) g_failures++; }
+
+                const char *ah[] = { "", "+", "a", "a+", "_9+", "0a", "a[0]", "a[0]+", "a[]", "a[]+", "a[0", "a[0]x", "a[b+c]+" };
+                for (size_t i = 0; i < sizeof(ah) / sizeof(ah[0]); i++) {
+                        sh_u64 l = (sh_u64)strlen(ah[i]);
+                        g_checks++;
+                        if (sh_assign_head(ah[i], l) != ref_sh_assign_head(ah[i], l)) g_failures++;
+                }
+                /* All 256 follower bytes for sh_word_is */
+                char wbuf[8] = "inX";
+                for (int b = 0; b < 256; b++) {
+                        wbuf[2] = (char)b;
+                        g_checks++;
+                        if (sh_word_is(wbuf, "in", 2) != ref_sh_word_is(wbuf, "in", 2)) g_failures++;
+                }
+        }
+
+        /* Hardware mmap guard-page OOB read/write trap suite */
+        run_guard_page_security_tests();
 
         /* Targeted checks for sh_valid_name, sh_param_name, sh_escaped_end, sh_assign_split */
         {

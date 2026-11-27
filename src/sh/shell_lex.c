@@ -1,11 +1,15 @@
 /*
         POSIX / Moonwater-compatible shell core primitives in pure assembly:
-          - sh_lex_line    : bounded zero-table tokenizer (all 22 OP_* operators, quotes, escapes, comments)
-          - sh_unquote     : POSIX single/double/backslash quote removal
-          - sh_valid_name  : POSIX identifier validator [A-Za-z_][A-Za-z0-9_]*
-          - sh_param_name  : POSIX/Bash scalar parameter validator (@*#?$-!, digits, or identifier)
-          - sh_escaped_end : escaped quote-run scanner (NUL-terminated, skips \x pairs)
-          - sh_assign_split: NAME=... (1) / NAME+=... (2) assignment detector
+          - sh_lex_line       : bounded zero-table tokenizer (all 22 OP_* operators, quotes, escapes, comments)
+          - sh_unquote        : POSIX single/double/backslash quote removal
+          - sh_valid_name     : POSIX identifier validator [A-Za-z_][A-Za-z0-9_]*
+          - sh_param_name     : POSIX/Bash scalar parameter validator (@*#?$-!, digits, or identifier)
+          - sh_escaped_end    : escaped quote-run scanner (NUL-terminated, skips \x pairs)
+          - sh_assign_split   : NAME=... (1) / NAME+=... (2) assignment detector
+          - sh_param_pattern  : ${[!][#](name|digits|c)[nested]} followed by # or % detector
+          - sh_dless_candidate: << (not <<<) candidate detector across \\\n continuations
+          - sh_word_is        : exact keyword match followed by NUL / space / shell operator
+          - sh_assign_head    : NAME[+] or NAME[subscript][+] assignment head validator
 
         Pure arm64, x86-64 (SysV ELF / Mach-O / Windows x64 COFF), and riscv64
         assembly. Zero C function bodies, zero allocations, zero syscalls,
@@ -94,6 +98,10 @@ sh_i32      sh_valid_name(const char *name, sh_u64 len);
 sh_i32      sh_param_name(const char *name, sh_u64 len);
 const char *sh_escaped_end(const char *at, sh_u32 quote);
 sh_i32      sh_assign_split(const char *word, sh_u64 len, sh_u64 *name_len_out);
+sh_i32      sh_param_pattern(const char *at);
+sh_i32      sh_dless_candidate(const char *line, const char *at);
+sh_i32      sh_word_is(const char *at, const char *word, sh_u64 length);
+sh_i32      sh_assign_head(const char *text, sh_u64 length);
 
 #endif /* MOONWATER_SH_SHELL_LEX_H */
 
@@ -279,6 +287,64 @@ __asm__(
         "8:  mov w0, #1\n" SH_ASM_RET
         "6:  mov w0, #0\n" SH_ASM_RET
         SH_ASM_END(sh_assign_split)
+
+        /* sh_param_pattern(x0=at) -> ${[!][#](name|digits|c)[nested]} followed by # or % */
+        SH_ASM_FUNC(sh_param_pattern)
+        "cbz x0, 9f\n   ldrb w1, [x0]\n   cmp w1, #33\n   b.ne 1f\n   add x0, x0, #1\n   ldrb w1, [x0]\n"
+        "1:  cmp w1, #35\n   b.ne 2f\n   add x0, x0, #1\n   ldrb w1, [x0]\n"
+        "2:  orr w2, w1, #32\n   sub w2, w2, #97\n   cmp w2, #25\n   b.ls 3f\n   cmp w1, #95\n   b.eq 3f\n"
+        "sub w2, w1, #48\n   cmp w2, #9\n   b.ls 4f\n   cbz w1, 5f\n   add x0, x0, #1\n   b 5f\n"
+        "3:  add x0, x0, #1\n   ldrb w1, [x0]\n   orr w2, w1, #32\n   sub w2, w2, #97\n   cmp w2, #25\n   b.ls 3b\n"
+        "sub w2, w1, #48\n   cmp w2, #9\n   b.ls 3b\n   cmp w1, #95\n   b.eq 3b\n   b 5f\n"
+        "4:  add x0, x0, #1\n   ldrb w1, [x0]\n   sub w2, w1, #48\n   cmp w2, #9\n   b.ls 4b\n"
+        "5:  ldrb w1, [x0]\n   cmp w1, #91\n   b.ne 8f\n   add x0, x0, #1\n   mov x3, #1\n"
+        "6:  cbz x3, 8f\n   ldrb w1, [x0]\n   cbz w1, 9f\n   add x0, x0, #1\n"
+        "cmp w1, #92\n   b.ne 7f\n   ldrb w1, [x0]\n   cbz w1, 9f\n   add x0, x0, #1\n   b 6b\n"
+        "7:  cmp w1, #91\n   b.ne 10f\n   add x3, x3, #1\n   b 6b\n"
+        "10: cmp w1, #93\n   b.ne 6b\n   sub x3, x3, #1\n   b 6b\n"
+        "8:  ldrb w1, [x0]\n   cmp w1, #35\n   b.eq 11f\n   cmp w1, #37\n   b.eq 11f\n"
+        "9:  mov w0, #0\n" SH_ASM_RET
+        "11: mov w0, #1\n" SH_ASM_RET
+        SH_ASM_END(sh_param_pattern)
+
+        /* sh_dless_candidate(x0=line, x1=at) -> 1 if << (not <<<) across \\\n continuations */
+        SH_ASM_FUNC(sh_dless_candidate)
+        "cbz x0, 4f\n   cbz x1, 4f\n   cmp x1, x0\n   b.lo 4f\n   ldrb w2, [x1]\n   cbz w2, 1f\n"
+        "ldrb w2, [x1, #1]\n   cmp w2, #60\n   b.ne 1f\n   ldrb w2, [x1, #2]\n   cmp w2, #60\n   b.ne 3f\n"
+        "1:  sub x3, x1, x0\n"
+        "2:  cmp x3, #2\n   b.lo 5f\n   ldrb w2, [x1, #-1]\n   cmp w2, #10\n   b.ne 5f\n"
+        "ldrb w2, [x1, #-2]\n   cmp w2, #92\n   b.ne 5f\n   sub x1, x1, #2\n   sub x3, x3, #2\n   b 2b\n"
+        "5:  cbz x3, 4f\n   ldrb w2, [x1, #-1]\n   cmp w2, #60\n   b.ne 4f\n"
+        "3:  mov w0, #1\n" SH_ASM_RET
+        "4:  mov w0, #0\n" SH_ASM_RET
+        SH_ASM_END(sh_dless_candidate)
+
+        /* sh_word_is(x0=at, x1=word, x2=length) -> exact match + NUL/space/operator terminator */
+        SH_ASM_FUNC(sh_word_is)
+        "cbz x0, 4f\n   cbz x1, 4f\n   mov x3, #0\n"
+        "1:  cmp x3, x2\n   b.hs 2f\n   ldrb w4, [x0, x3]\n   ldrb w5, [x1, x3]\n"
+        "cmp w4, w5\n   b.ne 4f\n   cbz w4, 4f\n   add x3, x3, #1\n   b 1b\n"
+        "2:  ldrb w4, [x0, x2]\n   cmp w4, #64\n   b.hs 3f\n"
+        "movz x5, #0x0601\n   movk x5, #0x0341, lsl #32\n   movk x5, #0x5800, lsl #48\n"
+        "lsr x5, x5, x4\n   and w0, w5, #1\n" SH_ASM_RET
+        "3:  cmp w4, #124\n   cset w0, eq\n" SH_ASM_RET
+        "4:  mov w0, #0\n" SH_ASM_RET
+        SH_ASM_END(sh_word_is)
+
+        /* sh_assign_head(x0=text, x1=length) -> NAME[+] or NAME[sub][+] */
+        SH_ASM_FUNC(sh_assign_head)
+        "cbz x0, 5f\n   cbz x1, 5f\n   sub x2, x1, #1\n   ldrb w3, [x0, x2]\n   cmp w3, #43\n   b.ne 1f\n"
+        "mov x1, x2\n   cbz x1, 5f\n"
+        "1:  ldrb w3, [x0]\n   orr w4, w3, #32\n   sub w4, w4, #97\n   cmp w4, #25\n   b.ls 2f\n   cmp w3, #95\n   b.ne 5f\n"
+        "2:  mov x2, #1\n"
+        "3:  cmp x2, x1\n   b.hs 6f\n   ldrb w3, [x0, x2]\n   orr w4, w3, #32\n   sub w4, w4, #97\n"
+        "cmp w4, #25\n   b.ls 4f\n   sub w4, w3, #48\n   cmp w4, #9\n   b.ls 4f\n   cmp w3, #95\n   b.ne 7f\n"
+        "4:  add x2, x2, #1\n   b 3b\n"
+        "7:  cmp w3, #91\n   b.ne 5f\n   sub x4, x1, x2\n   cmp x4, #2\n   b.ls 5f\n"
+        "sub x4, x1, #1\n   ldrb w3, [x0, x4]\n   cmp w3, #93\n   b.ne 5f\n"
+        "6:  mov w0, #1\n" SH_ASM_RET
+        "5:  mov w0, #0\n" SH_ASM_RET
+        SH_ASM_END(sh_assign_head)
 );
 
 #elif defined(SH_LEX_X64)
@@ -451,6 +517,76 @@ __asm__(
         "6:  xor eax, eax\n" SH_ASM_RET
         SH_ASM_END(sh_assign_split)
 
+        /* sh_param_pattern(at) -> ${[!][#](name|digits|c)[nested]} followed by # or % */
+        SH_ASM_FUNC(sh_param_pattern)
+#if defined(_WIN32)
+        "mov r8, rcx\n"
+#else
+        "mov r8, rdi\n"
+#endif
+        "test r8, r8\n   jz 9f\n   movzx eax, byte ptr [r8]\n   cmp eax, 33\n   jne 1f\n   inc r8\n   movzx eax, byte ptr [r8]\n"
+        "1:  cmp eax, 35\n   jne 2f\n   inc r8\n   movzx eax, byte ptr [r8]\n"
+        "2:  mov ecx, eax\n   or ecx, 32\n   sub ecx, 97\n   cmp ecx, 25\n   jbe 3f\n   cmp eax, 95\n   je 3f\n"
+        "lea ecx, [rax - 48]\n   cmp ecx, 9\n   jbe 4f\n   test eax, eax\n   jz 5f\n   inc r8\n   jmp 5f\n"
+        "3:  inc r8\n   movzx eax, byte ptr [r8]\n   mov ecx, eax\n   or ecx, 32\n   sub ecx, 97\n   cmp ecx, 25\n   jbe 3b\n"
+        "lea ecx, [rax - 48]\n   cmp ecx, 9\n   jbe 3b\n   cmp eax, 95\n   je 3b\n   jmp 5f\n"
+        "4:  inc r8\n   movzx eax, byte ptr [r8]\n   sub eax, 48\n   cmp eax, 9\n   jbe 4b\n"
+        "5:  movzx eax, byte ptr [r8]\n   cmp eax, 91\n   jne 8f\n   inc r8\n   mov r9, 1\n"
+        "6:  test r9, r9\n   jz 8f\n   movzx eax, byte ptr [r8]\n   test eax, eax\n   jz 9f\n   inc r8\n"
+        "cmp eax, 92\n   jne 7f\n   cmp byte ptr [r8], 0\n   je 9f\n   inc r8\n   jmp 6b\n"
+        "7:  cmp eax, 91\n   jne 10f\n   inc r9\n   jmp 6b\n"
+        "10: cmp eax, 93\n   jne 6b\n   dec r9\n   jmp 6b\n"
+        "8:  movzx eax, byte ptr [r8]\n   cmp eax, 35\n   je 11f\n   cmp eax, 37\n   je 11f\n"
+        "9:  xor eax, eax\n" SH_ASM_RET
+        "11: mov eax, 1\n" SH_ASM_RET
+        SH_ASM_END(sh_param_pattern)
+
+        /* sh_dless_candidate(line, at) -> 1 if << (not <<<) across \\\n continuations */
+        SH_ASM_FUNC(sh_dless_candidate)
+        SH_LOAD2
+        "test r8, r8\n   jz 4f\n   test r9, r9\n   jz 4f\n   cmp r9, r8\n   jb 4f\n   cmp byte ptr [r9], 0\n   je 1f\n"
+        "cmp byte ptr [r9 + 1], 60\n   jne 1f\n   cmp byte ptr [r9 + 2], 60\n   jne 3f\n"
+        "1:  mov rcx, r9\n   sub rcx, r8\n"
+        "2:  cmp rcx, 2\n   jb 5f\n   cmp byte ptr [r9 - 1], 10\n   jne 5f\n"
+        "cmp byte ptr [r9 - 2], 92\n   jne 5f\n   sub r9, 2\n   sub rcx, 2\n   jmp 2b\n"
+        "5:  test rcx, rcx\n   jz 4f\n   cmp byte ptr [r9 - 1], 60\n   jne 4f\n"
+        "3:  mov eax, 1\n" SH_ASM_RET
+        "4:  xor eax, eax\n" SH_ASM_RET
+        SH_ASM_END(sh_dless_candidate)
+
+        /* sh_word_is(at, word, length) -> exact match + NUL/space/operator terminator */
+        SH_ASM_FUNC(sh_word_is)
+#if defined(_WIN32)
+        "mov r10, r8\n   mov r8, rcx\n   mov r9, rdx\n"
+#else
+        "mov r8, rdi\n   mov r9, rsi\n   mov r10, rdx\n"
+#endif
+        "test r8, r8\n   jz 4f\n   test r9, r9\n   jz 4f\n   xor ecx, ecx\n"
+        "1:  cmp rcx, r10\n   jae 2f\n   movzx eax, byte ptr [r8 + rcx]\n   movzx r11d, byte ptr [r9 + rcx]\n"
+        "cmp eax, r11d\n   jne 4f\n   test eax, eax\n   jz 4f\n   inc rcx\n   jmp 1b\n"
+        "2:  movzx eax, byte ptr [r8 + r10]\n   cmp eax, 64\n   jae 3f\n"
+        "mov rcx, 0x5800034100000601\n   bt rcx, rax\n   setc al\n   movzx eax, al\n" SH_ASM_RET
+        "3:  cmp eax, 124\n   sete al\n   movzx eax, al\n" SH_ASM_RET
+        "4:  xor eax, eax\n" SH_ASM_RET
+        SH_ASM_END(sh_word_is)
+
+        /* sh_assign_head(text, length) -> NAME[+] or NAME[sub][+] */
+        SH_ASM_FUNC(sh_assign_head)
+        SH_LOAD2
+        "test r8, r8\n   jz 5f\n   test r9, r9\n   jz 5f\n   cmp byte ptr [r8 + r9 - 1], 43\n   jne 1f\n"
+        "dec r9\n   jz 5f\n"
+        "1:  movzx eax, byte ptr [r8]\n   mov ecx, eax\n   or ecx, 32\n   sub ecx, 97\n"
+        "cmp ecx, 25\n   jbe 2f\n   cmp eax, 95\n   jne 5f\n"
+        "2:  mov r10, 1\n"
+        "3:  cmp r10, r9\n   jae 6f\n   movzx eax, byte ptr [r8 + r10]\n   mov ecx, eax\n   or ecx, 32\n   sub ecx, 97\n"
+        "cmp ecx, 25\n   jbe 4f\n   lea ecx, [rax - 48]\n   cmp ecx, 9\n   jbe 4f\n   cmp eax, 95\n   jne 7f\n"
+        "4:  inc r10\n   jmp 3b\n"
+        "7:  cmp eax, 91\n   jne 5f\n   mov rcx, r9\n   sub rcx, r10\n   cmp rcx, 2\n   jbe 5f\n"
+        "cmp byte ptr [r8 + r9 - 1], 93\n   jne 5f\n"
+        "6:  mov eax, 1\n" SH_ASM_RET
+        "5:  xor eax, eax\n" SH_ASM_RET
+        SH_ASM_END(sh_assign_head)
+
         ".att_syntax prefix\n"
 );
 
@@ -587,6 +723,64 @@ __asm__(
         "8:  li a0, 1\n" SH_ASM_RET
         "6:  li a0, 0\n" SH_ASM_RET
         SH_ASM_END(sh_assign_split)
+
+        /* sh_param_pattern(a0=at) */
+        SH_ASM_FUNC(sh_param_pattern)
+        "beqz a0, 9f\n   lbu t0, 0(a0)\n   li t1, 33\n   bne t0, t1, 1f\n   addi a0, a0, 1\n   lbu t0, 0(a0)\n"
+        "1:  li t1, 35\n   bne t0, t1, 2f\n   addi a0, a0, 1\n   lbu t0, 0(a0)\n"
+        "2:  ori t1, t0, 32\n   addi t1, t1, -97\n   li t2, 25\n   bleu t1, t2, 3f\n   li t3, 95\n   beq t0, t3, 3f\n"
+        "addi t1, t0, -48\n   li t4, 9\n   bleu t1, t4, 4f\n   beqz t0, 5f\n   addi a0, a0, 1\n   j 5f\n"
+        "3:  addi a0, a0, 1\n   lbu t0, 0(a0)\n   ori t1, t0, 32\n   addi t1, t1, -97\n   li t2, 25\n   bleu t1, t2, 3b\n"
+        "addi t1, t0, -48\n   li t4, 9\n   bleu t1, t4, 3b\n   li t3, 95\n   beq t0, t3, 3b\n   j 5f\n"
+        "4:  addi a0, a0, 1\n   lbu t0, 0(a0)\n   addi t1, t0, -48\n   li t4, 9\n   bleu t1, t4, 4b\n"
+        "5:  lbu t0, 0(a0)\n   li t1, 91\n   bne t0, t1, 8f\n   addi a0, a0, 1\n   li a1, 1\n   li t2, 92\n   li t3, 93\n"
+        "6:  beqz a1, 8f\n   lbu t0, 0(a0)\n   beqz t0, 9f\n   addi a0, a0, 1\n"
+        "bne t0, t2, 7f\n   lbu t0, 0(a0)\n   beqz t0, 9f\n   addi a0, a0, 1\n   j 6b\n"
+        "7:  bne t0, t1, 10f\n   addi a1, a1, 1\n   j 6b\n"
+        "10: bne t0, t3, 6b\n   addi a1, a1, -1\n   j 6b\n"
+        "8:  lbu t0, 0(a0)\n   li t1, 35\n   beq t0, t1, 11f\n   li t1, 37\n   beq t0, t1, 11f\n"
+        "9:  li a0, 0\n" SH_ASM_RET
+        "11: li a0, 1\n" SH_ASM_RET
+        SH_ASM_END(sh_param_pattern)
+
+        /* sh_dless_candidate(a0=line, a1=at) */
+        SH_ASM_FUNC(sh_dless_candidate)
+        "beqz a0, 4f\n   beqz a1, 4f\n   bltu a1, a0, 4f\n   lbu t0, 0(a1)\n   beqz t0, 1f\n"
+        "li t1, 60\n   lbu t0, 1(a1)\n   bne t0, t1, 1f\n   lbu t0, 2(a1)\n   bne t0, t1, 3f\n"
+        "1:  sub t2, a1, a0\n   li t3, 2\n   li t4, 10\n   li t5, 92\n"
+        "2:  bltu t2, t3, 5f\n   lbu t0, -1(a1)\n   bne t0, t4, 5f\n"
+        "lbu t0, -2(a1)\n   bne t0, t5, 5f\n   addi a1, a1, -2\n   addi t2, t2, -2\n   j 2b\n"
+        "5:  beqz t2, 4f\n   lbu t0, -1(a1)\n   li t1, 60\n   bne t0, t1, 4f\n"
+        "3:  li a0, 1\n" SH_ASM_RET
+        "4:  li a0, 0\n" SH_ASM_RET
+        SH_ASM_END(sh_dless_candidate)
+
+        /* sh_word_is(a0=at, a1=word, a2=length) */
+        SH_ASM_FUNC(sh_word_is)
+        "beqz a0, 4f\n   beqz a1, 4f\n   li t0, 0\n"
+        "1:  bgeu t0, a2, 2f\n   add t1, a0, t0\n   lbu t2, 0(t1)\n   add t1, a1, t0\n   lbu t3, 0(t1)\n"
+        "bne t2, t3, 4f\n   beqz t2, 4f\n   addi t0, t0, 1\n   j 1b\n"
+        "2:  add t1, a0, a2\n   lbu t2, 0(t1)\n   li t3, 64\n   bgeu t2, t3, 3f\n"
+        "li t4, 0x5800034100000601\n   srl t4, t4, t2\n   andi a0, t4, 1\n" SH_ASM_RET
+        "3:  addi t2, t2, -124\n   seqz a0, t2\n" SH_ASM_RET
+        "4:  li a0, 0\n" SH_ASM_RET
+        SH_ASM_END(sh_word_is)
+
+        /* sh_assign_head(a0=text, a1=length) */
+        SH_ASM_FUNC(sh_assign_head)
+        "beqz a0, 5f\n   beqz a1, 5f\n   addi t0, a1, -1\n   add t1, a0, t0\n   lbu t2, 0(t1)\n"
+        "li t3, 43\n   bne t2, t3, 1f\n   mv a1, t0\n   beqz a1, 5f\n"
+        "1:  lbu t2, 0(a0)\n   ori t3, t2, 32\n   addi t3, t3, -97\n   li t4, 25\n   bleu t3, t4, 2f\n"
+        "li t5, 95\n   bne t2, t5, 5f\n"
+        "2:  li t0, 1\n   li t4, 25\n   li t5, 95\n   li t6, 9\n"
+        "3:  bgeu t0, a1, 6f\n   add t1, a0, t0\n   lbu t2, 0(t1)\n   ori t3, t2, 32\n   addi t3, t3, -97\n"
+        "bleu t3, t4, 4f\n   addi t3, t2, -48\n   bleu t3, t6, 4f\n   bne t2, t5, 7f\n"
+        "4:  addi t0, t0, 1\n   j 3b\n"
+        "7:  li t3, 91\n   bne t2, t3, 5f\n   sub t3, a1, t0\n   li t4, 2\n   bleu t3, t4, 5f\n"
+        "addi t1, a1, -1\n   add t1, a0, t1\n   lbu t2, 0(t1)\n   li t3, 93\n   bne t2, t3, 5f\n"
+        "6:  li a0, 1\n" SH_ASM_RET
+        "5:  li a0, 0\n" SH_ASM_RET
+        SH_ASM_END(sh_assign_head)
 );
 
 #endif
