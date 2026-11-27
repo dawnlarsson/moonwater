@@ -403,352 +403,90 @@ static void dbus_text(char *to, long room, const char *from)
 #endif
 }
 
+#define DBUS_WIRE_ASM_IMPLEMENTATION
+#include "dbus_wire.asm.c"
+
 static unsigned long dbus_get32(const unsigned char *p)
 {
-        return (unsigned long)p[0] | (unsigned long)p[1] << 8 | (unsigned long)p[2] << 16 | (unsigned long)p[3] << 24;
+        return (unsigned long)dbus_wire_get32(p, 0);
 }
 
 #define DBUS_ALIGN(at, n) (((at) + (n)-1) & ~((long)(n)-1))
 
 /* ---- grammar: UTF-8, names, paths, signatures ---- */
 
-// One valid UTF-8 text with no NUL: the shortest forms, no surrogates, nothing past U+10FFFF; the C walk, a character at a time.
 static int dbus_utf8_walk(const unsigned char *s, long n)
 {
-        for (long at = 0; at < n;)
-        {
-                unsigned char c = s[at];
-                long more = c < 0x80 ? 0 : c >= 0xc2 && c < 0xe0 ? 1 : c >= 0xe0 && c < 0xf0 ? 2 : c >= 0xf0 && c < 0xf5 ? 3 : -1;
-                unsigned long code;
-
-                if (!c || more < 0 || at + more >= n + (more == 0))
-                        return 0;
-                if (!more)
-                {
-                        at++;
-                        continue;
-                }
-                code = more == 1 ? c & 0x1fu : more == 2 ? c & 0x0fu : c & 0x07u;
-                for (long k = 1; k <= more; k++)
-                {
-                        if ((s[at + k] & 0xc0) != 0x80)
-                                return 0;
-                        code = code << 6 | (s[at + k] & 0x3fu);
-                }
-                if ((more == 2 && (code < 0x800 || (code >= 0xd800 && code < 0xe000))) || (more == 3 && (code < 0x10000 || code > 0x10ffff)))
-                        return 0;
-                at += more + 1;
-        }
-        return 1;
+        return dbus_wire_utf8_valid(s, n);
 }
 
-/*
-        The same, for a text with a NUL after it (every caller's: a string of a message is checked for its NUL first, a
-        setting's is a C string): from DBUS_UTF8_LIBRARY bytes, lib.c's validator, which holds the same strictness (a lead
-        of C2 to F4, no overlong form, no surrogate, nothing past U+10FFFF), and its NUL is the length's, which stops at
-        the first.
-*/
 static int dbus_utf8(const unsigned char *s, long n)
 {
 #if DBUS_LIBRARY
         if (n >= DBUS_UTF8_LIBRARY)
                 return memory_utf8_valid_span((address_any)s, (positive)n).x == (positive)n && string_length((const_string)s) == (positive)n;
 #endif
-        return dbus_utf8_walk(s, n);
+        return dbus_wire_utf8_valid(s, n);
 }
 
-static int dbus_letter(char c)
-{
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-
-static int dbus_digit(char c)
-{
-        return c >= '0' && c <= '9';
-}
-
-// An object path: / or elements of letters, digits and underscores after slashes, none empty, no slash at the end.
 static int dbus_valid_path(const char *s, long n)
 {
-        if (n < 1 || n > 255 || s[0] != '/')
-                return 0;
-        if (n == 1)
-                return 1;
-        for (long at = 1, start = 1; at <= n; at++)
-        {
-                if (at == n || s[at] == '/')
-                {
-                        if (at == start)
-                                return 0;
-                        start = at + 1;
-                }
-                else if (!dbus_letter(s[at]) && !dbus_digit(s[at]))
-                        return 0;
-        }
-        return s[n - 1] != '/';
+        return dbus_wire_valid_path(s, n);
 }
 
-// kind 0: an interface or error name (two elements at least; letters, digits and underscores, none leading a digit);
-// 1: a bus name, well known (elements may have a dash) or unique (a colon first, elements may lead with a digit);
-// 2: a member name.
 static int dbus_valid_name(const char *s, long n, int kind)
 {
-        long dots = 0, start = 0;
-        int unique = kind == 1 && n > 0 && s[0] == ':';
-
-        if (n < 1 || n > 255)
-                return 0;
-        if (kind == 2)
-        {
-                if (!dbus_letter(s[0]))
-                        return 0;
-                for (long at = 1; at < n; at++)
-                        if (!dbus_letter(s[at]) && !dbus_digit(s[at]))
-                                return 0;
-                return 1;
-        }
-        if (unique)
-                start = 1;
-        for (long at = start; at <= n; at++)
-        {
-                if (at == n || s[at] == '.')
-                {
-                        if (at == start)
-                                return 0;
-                        start = at + 1;
-                        dots += at < n;
-                }
-                else
-                {
-                        int first = at == start;
-                        int dash = kind == 1 && s[at] == '-';
-
-                        if (!dbus_letter(s[at]) && !dash && !(dbus_digit(s[at]) && (!first || unique)))
-                                return 0;
-                }
-        }
-        return dots >= 1 && s[n - 1] != '.';
+        return dbus_wire_valid_name(s, n, kind);
 }
 
-// One complete type of a signature, from *at; the depth of arrays, of structs and of dict entries counted apart, each to 32, as libdbus does.
 static int dbus_sig_one(const char *s, long n, long *at, int arrays, int structs, int dicts)
 {
-        char c;
-
-        if (*at >= n || arrays > 32 || structs > 32 || dicts > 32)
-                return 0;
-        c = s[(*at)++];
-        switch (c)
-        {
-        case 'y': case 'b': case 'n': case 'q': case 'i': case 'u': case 'x': case 't': case 'd': case 's': case 'o': case 'g':
-        case 'h': case 'v':
-                return 1;
-        case 'a':
-                if (*at < n && s[*at] == '{')
-                {
-                        (*at)++;
-                        // a dict entry: a basic key and any value
-                        if (*at >= n || !(s[*at] == 'y' || s[*at] == 'b' || s[*at] == 'n' || s[*at] == 'q' || s[*at] == 'i' || s[*at] == 'u' ||
-                                          s[*at] == 'x' || s[*at] == 't' || s[*at] == 'd' || s[*at] == 's' || s[*at] == 'o' || s[*at] == 'g' ||
-                                          s[*at] == 'h'))
-                                return 0;
-                        (*at)++;
-                        if (!dbus_sig_one(s, n, at, arrays + 1, structs, dicts + 1) || *at >= n || s[(*at)++] != '}')
-                                return 0;
-                        return 1;
-                }
-                return dbus_sig_one(s, n, at, arrays + 1, structs, dicts);
-        case '(':
-        {
-                long members = 0;
-
-                while (*at < n && s[*at] != ')')
-                {
-                        if (!dbus_sig_one(s, n, at, arrays, structs + 1, dicts))
-                                return 0;
-                        members++;
-                }
-                if (*at >= n || !members)
-                        return 0;
-                (*at)++;
-                return 1;
-        }
-        default:
-                return 0;
-        }
+        dbus_i64 pos = *at;
+        int ok = dbus_wire_sig_one(s, n, &pos, arrays, structs, dicts);
+        *at = (long)pos;
+        return ok;
 }
 
-// A signature: complete types, up to 255 characters.
 static int dbus_valid_signature(const char *s, long n)
 {
-        long at = 0;
-
-        if (n > 255)
-                return 0;
-        while (at < n)
-                if (!dbus_sig_one(s, n, &at, 0, 0, 0))
-                        return 0;
-        return 1;
+        return dbus_wire_valid_signature(s, n);
 }
 
-// A variant's signature at p[*at] (a byte count, the text, a NUL) that is one complete type; its length, or -1. *at moves past it.
 static long dbus_variant_sig(const unsigned char *p, long *at, long limit)
 {
-        long length, inner = 0, start;
-
-        if (*at + 1 > limit)
-                return -1;
-        length = p[(*at)++];
-        start = *at;
-        if (length > limit - *at - 1 || p[*at + length] || !dbus_sig_one((const char *)p + start, length, &inner, 0, 0, 0) || inner != length)
-                return -1;
-        *at += length + 1;
-        return length;
+        dbus_i64 pos = *at;
+        dbus_i64 r = dbus_wire_variant_sig(p, &pos, limit);
+        *at = (long)pos;
+        return (long)r;
 }
 
 /* ---- a body, valid down to its padding ---- */
 
-static int dbus_value(const unsigned char *p, long *at, long limit, const char *sig, long sig_length, long *s, int depth, unsigned long fds);
-
 static long dbus_fixed_size(char c)
 {
-        return c == 'y' ? 1 : c == 'n' || c == 'q' ? 2 : c == 'b' || c == 'i' || c == 'u' || c == 'h' ? 4 : c == 'x' || c == 't' || c == 'd' ? 8 : 0;
+        return (long)dbus_wire_fixed_size((unsigned char)c);
 }
 
 static int dbus_pad_zero(const unsigned char *p, long *at, long limit, long align)
 {
-        long to = DBUS_ALIGN(*at, align);
-
-        if (to > limit)
-                return 0;
-        for (long k = *at; k < to; k++)
-                if (p[k])
-                        return 0;
-        *at = to;
-        return 1;
+        dbus_i64 pos = *at;
+        int ok = dbus_wire_pad_zero(p, &pos, limit, align);
+        *at = (long)pos;
+        return ok;
 }
 
-// One value of the type at sig[*s] from p[*at] on, within limit; both cursors move past it. 1 when it is whole and valid.
 static int dbus_value(const unsigned char *p, long *at, long limit, const char *sig, long sig_length, long *s, int depth, unsigned long fds)
 {
-        char c = sig[(*s)++];
-        long size = dbus_fixed_size(c), length;
-
-        if (depth > DBUS_DEPTH)
-                return 0;
-        if (size)
-        {
-                if (!dbus_pad_zero(p, at, limit, size) || *at + size > limit)
-                        return 0;
-                if (c == 'b' && dbus_get32(p + *at) > 1)
-                        return 0;
-                if (c == 'h' && dbus_get32(p + *at) >= fds)
-                        return 0;
-                *at += size;
-                return 1;
-        }
-        switch (c)
-        {
-        case 's':
-        case 'o':
-                if (!dbus_pad_zero(p, at, limit, 4) || *at + 4 > limit)
-                        return 0;
-                length = (long)dbus_get32(p + *at);
-                *at += 4;
-                if (length < 0 || length > limit - *at - 1 || p[*at + length] || !dbus_utf8(p + *at, length) ||
-                    (c == 'o' && !dbus_valid_path((const char *)p + *at, length)))
-                        return 0;
-                *at += length + 1;
-                return 1;
-        case 'g':
-                if (*at + 1 > limit)
-                        return 0;
-                length = p[(*at)++];
-                if (length > limit - *at - 1 || p[*at + length] || !dbus_valid_signature((const char *)p + *at, length))
-                        return 0;
-                *at += length + 1;
-                return 1;
-        case 'v':
-        {
-                long inner = 0, start = *at + 1;
-
-                length = dbus_variant_sig(p, at, limit);
-                return length >= 0 && dbus_value(p, at, limit, (const char *)p + start, length, &inner, depth + 1, fds);
-        }
-        case 'a':
-        {
-                long element = *s, after, stop, align, counted, previous = 0, elements = 0;
-                char first;
-
-                if (!dbus_pad_zero(p, at, limit, 4) || *at + 4 > limit)
-                        return 0;
-                length = (long)dbus_get32(p + *at);
-                *at += 4;
-                counted = *at;
-                first = sig[element];
-                align = first == '{' || first == '(' ? 8 : dbus_fixed_size(first) ? dbus_fixed_size(first) : first == 's' || first == 'o' || first == 'a' ? 4 : 1;
-                if (!dbus_pad_zero(p, at, limit, align) || length < 0 || length > 67108864 || length > limit - *at)
-                        return 0;
-                stop = *at + length;
-                after = element - 1; // the array's own type, from its a, for where the signature goes on
-                if (!dbus_sig_one(sig, sig_length, &after, 0, 0, 0))
-                        return 0;
-                while (*at < stop)
-                {
-                        long each = element;
-
-                        previous = *at;
-                        elements++;
-                        if (first == '{')
-                        {
-                                // a dict entry is a container of its own, a level below the array's (libdbus counts it so)
-                                if (!dbus_pad_zero(p, at, stop, 8))
-                                        return 0;
-                                each++;
-                                if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 2, fds) ||
-                                    !dbus_value(p, at, stop, sig, sig_length, &each, depth + 2, fds))
-                                        return 0;
-                        }
-                        else if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 1, fds))
-                                return 0;
-                }
-                /*
-                        GDBus (GLib's gdbusmessage.c, 2.90 at least) counts an array's length from where the length ends, before
-                        the padding to its elements' 8: when that padding is 4 bytes, it takes the array to end 4 bytes early,
-                        and an element that begins after that point is not read. The last element is lost and what follows is
-                        read 4 or more bytes back from where it is: sent (a(ay)y) of [([1,2,3,4],), ([],)] and 9, GDBus reads
-                        [([1,2,3,4],)] and 0; where that misreading meets something not valid, GDBus ends its connection. So
-                        such an array, valid as it is and read rightly by libdbus, is not taken: that a client would read other
-                        values than the bus passed on, or be disconnected by another, is worse than refusing a layout no
-                        program has use for (the last of two or more structs or dict entries no more than four bytes).
-                        GDBus stops before the last element when the one before it ends where GDBus takes the end to be.
-                */
-                if (*at != stop || ((first == '(' || first == '{') && counted + 4 == stop - length && elements > 1 && previous >= stop - 4))
-                        return 0;
-                *s = after;
-                return 1;
-        }
-        case '(':
-                if (!dbus_pad_zero(p, at, limit, 8))
-                        return 0;
-                while (*s < sig_length && sig[*s] != ')')
-                        if (!dbus_value(p, at, limit, sig, sig_length, s, depth + 1, fds))
-                                return 0;
-                (*s)++;
-                return 1;
-        default:
-                return 0;
-        }
+        struct dbus_wire_cursor c = {p, *at, limit, sig, sig_length, *s, fds, depth, 0};
+        int ok = dbus_wire_value(&c);
+        *at = (long)c.at;
+        *s = (long)c.s;
+        return ok;
 }
 
 static int dbus_body_valid(const unsigned char *body, long length, const char *sig, unsigned long fds)
 {
-        long at = 0, s = 0, n = dbus_length(sig);
-
-        while (s < n)
-                if (!dbus_value(body, &at, length, sig, n, &s, 0, fds))
-                        return 0;
-        return at == length;
+        return dbus_wire_body_valid(body, length, sig, dbus_length(sig), fds, 0);
 }
 
 /* ---- a message, parsed ---- */
@@ -777,31 +515,24 @@ struct dbus_message
 // stamped its sender on may be up to DBUS_STAMPED.)
 static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
 {
-        long fields, limit, at = 16, body, pos;
+        struct dbus_wire_hdr hdr;
+        long limit, at = 16, body, pos;
         unsigned seen = 0;
 
         m->has = 0;
         m->path = m->interface = m->member = m->error = m->destination = m->sender = m->signature = "";
         m->reply = 0;
         m->fds = 0;
-        if (size < 16 || size > DBUS_STAMPED || b[0] != 'l' || b[3] != 1 || b[1] < DBUS_CALL || b[1] > DBUS_SIGNAL)
+        if (!dbus_wire_header_check(b, size, DBUS_STAMPED, &hdr) || hdr.big_endian)
                 return -1;
         m->bytes = b;
         m->size = size;
-        m->type = b[1];
-        m->flags = b[2];
-        m->serial = dbus_get32(b + 8);
-        body = (long)dbus_get32(b + 4);
-        fields = (long)dbus_get32(b + 12);
-        if (!m->serial || fields < 0 || fields > size - 16 || body < 0 || body > size)
-                return -1;
-        limit = 16 + fields;
-        pos = DBUS_ALIGN(limit, 8);
-        if (pos + body != size)
-                return -1;
-        for (long k = limit; k < pos; k++)
-                if (b[k])
-                        return -1;
+        m->type = hdr.type;
+        m->flags = hdr.flags;
+        m->serial = hdr.serial;
+        body = (long)hdr.body_len;
+        limit = (long)hdr.fields_limit;
+        pos = (long)hdr.body_at;
         while (at < limit)
         {
                 // a field is a struct of its code and a variant: aligned to 8, the code, the variant's type, its value
@@ -903,21 +634,15 @@ struct dbus_out
         int bad;
 };
 
+_Static_assert(sizeof(struct dbus_out) == sizeof(struct dbus_wire_out), "dbus_out != dbus_wire_out");
+_Static_assert(offset_of(struct dbus_out, at) == offset_of(struct dbus_wire_out, at), "dbus_out.at");
+_Static_assert(offset_of(struct dbus_out, length) == offset_of(struct dbus_wire_out, length), "dbus_out.length");
+_Static_assert(offset_of(struct dbus_out, room) == offset_of(struct dbus_wire_out, room), "dbus_out.room");
+_Static_assert(offset_of(struct dbus_out, bad) == offset_of(struct dbus_wire_out, bad), "dbus_out.bad");
+
 static void dbus_o_pad(struct dbus_out *w, long align)
 {
-        long to;
-
-        if (w->bad)
-                return;
-        to = DBUS_ALIGN(w->length, align);
-        if (to > w->room)
-        {
-                w->bad = 1;
-                return;
-        }
-        for (long k = w->length; k < to; k++)
-                w->at[k] = 0;
-        w->length = to;
+        dbus_wire_o_pad((struct dbus_wire_out *)w, align);
 }
 
 static void dbus_o_raw(struct dbus_out *w, const void *bytes, long n)
@@ -942,10 +667,7 @@ static void dbus_o_u8(struct dbus_out *w, unsigned v)
 
 static void dbus_o_u32(struct dbus_out *w, unsigned long v)
 {
-        unsigned char c[4] = {(unsigned char)v, (unsigned char)(v >> 8), (unsigned char)(v >> 16), (unsigned char)(v >> 24)};
-
-        dbus_o_pad(w, 4);
-        dbus_o_raw(w, c, 4);
+        dbus_wire_o_u32((struct dbus_wire_out *)w, (dbus_u32)v);
 }
 
 static void dbus_o_u64(struct dbus_out *w, unsigned long v)
@@ -960,10 +682,7 @@ static void dbus_o_u64(struct dbus_out *w, unsigned long v)
 
 static void dbus_o_string(struct dbus_out *w, const char *s)
 {
-        long n = dbus_length(s);
-
-        dbus_o_u32(w, (unsigned long)n);
-        dbus_o_raw(w, s, n + 1);
+        dbus_wire_o_string((struct dbus_wire_out *)w, s);
 }
 
 static void dbus_o_sig(struct dbus_out *w, const char *s)
