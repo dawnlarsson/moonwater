@@ -4553,7 +4553,7 @@ COLD string_address shell_array_get(const_string name, positive length,
    n.  Keep that distinction at the declaration boundary and let the common
    environment writer do the actual cell growth/copy. */
 static bool shell_declare_binding_rejected;
-static bool shell_valid_name(string_address name, positive length);
+#define shell_valid_name(name, length) (sh_valid_name((const char *)(name), (sh_u64)(length)) != 0)
 //      A name, or an element of one with a subscript in its brackets.
 static bool shell_reference_valid(const_string name, positive length)
 {
@@ -5819,12 +5819,6 @@ fn shell_quoted(writer write, string_address value)
                 if (!string_get(value) && !shell_bash_compat)
                         return;
         }
-}
-
-static bool shell_valid_name(string_address name, positive length)
-{
-        return length && !byte_is_digit(string_get(name)) &&
-               string_span_max(name, length, string_set_name) == length;
 }
 
 /*

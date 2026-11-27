@@ -666,27 +666,7 @@ static PURE positive2 expand_name_hash(string_address at)
 
 // A scalar parameter name after Bash's indirect ${!name}. Arrays have their
 // own grammar and representation and are deliberately not smuggled in here.
-static bool expand_parameter_name(string_address name, positive length)
-{
-        p8 first = string_get(name);
-        bool numeric;
-
-        if (!length)
-                return false;
-
-        if (length == 1 && (first == '@' || first == '*' || first == '#' ||
-                            first == '?' || first == '$' || first == '!' ||
-                            first == '-'))
-                return true;
-
-        numeric = byte_is_digit(first);
-
-        if (!numeric && !expand_assignable_name(name))
-                return false;
-
-        return string_span_max(name, length, numeric ? string_set_digits
-                                                     : string_set_name) == length;
-}
+#define expand_parameter_name(name, length) (sh_param_name((const char *)(name), (sh_u64)(length)) != 0)
 
 /*
         Keep the common case on the stack and spill only a long value into the

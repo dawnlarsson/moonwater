@@ -139,6 +139,9 @@ _Static_assert(offset_of(lex_frame, token_room) == 8, "room");
 _Static_assert(offset_of(lex_frame, count) == 16, "count");
 _Static_assert(offset_of(lex_frame, line) == 24, "line");
 
+#define SH_SHELL_LEX_IMPLEMENTATION
+#include "shell_lex.c"
+
 /*
         Nested input gets its own token table; the outer table and the input
         it views remain alive until the nested source returns. lex_line_floor
@@ -426,16 +429,7 @@ static inline INLINE bool lex_comments_on()
         looked for and a substitution inside it is not opened again. Same walk
         either way, so it is one walk with the quote as its argument.
 */
-static PURE string_address lex_escaped_end(string_address at, p8 quote)
-{
-        while (1)
-        {
-                at = string_first_of_either_or_end(at, quote, '\\');
-                if (!string_get(at) || string_is(at, quote))
-                        return at;
-                at += string_get(at + 1) ? 2 : 1;
-        }
-}
+#define lex_escaped_end(at, quote) ((string_address)sh_escaped_end((const char *)(at), (sh_u32)(quote)))
 
 /* Where a POSIX dollar-single-quoted run closes. The escape is interpreted
    just before expansion; the lexer only keeps the quoted bytes together. */

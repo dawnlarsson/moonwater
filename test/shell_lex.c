@@ -203,6 +203,68 @@ static __attribute__((noinline)) sh_u64 ref_sh_unquote(const char *src, sh_u64 l
         return out;
 }
 
+static __attribute__((noinline)) sh_i32 ref_sh_valid_name(const char *s, sh_u64 len) {
+        if (!s || len == 0) return 0;
+        unsigned char c = (unsigned char)s[0];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) return 0;
+        for (sh_u64 i = 1; i < len; i++) {
+                c = (unsigned char)s[i];
+                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+                        return 0;
+        }
+        return 1;
+}
+
+static __attribute__((noinline)) sh_i32 ref_sh_param_name(const char *s, sh_u64 len) {
+        if (!s || len == 0) return 0;
+        unsigned char c = (unsigned char)s[0];
+        if (len == 1 && (c == '@' || c == '*' || c == '#' || c == '?' || c == '$' || c == '!' || c == '-'))
+                return 1;
+        if (c >= '0' && c <= '9') {
+                for (sh_u64 i = 1; i < len; i++) {
+                        unsigned char d = (unsigned char)s[i];
+                        if (d < '0' || d > '9') return 0;
+                }
+                return 1;
+        }
+        return ref_sh_valid_name(s, len);
+}
+
+static __attribute__((noinline)) const char *ref_sh_escaped_end(const char *at, sh_u32 quote) {
+        if (!at) return NULL;
+        unsigned char q = (unsigned char)quote;
+        while (*at) {
+                unsigned char c = (unsigned char)*at;
+                if (c == q) return at;
+                at++;
+                if (c == '\\' && *at) at++;
+        }
+        return at;
+}
+
+static __attribute__((noinline)) sh_i32 ref_sh_assign_split(const char *w, sh_u64 len, sh_u64 *name_len_out) {
+        if (!w || len == 0) return 0;
+        unsigned char c = (unsigned char)w[0];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) return 0;
+        sh_u64 i = 1;
+        while (i < len) {
+                c = (unsigned char)w[i];
+                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+                        break;
+                i++;
+        }
+        if (i >= len) return 0;
+        if (w[i] == '=') {
+                if (name_len_out) *name_len_out = i;
+                return 1;
+        }
+        if (w[i] == '+' && i + 1 < len && w[i + 1] == '=') {
+                if (name_len_out) *name_len_out = i;
+                return 2;
+        }
+        return 0;
+}
+
 /* ── Test harness helpers ──────────────────────────────────────────────────── */
 
 static int g_failures = 0;
@@ -443,10 +505,59 @@ int main(void) {
                         if ((r & 63) == 0) fuzz_buf[j] = (char)(r >> 8);
                         else fuzz_buf[j] = alphabet[r % alpha_len];
                 }
+                fuzz_buf[len] = '\0';
                 sh_u32 cap = (sh_u32)(rng_u64() % 40);
                 check_lex_case("fuzz", fuzz_buf, len, cap);
                 sh_u64 dst_cap = rng_u64() % 100;
                 check_unquote_case("fuzz", fuzz_buf, len, dst_cap);
+
+                /* Fuzz sh_valid_name, sh_param_name, sh_escaped_end, sh_assign_split */
+                g_checks += 4;
+                if (sh_valid_name(fuzz_buf, len) != ref_sh_valid_name(fuzz_buf, len)) g_failures++;
+                if (sh_param_name(fuzz_buf, len) != ref_sh_param_name(fuzz_buf, len)) g_failures++;
+                sh_u32 q = (sh_u32)(rng_u64() & 0xFF);
+                if (sh_escaped_end(fuzz_buf, q) != ref_sh_escaped_end(fuzz_buf, q)) g_failures++;
+                sh_u64 nl_a = 0xDEAD, nl_r = 0xDEAD;
+                sh_i32 as_a = sh_assign_split(fuzz_buf, len, &nl_a);
+                sh_i32 as_r = ref_sh_assign_split(fuzz_buf, len, &nl_r);
+                if (as_a != as_r || nl_a != nl_r) g_failures++;
+        }
+
+        /* Targeted checks for sh_valid_name, sh_param_name, sh_escaped_end, sh_assign_split */
+        {
+                const char *names[] = { "", "a", "_", "_a1", "FOO_bar9", "0", "123", "1a", "a-b",
+                                        "@", "*", "#", "?", "$", "!", "-", "!!", "@1", "a=1", "a+=1",
+                                        "FOO_9=bar", "FOO_9+=bar", "_=", "_+=", "1=x", "=x", "a+", "a+b" };
+                for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+                        sh_u64 l = (sh_u64)strlen(names[i]);
+                        g_checks += 4;
+                        if (sh_valid_name(names[i], l) != ref_sh_valid_name(names[i], l)) g_failures++;
+                        if (sh_param_name(names[i], l) != ref_sh_param_name(names[i], l)) g_failures++;
+                        sh_u64 na = 99, nr = 99;
+                        if (sh_assign_split(names[i], l, &na) != ref_sh_assign_split(names[i], l, &nr) || na != nr)
+                                g_failures++;
+                        if (sh_assign_split(names[i], l, NULL) != ref_sh_assign_split(names[i], l, NULL))
+                                g_failures++;
+                }
+                /* All 256 single-byte inputs for sh_valid_name & sh_param_name */
+                for (int b = 0; b < 256; b++) {
+                        char ch = (char)b;
+                        g_checks += 2;
+                        if (sh_valid_name(&ch, 1) != ref_sh_valid_name(&ch, 1)) g_failures++;
+                        if (sh_param_name(&ch, 1) != ref_sh_param_name(&ch, 1)) g_failures++;
+                }
+                g_checks += 4;
+                if (sh_valid_name(NULL, 3) != 0) g_failures++;
+                if (sh_param_name(NULL, 3) != 0) g_failures++;
+                if (sh_escaped_end(NULL, '"') != NULL) g_failures++;
+                if (sh_assign_split(NULL, 3, NULL) != 0) g_failures++;
+                const char *escs[] = { "", "\"", "\\\"\"", "abc\\\"def\"ghi", "trail\\", "\\\\\"", "noquote" };
+                for (size_t i = 0; i < sizeof(escs) / sizeof(escs[0]); i++) {
+                        g_checks += 3;
+                        if (sh_escaped_end(escs[i], '"') != ref_sh_escaped_end(escs[i], '"')) g_failures++;
+                        if (sh_escaped_end(escs[i], '\'') != ref_sh_escaped_end(escs[i], '\'')) g_failures++;
+                        if (sh_escaped_end(escs[i], '\\') != ref_sh_escaped_end(escs[i], '\\')) g_failures++;
+                }
         }
 
         if (g_failures != 0) {
