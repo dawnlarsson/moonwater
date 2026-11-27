@@ -83,60 +83,68 @@ struct canvas_damage
         unsigned int count;
 };
 
+#define COMPOSITOR_DAMAGE_OPS_ASM_IMPLEMENTATION
+#if defined(__has_include)
+# if __has_include("damage_ops.asm.c")
+#  include "damage_ops.asm.c"
+# elif __has_include("compositor/damage_ops.asm.c")
+#  include "compositor/damage_ops.asm.c"
+# else
+#  include "src/canvas/compositor/damage_ops.asm.c"
+# endif
+#else
+# include "damage_ops.asm.c"
+#endif
+
+_Static_assert(sizeof(struct canvas_rect) == sizeof(struct dmg_rect), "canvas_rect != dmg_rect size");
+_Static_assert(DMG_OPS_OFFSET(struct canvas_rect, x1) == DMG_OPS_OFFSET(struct dmg_rect, x1) &&
+               DMG_OPS_OFFSET(struct canvas_rect, y1) == DMG_OPS_OFFSET(struct dmg_rect, y1) &&
+               DMG_OPS_OFFSET(struct canvas_rect, x2) == DMG_OPS_OFFSET(struct dmg_rect, x2) &&
+               DMG_OPS_OFFSET(struct canvas_rect, y2) == DMG_OPS_OFFSET(struct dmg_rect, y2),
+               "canvas_rect != dmg_rect layout");
+_Static_assert(sizeof(struct canvas_damage) == sizeof(struct dmg_list), "canvas_damage != dmg_list size");
+_Static_assert(DMG_OPS_OFFSET(struct canvas_damage, r) == DMG_OPS_OFFSET(struct dmg_list, r) &&
+               DMG_OPS_OFFSET(struct canvas_damage, count) == DMG_OPS_OFFSET(struct dmg_list, count),
+               "canvas_damage != dmg_list layout");
+_Static_assert(COMPOSITOR_DAMAGE == DMG_LIST_CAP, "COMPOSITOR_DAMAGE != DMG_LIST_CAP");
+
 static inline INLINE CONST int rect_empty(struct canvas_rect r)
 {
-        return r.x2 <= r.x1 || r.y2 <= r.y1;
+        return dmg_rect_empty((const struct dmg_rect *)&r);
 }
 
 static inline INLINE CONST long rect_area(struct canvas_rect r)
 {
-        return (long)(r.x2 - r.x1) * (r.y2 - r.y1);
+        return (long)dmg_rect_area((const struct dmg_rect *)&r);
 }
 
 static inline INLINE CONST struct canvas_rect rect_join(struct canvas_rect a, struct canvas_rect b)
 {
-        return (struct canvas_rect){a.x1 < b.x1 ? a.x1 : b.x1, a.y1 < b.y1 ? a.y1 : b.y1,
-                                    a.x2 > b.x2 ? a.x2 : b.x2, a.y2 > b.y2 ? a.y2 : b.y2};
+        struct canvas_rect o;
+
+        dmg_rect_join((const struct dmg_rect *)&a, (const struct dmg_rect *)&b, (struct dmg_rect *)&o);
+        return o;
 }
 
 static inline INLINE CONST struct canvas_rect rect_meet(struct canvas_rect a, struct canvas_rect b)
 {
-        struct canvas_rect m = {a.x1 > b.x1 ? a.x1 : b.x1, a.y1 > b.y1 ? a.y1 : b.y1,
-                                a.x2 < b.x2 ? a.x2 : b.x2, a.y2 < b.y2 ? a.y2 : b.y2};
+        struct canvas_rect o;
 
-        return rect_empty(m) ? (struct canvas_rect){0, 0, 0, 0} : m;
+        dmg_rect_meet((const struct dmg_rect *)&a, (const struct dmg_rect *)&b, (struct dmg_rect *)&o);
+        return o;
 }
 
 // Whether outer covers inner: every point of inner is in outer (an empty inner is covered by anything).
 static inline INLINE CONST int rect_cover(struct canvas_rect outer, struct canvas_rect inner)
 {
-        return rect_empty(inner) || (outer.x1 <= inner.x1 && outer.y1 <= inner.y1 && outer.x2 >= inner.x2 && outer.y2 >= inner.y2);
+        return dmg_rect_cover((const struct dmg_rect *)&outer, (const struct dmg_rect *)&inner);
 }
 
 // The pieces of r outside cut, at most four, into out: the rows above and below cut at r's full width, and the sides between them. A cut that
 // does not meet r leaves r whole. Answers how many pieces (0 for an empty r).
 static inline INLINE int rect_cut(struct canvas_rect r, struct canvas_rect cut, struct canvas_rect out[4])
 {
-        struct canvas_rect m = rect_meet(r, cut);
-        struct canvas_rect parts[4] = {
-            {r.x1, r.y1, r.x2, m.y1},
-            {r.x1, m.y2, r.x2, r.y2},
-            {r.x1, m.y1, m.x1, m.y2},
-            {m.x2, m.y1, r.x2, m.y2},
-        };
-        int n = 0;
-
-        if (rect_empty(r))
-                return 0;
-        if (rect_empty(m))
-        {
-                out[0] = r;
-                return 1;
-        }
-        for (int k = 0; k < 4; k++)
-                if (!rect_empty(parts[k]))
-                        out[n++] = parts[k];
-        return n;
+        return dmg_rect_cut((const struct dmg_rect *)&r, (const struct dmg_rect *)&cut, (struct dmg_rect *)out);
 }
 
 static inline INLINE PURE struct canvas_rect rect_from_int4(const int p[4])
@@ -152,81 +160,13 @@ static inline INLINE void rect_to_int4(struct canvas_rect r, int p[4])
 // Add rectangle r to damage list d, coalescing whenever union area <= sum + slack (0 for exact damage, >0 for GPU slack merge).
 HOT static void damage_add(struct canvas_damage *restrict d, struct canvas_rect r, long slack)
 {
-        unsigned int at = 0;
-
-        if (unlikely(rect_empty(r)))
-                return;
-        while (at < d->count)
-        {
-                struct canvas_rect joined = rect_join(r, d->r[at]);
-
-                if (rect_area(joined) <= rect_area(r) + rect_area(d->r[at]) + slack)
-                {
-                        r = joined;
-                        d->r[at] = d->r[--d->count];
-                        at = 0;
-                }
-                else
-                        at++;
-        }
-        if (unlikely(d->count == COMPOSITOR_DAMAGE))
-        {
-                unsigned int best = 0;
-                long least = -1;
-
-                for (at = 0; at < COMPOSITOR_DAMAGE; at++)
-                {
-                        long grown = rect_area(rect_join(r, d->r[at])) - rect_area(d->r[at]);
-
-                        if (least < 0 || grown < least)
-                                least = grown, best = at;
-                }
-                d->r[best] = rect_join(r, d->r[best]);
-                return;
-        }
-        d->r[d->count++] = r;
+        dmg_add((struct dmg_list *)d, (const struct dmg_rect *)&r, (dmg_i64)slack);
 }
 
 // Subtract cut from every rectangle in d; returns 0 (leaving d untouched) if the pieces exceed COMPOSITOR_DAMAGE.
 HOT static int damage_subtract(struct canvas_damage *restrict d, struct canvas_rect cut)
 {
-        struct canvas_damage out;
-
-        out.count = 0;
-        for (unsigned int at = 0; at < d->count; at++)
-        {
-                struct canvas_rect r = d->r[at];
-
-                if (r.x2 <= cut.x1 || r.x1 >= cut.x2 || r.y2 <= cut.y1 || r.y1 >= cut.y2)
-                {
-                        if (unlikely(out.count == COMPOSITOR_DAMAGE))
-                                return 0;
-                        out.r[out.count++] = r;
-                        continue;
-                }
-                {
-                        int mid_y1 = cut.y1 > r.y1 ? cut.y1 : r.y1, mid_y2 = cut.y2 < r.y2 ? cut.y2 : r.y2;
-                        struct canvas_rect parts[4] = {
-                            {r.x1, r.y1, r.x2, cut.y1},
-                            {r.x1, cut.y2, r.x2, r.y2},
-                            {r.x1, mid_y1, cut.x1, mid_y2},
-                            {cut.x2, mid_y1, r.x2, mid_y2},
-                        };
-
-                        for (unsigned int k = 0; k < 4; k++)
-                        {
-                                struct canvas_rect c = rect_meet(parts[k], r);
-
-                                if (rect_empty(c))
-                                        continue;
-                                if (unlikely(out.count == COMPOSITOR_DAMAGE))
-                                        return 0;
-                                out.r[out.count++] = c;
-                        }
-                }
-        }
-        *d = out;
-        return 1;
+        return dmg_subtract((struct dmg_list *)d, (const struct dmg_rect *)&cut);
 }
 
 static void damage_load_compositor(struct canvas_damage *d)
