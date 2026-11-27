@@ -14,6 +14,8 @@
 
 #include "../lib.util.c"
 #include "shell_escape.asm.c"
+#define SH_SHELL_SORT_ASM_IMPLEMENTATION
+#include "shell_sort.asm.c"
 
 /* sort has its command entry point later in the file.  ptx, comm and join
    consume its same byte comparator without moving or cloning the ordering
@@ -24,6 +26,13 @@ enum
         SORT_DICTIONARY = 2,
         SORT_PRINTABLE = 4
 };
+
+_Static_assert(SORT_FOLD == SH_SORT_FOLD &&
+               SORT_DICTIONARY == SH_SORT_DICTIONARY &&
+               SORT_PRINTABLE == SH_SORT_PRINTABLE,
+               "SORT_* flag mismatch with shell_sort.asm.c");
+_Static_assert(sizeof(bool) == sizeof(sh_sort_u8),
+               "bool must be 1 byte for sh_sort_number_window");
 
 // Under a locale whose collation this machine has (fr_FR, en_US), every
 // lexical comparison of sort, join and comm is the locale's strcoll, decided
@@ -36252,10 +36261,6 @@ static fn sort_key_span(sort_key address_to key, p8 address_to at, positive leng
 
 // A number without a number parser: sign, then integer digits with the
 // leading zeros dropped, then the fraction, compared as text.
-static positive sort_zero_prefix(p8 address_to text, positive from, positive stop)
-{
-        return from + memory_span_byte(text + from, '0', stop - from);
-}
 
 /*
         A number as a locale writes it. GNU's strnumcmp is handed the locale's
@@ -36338,90 +36343,29 @@ typedef struct
         positive places;
 } sort_number;
 
+_Static_assert(sizeof(sort_number) == sizeof(struct sh_sort_number),
+               "sort_number != sh_sort_number size");
+_Static_assert(offset_of(sort_number, integer)  == SH_SORT_OFFSET(struct sh_sort_number, integer) &&
+               offset_of(sort_number, fraction) == SH_SORT_OFFSET(struct sh_sort_number, fraction) &&
+               offset_of(sort_number, rank)     == SH_SORT_OFFSET(struct sh_sort_number, rank) &&
+               offset_of(sort_number, places)   == SH_SORT_OFFSET(struct sh_sort_number, places),
+               "sort_number != sh_sort_number field offsets");
+
 // Signed integer width orders magnitudes before any digit comparison. Zero
 // has its own rank, including -0 and -.000; nonzero fractions have width zero.
 static sort_number sort_number_of(p8 address_to text, positive length)
 {
-        positive at = string_span_max(text, length, sort_blanks);
-        bool minus = at < length && text[at] == '-';
+        sort_number number;
 
-        // A leading plus is not a sign here: GNU sort reads +7 as no number
-        // at all, which sorts it with the zeros rather than after the sixes.
-        at += minus;
-        positive first = at;
-
-        at += string_span_max(text + at, length - at, string_set_digits);
-
-        first = sort_zero_prefix(text, first, at);
-        positive digits = at - first;
-        positive fraction = at;
-
-        if (at < length && text[at] == '.')
-        {
-                fraction = ++at;
-
-                at += string_span_max(text + at, length - at, string_set_digits);
-
-                at -= memory_span_byte_reverse(text + fraction, '0',
-                                               at - fraction);
-        }
-
-        positive places = at - fraction;
-        bipolar rank = digits || places ? (bipolar)digits + 1 : 0;
-
-        sort_number number = {.integer.at = text + first,
-                               .fraction = text + fraction,
-                               .rank = minus ? -rank : rank,
-                               .places = places};
-
-        // Equal-width integers fitting one word compare with one native
-        // integer instruction. Longer numbers retain their exact byte view;
-        // no conversion can round or overflow their significant digits.
-        if (digits <= sizeof(positive))
-        {
-                number.integer.packed = 0;
-
-                for (positive i = 0; i < digits; i++)
-                        number.integer.packed = (number.integer.packed << 8) |
-                                                text[first + i];
-        }
-
+        sh_sort_number_parse(text, length, (struct sh_sort_number address_to)address_of number);
         return number;
 }
 
 static PURE bipolar sort_compare_parsed(sort_number address_to a,
                                          sort_number address_to b)
 {
-        if (a->rank != b->rank)
-                return a->rank < b->rank ? -1 : 1;
-
-        if (!a->rank)
-                return 0;
-
-        bipolar sign = a->rank < 0 ? -1 : 1;
-        positive digits = (positive)(a->rank * sign - 1);
-        bipolar answer;
-
-        if (digits <= sizeof(positive))
-                answer = (a->integer.packed > b->integer.packed) -
-                         (a->integer.packed < b->integer.packed);
-        else
-                answer = memory_compare(a->integer.at, b->integer.at, digits);
-
-        if (!answer)
-        {
-                positive places = min(a->places, b->places);
-
-                if (places)
-                        answer = memory_compare(a->fraction, b->fraction, places);
-
-                // Trailing zeros were trimmed, so an unmatched suffix is
-                // strictly greater than the implicit zero padding.
-                if (!answer && a->places != b->places)
-                        answer = a->places < b->places ? -1 : 1;
-        }
-
-        return sign * answer;
+        return sh_sort_compare_parsed((const struct sh_sort_number address_to)a,
+                                      (const struct sh_sort_number address_to)b);
 }
 
 static PURE bipolar sort_compare_number_text(p8 address_to a, positive la, p8 address_to b, positive lb)
@@ -36697,33 +36641,6 @@ static bipolar sort_compare_general(p8 address_to a, positive la, p8 address_to 
 // no underscore, which is what separates it from every other definition
 // here. Blank is GNU's field_sep, which a newline is too: under -z a record
 // can hold one. Which bytes are kept is asked a byte at a time, so it is
-// answered from a table made when the run starts, for each of -d, -i, both.
-static b8 sort_kept[4][256];
-
-static fn sort_kept_ready()
-{
-        for (positive how = 0; how < 4; how++)
-        {
-                for (positive character = 0; character < 256; character++)
-                {
-                        bool keep = true;
-
-                        if (how & 1)
-                                keep = sort_blanks[character] || byte_is_alnum((p8)character);
-
-                        if ((how & 2) && (character < 0x20 || character >= 0x7f))
-                                keep = false;
-
-                        sort_kept[how][character] = keep;
-                }
-        }
-}
-
-static inline INLINE bool sort_looked_at(p8 character, positive how)
-{
-        return sort_kept[(how >> 1) & 3][character];
-}
-
 static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
                                positive how);
 
@@ -36779,52 +36696,7 @@ static bipolar sort_compare_bytes(p8 address_to a, positive la, p8 address_to b,
         if (sort_collating)
                 return sort_compare_collated(a, la, b, lb, how);
 
-        if (!how || how == SORT_FOLD)
-        {
-                positive length = min(la, lb);
-                bipolar order = how ? memory_compare_ascii_case(a, b, length)
-                                    : memory_compare(a, b, length);
-
-                if (order)
-                        return order < 0 ? -1 : 1;
-
-                return la == lb ? 0 : la < lb ? -1 : 1;
-        }
-
-        positive i = 0;
-        positive j = 0;
-
-        for (;;)
-        {
-                if (how & (SORT_DICTIONARY | SORT_PRINTABLE))
-                {
-                        while (i < la && !sort_looked_at(a[i], how))
-                                i++;
-
-                        while (j < lb && !sort_looked_at(b[j], how))
-                                j++;
-                }
-
-                if (i == la || j == lb)
-                        break;
-
-                p8 one = a[i++];
-                p8 two = b[j++];
-
-                if (how & SORT_FOLD)
-                {
-                        one = (p8)byte_to_upper(one);
-                        two = (p8)byte_to_upper(two);
-                }
-
-                if (one != two)
-                        return one < two ? -1 : 1;
-        }
-
-        if (i == la && j == lb)
-                return 0;
-
-        return i == la ? -1 : 1;
+        return sh_sort_compare_bytes(a, la, b, lb, how);
 }
 
 /*
@@ -36939,19 +36811,7 @@ static bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positiv
 static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
                                positive how)
 {
-        positive used = 0;
-
-        for (positive at = 0; at < length; at++)
-        {
-                p8 byte = from[at];
-
-                if ((how & (SORT_DICTIONARY | SORT_PRINTABLE)) && !sort_looked_at(byte, how))
-                        continue;
-
-                into[used++] = how & SORT_FOLD ? (p8)byte_to_upper(byte) : byte;
-        }
-
-        return used;
+        return sh_sort_translate(into, from, length, how);
 }
 
 static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, positive la,
@@ -37010,54 +36870,7 @@ static bipolar sort_human_order(p8 address_to at, positive length)
 
 static bipolar sort_human_order_text(p8 address_to at, positive length)
 {
-        positive scan = 0;
-        bipolar sign = 1;
-        bool nonzero = false;
-
-        scan = string_span_max(at, length, sort_blanks);
-
-        // Only a minus: GNU reads +7 as no number at all, here as in every
-        // other number this file reads.
-        if (scan < length && at[scan] == '-')
-        {
-                sign = -1;
-                scan++;
-        }
-
-        positive run = string_span_max(at + scan, length - scan, string_set_digits);
-
-        nonzero = memory_span_byte(at + scan, '0', run) < run;
-        scan += run;
-
-        // The point is stepped over whether or not digits follow it, so 25.G
-        // is twenty-five giga and not twenty-five: measured, and the reason
-        // the suffix is looked for after the point rather than before it.
-        if (scan < length && at[scan] == '.')
-        {
-                scan++;
-                run = string_span_max(at + scan, length - scan, string_set_digits);
-                nonzero |= memory_span_byte(at + scan, '0', run) < run;
-                scan += run;
-        }
-
-        if (!nonzero)
-                return 0;
-
-        switch (scan < length ? at[scan] : 0)
-        {
-        case 'k':
-        case 'K': return sign * 1;
-        case 'M': return sign * 2;
-        case 'G': return sign * 3;
-        case 'T': return sign * 4;
-        case 'P': return sign * 5;
-        case 'E': return sign * 6;
-        case 'Z': return sign * 7;
-        case 'Y': return sign * 8;
-        case 'R': return sign * 9;
-        case 'Q': return sign * 10;
-        default: return 0;
-        }
+        return sh_sort_human_order(at, length);
 }
 
 static bipolar sort_compare_human(p8 address_to a, positive la, p8 address_to b, positive lb)
@@ -37690,70 +37503,7 @@ static p64 sort_number_window(p8 address_to text, positive length,
 static p64 sort_number_window_text(p8 address_to text, positive length,
                                    bool address_to exact)
 {
-
-        // A key carries no blanks or a few, and a minus is as common as a
-        // digit, so every walk here is a table load a byte: a call to skip
-        // nothing was a quarter of sort -rn.
-        positive at = 0;
-
-        while (at < length && sort_blanks[text[at]])
-                at++;
-
-        bool minus = at < length && text[at] == '-';
-
-        at += minus;
-        positive first = at;
-
-        while (at < length && (p8)(text[at] - '0') < 10)
-                at++;
-
-        first += memory_span_byte(text + first, '0', at - first);
-
-        positive digits = at - first;
-        positive fraction = at;
-
-        if (at < length && text[at] == '.')
-        {
-                fraction = ++at;
-
-                while (at < length && (p8)(text[at] - '0') < 10)
-                        at++;
-
-                at -= memory_span_byte_reverse(text + fraction, '0',
-                                               at - fraction);
-        }
-
-        positive places = at - fraction;
-
-        if (!digits && !places)
-        {
-                address_to exact = true;
-                return (p64)0x80 << 56;
-        }
-
-        positive rank = digits + 1;
-        p64 body = 0;
-        positive taken = 0;
-
-        if (rank < 127)
-        {
-                for (positive i = 0; i < digits && taken < 7; i++, taken++)
-                        body = body << 8 | text[first + i];
-
-                for (positive i = 0; i < places && taken < 7; i++, taken++)
-                        body = body << 8 | text[fraction + i];
-
-                body <<= 8 * (7 - taken);
-        }
-        else
-                rank = 127;
-
-        address_to exact = rank < 127 && digits + places <= 7;
-
-        if (minus)
-                return (p64)(0x80 - rank) << 56 | (~body & 0x00ffffffffffffffull);
-
-        return (p64)(0x80 + rank) << 56 | body;
+        return sh_sort_number_window(text, length, (sh_sort_u8 address_to)exact);
 }
 
 /*
@@ -43449,7 +43199,6 @@ static b32 text_sort()
         }
         sort_collating = collate_ready();
         sort_stages_ready();
-        sort_kept_ready();
         sort_line_cost = sizeof(sort_line) + 2 * sizeof(sort_item) +
                          (sort_keys[0].whole ? 0 : sizeof(sort_span));
         sort_output_handle = -1;
