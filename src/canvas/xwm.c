@@ -1557,7 +1557,7 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
                 if (w->state & COMPOSITOR_XWM_FULLSCREEN)
                 {
                         compositor_fullscreen_on((int)row, covers >= 0 ? covers : compositor_xwm_covers(w));
-                        if (!compositor_xwm_is_popup(w) && !w->transient && !w->no_input)
+                        if (!compositor_xwm_is_popup(w) && !w->transient && !w->no_input && compositor_space_row_active((int)row))
                                 compositor_reveal((int)row);
                 }
                 else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
@@ -1590,12 +1590,13 @@ static int compositor_xwm_may_show(struct compositor_xwm *x, const struct compos
         const struct compositor_xwm_window *f;
         unsigned int base = x->resource_mask ? ~x->resource_mask : 0xffe00000u;
 
-        if (source == 2 || focus == w->row)
+        if (focus == w->row)
                 return 1;
         if (!compositor_space_row_active(w->row))
         {
-                // A window on an inactive Scene (e.g. a fullscreen game the person switched away from) must not yank the
-                // active Scene back even when the new Scene is empty (focus < 0), unless another of its own windows has focus.
+                // A window on an inactive Scene (e.g. a fullscreen game like HL2 the person switched away from) must not yank
+                // the active Scene back — even if it spoofs _NET_ACTIVE_WINDOW source=2 (SDL2/Source Engine) or the new Scene
+                // is empty (focus < 0) — unless another of its own windows currently has focus on the active Scene.
                 if (focus >= 0 && focus < COMPOSITOR_ROWS && compositor.showing[focus])
                 {
                         f = xwm_row_lookup(x, focus, 0);
@@ -1605,6 +1606,8 @@ static int compositor_xwm_may_show(struct compositor_xwm *x, const struct compos
                 compositor_xwm_counted_refusal();
                 return 0;
         }
+        if (source == 2)
+                return 1;
         if (focus < 0 || focus >= COMPOSITOR_ROWS || !compositor.showing[focus])
                 return 1;
         f = xwm_row_lookup(x, focus, 0);

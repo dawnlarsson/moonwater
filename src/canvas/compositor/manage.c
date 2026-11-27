@@ -2188,7 +2188,11 @@ static void compositor_take(int row)
         unsigned int lift = table->lift[row], moved = __atomic_load_n(&table->moved[row], __ATOMIC_ACQUIRE);
 
         if (compositor.showing[row] && lift != compositor.lifted[row])
-                compositor.lifted[row] = lift, compositor_reveal(row);
+        {
+                compositor.lifted[row] = lift;
+                if (compositor_space_row_active(row))
+                        compositor_reveal(row);
+        }
         if (compositor.showing[row] && moved != compositor.moved[row])
                 compositor.moved[row] = moved, compositor_move(row);
         if (frame == compositor.seen[row])

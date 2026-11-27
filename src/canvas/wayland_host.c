@@ -3395,7 +3395,10 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_UNFULLSCREEN: compositor_fullscreen_off(row); break;
         case WAYLAND_DO_UNMAXIMIZE: compositor_float(row); break;
         case WAYLAND_DO_CLOSE: compositor_close(row); break;
-        case WAYLAND_DO_FOCUS: compositor_reveal(row); break;
+        case WAYLAND_DO_FOCUS:
+                if (compositor_space_row_active(row))
+                        compositor_reveal(row);
+                break;
         case WAYLAND_DO_LAYER: compositor_layer_set(row, (signed char)a, (int)b); break;
         case WAYLAND_DO_PINCH_WANT: compositor.table->pinch_wanted[row] = a ? 1u : 0u; break;
         case WAYLAND_DO_MOVE: (void)compositor_grab_begin_client(row, 0, 1, 0); break;
