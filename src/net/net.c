@@ -12409,13 +12409,18 @@ static bipolar tls_read_until(
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
 
+#define NET_HTTP_PARSE_IMPLEMENTATION
+#include "http_parse.asm.c"
+_Static_assert(sizeof(bool) == sizeof(hp_u8), "bool must be 1 byte for http_parse_header");
+_Static_assert(sizeof(positive) == sizeof(hp_u64), "positive must be 8 bytes for http_parse");
+
 /* HTTP Host and DNS have narrower syntax than an arbitrary URI reg-name:
    letters, digits and the unreserved '-', '.' and '_' (DNS carries the
    underscore, and wget and curl reach such hosts).  The URL parser and the
    request serializer hold a host to this one rule. */
 static bool http_host_byte(p8 byte)
 {
-        return byte_is_alnum(byte) || byte == '-' || byte == '.' || byte == '_';
+        return http_parse_host_byte(byte) != 0;
 }
 
 /* The length of the scheme and its ':' in front of a URL or a reference --
@@ -12426,14 +12431,7 @@ static bool http_host_byte(p8 byte)
    redirect somewhere neither the server nor a policy meant. */
 static positive http_scheme_length(string_address url)
 {
-        positive length = 0;
-
-        if (!byte_is_alpha(string_get(url)))
-                return 0;
-        while (byte_is_alnum(url[length]) || url[length] == '+' ||
-               url[length] == '-' || url[length] == '.')
-                length++;
-        return url[length] == ':' ? length + 1 : 0;
+        return http_parse_scheme_length((const char *)url);
 }
 
 static bool http_web_scheme(string_address url, positive scheme)
@@ -12519,57 +12517,7 @@ static bipolar http_url_escape(string_address url, positive length, bool bare_ho
 static bool http_ipv4_spelling(const p8 address_to host, positive length,
                                p32 address_to ip)
 {
-        byte_reader reader = byte_reader_open(host, length);
-        p64 address = 0;
-        positive parts = 0;
-
-        for (;;)
-        {
-                byte_reader look = reader;
-                p8 first = byte_reader_u8(address_of look);
-                p8 second = byte_reader_u8(address_of look);
-                positive base = 10;
-                positive digits = 0;
-                p64 value = 0;
-
-                if (first == '0' && (second | 0x20) == 'x')
-                {
-                        base = 16;
-                        byte_reader_skip(address_of reader, 2);
-                }
-                else if (first == '0' && byte_is_digit(second))
-                {
-                        base = 8;
-                        byte_reader_skip(address_of reader, 1);
-                }
-                for (;; digits++)
-                {
-                        look = reader;
-                        positive digit = digit_known(byte_reader_u8(address_of look),
-                                                     base);
-
-                        if (!byte_reader_ok(address_of look) || digit >= base)
-                                break;
-                        value = value * base + digit;
-                        if (value > 0xffffffffu)
-                                return false;
-                        reader = look;
-                }
-                if (!digits)
-                        return false;
-                parts++;
-                if (!byte_reader_left(address_of reader))
-                {
-                        if (value >> (8 * (5 - parts)))
-                                return false;
-                        address_to ip = (p32)(address << (8 * (5 - parts)) | value);
-                        return true;
-                }
-                if (parts == 4 || value > 255 ||
-                    byte_reader_u8(address_of reader) != '.')
-                        return false;
-                address = address << 8 | value;
-        }
+        return http_parse_ipv4_spelling(host, length, ip) != 0;
 }
 
 /*
@@ -12735,32 +12683,7 @@ static bipolar http_origin_form(string_address path, p8 address_to into,
 //      Where the header ends: the blank line, in either spelling.
 static PURE bipolar http_header_end(p8 address_to bytes, positive size)
 {
-        //      The blank line is an LF, then a bare LF or a CRLF.  The field
-        //      walk drops the CR of a blank line as it does of any line, so
-        //      "Name: v\n\r\n" ends the head there too, and the finder must
-        //      agree or the head waits for bytes that never come.  Both
-        //      spellings are looked for at once and the one that starts
-        //      first wins; they start at different LFs, so they never tie.
-        //
-        //      Once the CRLF spelling is found at some offset, only a bare
-        //      one starting before it can win, so the second search stops
-        //      there rather than walking the rest of the buffer. A block
-        //      ending \r\n\r\n holds no \n\n at all, so searching the whole
-        //      of it was a scan of every byte after the answer -- on every
-        //      read, and once more per informational response ahead of the
-        //      final one, which is what a peer sending 1xx after 1xx one
-        //      byte at a time was buying.
-        p8 address_to crlf = (p8 address_to)memory_search(bytes, size, "\n\r\n", 3);
-        positive span = crlf ? (positive)(crlf - bytes) + 1 : size;
-        p8 address_to bare = (p8 address_to)memory_search(bytes, span, "\n\n", 2);
-
-        if (crlf && (!bare || crlf < bare))
-                return (bipolar)(crlf - bytes) + 3;
-
-        if (bare)
-                return (bipolar)(bare - bytes) + 2;
-
-        return -1;
+        return http_parse_header_end(bytes, size);
 }
 
 /* Validate the complete response head before assigning meaning to any field.
@@ -12785,8 +12708,7 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
    status-line control. */
 static bool http_token_byte(p8 byte)
 {
-        return byte_is_alnum(byte) ||
-               memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
+        return http_parse_token_byte(byte) != 0;
 }
 
 /* One line of a head or of a trailer, its line end gone.  A field is a
@@ -12795,14 +12717,7 @@ static bool http_token_byte(p8 byte)
    field name. */
 static bipolar http_field_name(p8 address_to line, positive stop)
 {
-        positive name = string_span_max((string_address)line, stop,
-                                         string_set_http_token);
-
-        if (!name || name == stop || line[name] != ':' ||
-            memory_text_span(line + name + 1, stop - name - 1) !=
-                stop - name - 1)
-                return -1;
-        return (bipolar)name;
+        return http_parse_field_name(line, stop);
 }
 
 /* A status line is never read past its code (http_status_code), so the
@@ -12814,20 +12729,8 @@ static bipolar http_field_name(p8 address_to line, positive stop)
    one.) */
 static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
-        positive at = 0;
-
-        if (field)
-                return http_field_name(line, stop) >= 0;
-        for (;;)
-        {
-                at += memory_text_span(line + at, stop - at);
-                if (at == stop)
-                        return true;
-                if (MOONWATER_STRICT_NET >= STRICT_TIGHT || !line[at] ||
-                    line[at] == '\r')
-                        return false;
-                at++;
-        }
+        return http_parse_line_valid(line, stop, field ? 1u : 0u,
+                                     MOONWATER_STRICT_NET >= STRICT_TIGHT ? 1u : 0u) != 0;
 }
 
 //      One header's value, by name, without regard to its case.
@@ -12835,105 +12738,15 @@ static string_address http_header(p8 address_to bytes, positive size,
                                   string_address name, positive address_to length,
                                   bool address_to repeated)
 {
-        positive at = 0;
-        positive want = string_length(name);
-        string_address found = null;
-        positive found_length = 0;
-
-        if (repeated)
-                address_to repeated = false;
-
-        while (at < size)
-        {
-                positive line = at;
-                positive stop = at + memory_span_without_byte(
-                    bytes + at, '\n', size - at);
-
-                at = stop + (stop < size);
-
-                if (stop > line && bytes[stop - 1] == '\r')
-                        stop--;
-
-                if (stop - line <= want || bytes[line + want] != ':')
-                        continue;
-
-                if (memory_compare_ascii_case(bytes + line, name, want))
-                        continue;
-
-                {
-                        positive from = line + want + 1;
-
-                        from += string_span_max((string_address)(bytes + from), stop - from,
-                                                string_set_blanks);
-
-                        if (found)
-                        {
-                                if (repeated)
-                                        address_to repeated = true;
-                                continue;
-                        }
-
-                        /* RFC 9112 5: the optional whitespace around a
-                           value is not part of it, at either end. */
-                        found = (string_address)(bytes + from);
-                        found_length = stop - from;
-                        while (found_length &&
-                               byte_is_blank(found[found_length - 1]))
-                                found_length--;
-                }
-        }
-
-        if (found && length)
-                address_to length = found_length;
-
-        return found;
+        return (string_address)http_parse_header(bytes, size, (const char *)name,
+                                                 (hp_u64 *)length, (hp_u8 *)repeated);
 }
 
 static bool http_chunk_extensions_valid(string_address at,
                                         string_address stop)
 {
-        while (at < stop)
-        {
-                string_address name;
-
-                if (*at++ != ';')
-                        return false;
-                name = at;
-                while (at < stop && http_token_byte(*at))
-                        at++;
-                if (at == name)
-                        return false;
-
-                if (at < stop && *at == '=')
-                {
-                        at++;
-                        if (at == stop)
-                                return false;
-                        if (*at == '"')
-                        {
-                                /* A quoted-string: an escape takes the next
-                                   byte whatever it is, and no byte in it is
-                                   a control but tab. */
-                                for (at++; at < stop && *at != '"'; at++)
-                                        if ((*at == '\\' && ++at == stop) ||
-                                            (byte_is_control(*at) && *at != '\t'))
-                                                return false;
-                                if (at++ == stop)
-                                        return false;
-                        }
-                        else
-                        {
-                                string_address value = at;
-
-                                while (at < stop && http_token_byte(*at))
-                                        at++;
-                                if (at == value)
-                                        return false;
-                        }
-                }
-        }
-
-        return true;
+        return http_parse_chunk_extensions_valid((const char *)at,
+                                                 (const char *)stop) != 0;
 }
 
 /* Parse one complete chunk-size line for both buffered fetch and streaming
@@ -12942,42 +12755,14 @@ static bool http_chunk_extensions_valid(string_address at,
 static bipolar http_chunk_line(p8 address_to line, positive line_length,
                                positive address_to chunk_length)
 {
-        string_address number = (string_address)line;
-        string_address stop = (string_address)(line + line_length);
-        positive parsed;
-
-        if (!line_length || stop[-1] != '\n')
-                return HTTP_MALFORMED;
-        stop--;
-        if (stop > number && stop[-1] == '\r')
-                stop--;
-
-        if (!string_digits_checked(address_of number, 16, address_of parsed))
-                return HTTP_MALFORMED;
-        if (number < stop && byte_is_blank(number[0]))
-                number += string_span_max(number, stop - number,
-                                          string_set_blanks);
-        if (number < stop && !http_chunk_extensions_valid(number, stop))
-                return HTTP_MALFORMED;
-
-        address_to chunk_length = parsed;
-        return HTTP_OK;
+        return http_parse_chunk_line(line, line_length, (hp_u64 *)chunk_length);
 }
 
 /* Return one for the terminating blank line, zero for a valid trailer field,
    and a negative status for malformed framing. */
 static bipolar http_trailer_line(p8 address_to line, positive line_length)
 {
-        positive stop = line_length;
-
-        if (!stop || line[stop - 1] != '\n')
-                return HTTP_MALFORMED;
-        stop--;
-        if (stop && line[stop - 1] == '\r')
-                stop--;
-        if (!stop)
-                return 1;
-        return http_line_valid(line, stop, true) ? 0 : HTTP_MALFORMED;
+        return http_parse_trailer_line(line, line_length);
 }
 
 /*
@@ -13962,71 +13747,7 @@ enum
 
 static bool http_request_component_valid(string_address text, p8 kind)
 {
-        string_address peeled = text;
-
-        if (!text)
-                return false;
-
-        if (kind == HTTP_REQUEST_HOST && !string_get(text))
-                return false;
-
-        for (; string_get(text); text++)
-        {
-                p8 byte = string_get(text);
-
-                if (byte_is_control(byte) ||
-                    (kind != HTTP_REQUEST_FIELD && byte == ' ') ||
-                    (kind == HTTP_REQUEST_TARGET &&
-                     (byte == '\\' || byte > 0x7f)))
-                        return false;
-                if (kind == HTTP_REQUEST_TARGET && byte == '%' &&
-                    text >= peeled)
-                {
-                        /* One decode is not enough: %250d is a CR after two
-                           URI decodes, and %25250a needs three. Peel %25
-                           whether written as %25 or as a bare 25 hex pair
-                           left after a previous peel.  Every '%' a walk
-                           passes starts one of its steps, so a walk from it
-                           would retrace this one's safe suffix: each byte
-                           is walked once, not once per '%' before it.  A
-                           digit is read only after the one before it was a
-                           digit, never past the terminator. */
-                        string_address at = text;
-                        bool percent_form = true;
-
-                        for (;;)
-                        {
-                                string_address pair = at;
-                                positive high;
-                                positive low;
-                                p8 decoded;
-
-                                if (string_get(at) == '%')
-                                        pair = at + 1;
-                                else if (percent_form)
-                                        break;
-                                high = digit_known(string_get(pair), 16);
-                                if (high >= 16)
-                                        break;
-                                low = digit_known(string_get(pair + 1), 16);
-                                if (low >= 16)
-                                        break;
-                                decoded = (p8)((high << 4) | low);
-                                if (decoded == 0 || decoded == '\r' ||
-                                    decoded == '\n')
-                                        return false;
-                                at = pair + 2;
-                                if (decoded != '%')
-                                        break;
-                                percent_form = false;
-                        }
-                        peeled = at;
-                }
-                if (kind == HTTP_REQUEST_HOST && !http_host_byte(byte))
-                        return false;
-        }
-
-        return true;
+        return http_parse_request_component_valid((const char *)text, kind) != 0;
 }
 
 
@@ -14191,19 +13912,7 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
    as written, but resolves the plain dots); 0 for any other. */
 static positive http_dot_segment(string_address segment, positive length)
 {
-        positive dots = 0;
-
-        for (positive at = 0; at < length; dots++)
-        {
-                if (segment[at] == '.')
-                        at++;
-                else if (length - at >= 3 && segment[at] == '%' &&
-                         segment[at + 1] == '2' && (segment[at + 2] | 0x20) == 'e')
-                        at += 3;
-                else
-                        return 0;
-        }
-        return dots <= 2 ? dots : 0;
+        return http_parse_dot_segment((const char *)segment, length);
 }
 
 /* RFC 3986 5.2.4's remove_dot_segments over the path in front of a query,
@@ -14213,44 +13922,7 @@ static positive http_dot_segment(string_address segment, positive length)
    input, so each segment moves down over what was dropped. */
 static fn http_path_simplify(p8 address_to path)
 {
-        positive length = string_span_without_set(path, "?#");
-        positive read = 0;
-        positive wrote = 0;
-
-        if (path[0] != '/')
-                return;
-        while (read < length)
-        {
-                positive start = read + 1;
-                positive stop = start + memory_span_without_byte(
-                                            path + start, '/', length - start);
-                positive dots = http_dot_segment((string_address)path + start,
-                                                 stop - start);
-
-                if (!dots)
-                {
-                        //      Nothing moves until something was dropped,
-                        //      so a path with no dot segment -- the root
-                        //      http_split_into names as a literal, too --
-                        //      is never written.
-                        if (wrote != read)
-                                memory_copy(path + wrote, path + read,
-                                            stop - read);
-                        wrote += stop - read;
-                }
-                else
-                {
-                        //      ".." drops the last segment written.
-                        while (dots == 2 && wrote && path[--wrote] != '/')
-                                ;
-                        if (stop == length)
-                                path[wrote++] = '/';
-                }
-                read = stop;
-        }
-        if (wrote != length)
-                memory_copy(path + wrote, path + length,
-                            string_length(path + length) + 1);
+        http_parse_path_simplify(path);
 }
 
 /* Once a redirect chain has reached HTTPS, no later Location may discard
@@ -14321,19 +13993,7 @@ static bool http_host_loopback(string_address host)
 
 static bipolar http_status_code(p8 address_to bytes, positive size, b32 address_to code)
 {
-        if (size < 13)
-                return HTTP_NO_REPLY;
-        positive digits = 0;
-        positive value = string_digits_max((string_address)(bytes + 9), 3,
-                                           address_of digits);
-
-        if (string_compare_max(bytes, (string_address) "HTTP/1.", 7) ||
-            !byte_is_digit(bytes[7]) || bytes[8] != ' ' || digits != 3 ||
-            (bytes[12] != ' ' && bytes[12] != '\r' && bytes[12] != '\n'))
-                return HTTP_MALFORMED;
-        if (code)
-                address_to code = (b32)value;
-        return HTTP_OK;
+        return http_parse_status_code(bytes, size, code);
 }
 
 static p32 http_lookup(string_address host)
