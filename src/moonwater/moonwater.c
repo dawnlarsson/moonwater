@@ -166,29 +166,8 @@ _Static_assert(offset_of(struct moonwater_overlay, bind_line) == 10,
 #define SCRIPT_TOK_PUNCT 2
 #define SCRIPT_TOK_DSEMI 3
 
-#define SK_NONE 0
-#define SK_SPACE 1
-#define SK_NL 2
-#define SK_HASH 3
-#define SK_ESC 4
-#define SK_PUNCT 5
-#define SK_SEMI 6
-#define SK_QUOTE 7
-#define SK_WORD 8
-#define SK_WORD2 9
-
-static const unsigned char script_kind[256] = {
-        ['\t'] = SK_SPACE, ['\n'] = SK_NL, ['\r'] = SK_SPACE, [' '] = SK_SPACE,
-        ['#'] = SK_HASH, ['\\'] = SK_ESC,
-        ['('] = SK_PUNCT, [')'] = SK_PUNCT, ['{'] = SK_PUNCT, ['}'] = SK_PUNCT,
-        ['|'] = SK_PUNCT, [';'] = SK_SEMI,
-        ['"'] = SK_QUOTE, ['\''] = SK_QUOTE, ['`'] = SK_QUOTE,
-        ['A' ... 'Z'] = SK_WORD, ['a' ... 'z'] = SK_WORD,
-        ['_'] = SK_WORD, ['$'] = SK_WORD, ['*'] = SK_WORD, ['?'] = SK_WORD,
-        ['['] = SK_WORD, ['@'] = SK_WORD,
-        ['0' ... '9'] = SK_WORD2, ['-'] = SK_WORD2, ['/'] = SK_WORD2,
-        [']'] = SK_WORD2, ['.'] = SK_WORD2,
-};
+#define MOONWATER_SCRIPT_SCAN_ASM_IMPLEMENTATION
+#include "script_scan.asm.c"
 
 struct script_read {
         const unsigned char *text;
@@ -211,269 +190,75 @@ struct script_token {
         char word[SCRIPT_WORD];
 };
 
+_Static_assert(SCRIPT_WORD == MW_SCRIPT_WORD &&
+               SCRIPT_TOK_END == MW_SCRIPT_TOK_END &&
+               SCRIPT_TOK_WORD == MW_SCRIPT_TOK_WORD &&
+               SCRIPT_TOK_PUNCT == MW_SCRIPT_TOK_PUNCT &&
+               SCRIPT_TOK_DSEMI == MW_SCRIPT_TOK_DSEMI,
+               "script_scan token constants mismatch");
+_Static_assert(sizeof(struct script_read) == sizeof(struct mw_script_read) &&
+               offset_of(struct script_read, text) == MW_SCAN_OFFSET(struct mw_script_read, text) &&
+               offset_of(struct script_read, length) == MW_SCAN_OFFSET(struct mw_script_read, length) &&
+               offset_of(struct script_read, at) == MW_SCAN_OFFSET(struct mw_script_read, at) &&
+               offset_of(struct script_read, line) == MW_SCAN_OFFSET(struct mw_script_read, line) &&
+               offset_of(struct script_read, heredoc_tabs) == MW_SCAN_OFFSET(struct mw_script_read, heredoc_tabs) &&
+               offset_of(struct script_read, heredoc_active) == MW_SCAN_OFFSET(struct mw_script_read, heredoc_active) &&
+               offset_of(struct script_read, heredoc_length) == MW_SCAN_OFFSET(struct mw_script_read, heredoc_length) &&
+               offset_of(struct script_read, heredoc_total) == MW_SCAN_OFFSET(struct mw_script_read, heredoc_total) &&
+               offset_of(struct script_read, rescan) == MW_SCAN_OFFSET(struct mw_script_read, rescan) &&
+               offset_of(struct script_read, heredoc) == MW_SCAN_OFFSET(struct mw_script_read, heredoc),
+               "script_read != mw_script_read ABI");
+_Static_assert(sizeof(struct script_token) == sizeof(struct mw_script_token) &&
+               offset_of(struct script_token, kind) == MW_SCAN_OFFSET(struct mw_script_token, kind) &&
+               offset_of(struct script_token, punct) == MW_SCAN_OFFSET(struct mw_script_token, punct) &&
+               offset_of(struct script_token, fresh) == MW_SCAN_OFFSET(struct mw_script_token, fresh) &&
+               offset_of(struct script_token, line) == MW_SCAN_OFFSET(struct mw_script_token, line) &&
+               offset_of(struct script_token, word) == MW_SCAN_OFFSET(struct mw_script_token, word),
+               "script_token != mw_script_token ABI");
+
 /*
         The scanner stands alone on purpose. moonwater_scan is the one reader of
         the machine script, expanded in the kernel module and in the moonwater
         command, and compiled by itself, with no library under it, by the
-        core_state harness in test/differential.py: so its string compare, its
-        clearing and its prefix test are these, and not lib.c's.
+        core_state harness in test/differential.py: its hot integer primitives
+        live in script_scan.asm.c (zero lookup tables, zero allocations).
 */
-static int script_eq(const char *a, const char *b)
+static inline int script_eq(const char *a, const char *b)
 {
-        while (*a && *a == *b) {
-                a++;
-                b++;
-        }
-        return *a == *b;
+        return mw_script_eq(a, b);
 }
 
-static int script_word_is(const struct script_token *token, const char *text)
-{
-        return token->kind == SCRIPT_TOK_WORD && script_eq(token->word, text);
-}
-
-static int script_punct_is(const struct script_token *token, unsigned char value)
+static inline int script_punct_is(const struct script_token *token, unsigned char value)
 {
         return token->kind == SCRIPT_TOK_PUNCT && token->punct == value;
 }
 
-/*
-        A here-document's body is text, not script: a function spelled in one
-        is no function, and bash defines none. <<WORD, <<'WORD', <<"WORD" and
-        <<-WORD note the ending line; the body is skipped at the newline that
-        ends the command, through the line that is the word alone.
-*/
-static void script_heredoc_start(struct script_read *scan)
+static inline void script_next(struct script_read *scan, struct script_token *token)
 {
-        unsigned char quote = 0;
-        unsigned int used = 0;
-        unsigned long total = 0;
-
-        scan->at += 2;
-        scan->heredoc_tabs = scan->at < scan->length && scan->text[scan->at] == '-';
-        if (scan->heredoc_tabs)
-                scan->at++;
-        while (scan->at < scan->length &&
-               (scan->text[scan->at] == ' ' || scan->text[scan->at] == '\t'))
-                scan->at++;
-        while (scan->at < scan->length) {
-                unsigned char value = scan->text[scan->at];
-
-                if (!quote && (value == '\'' || value == '"')) {
-                        quote = value;
-                        scan->at++;
-                        continue;
-                }
-                if (quote && value == quote) {
-                        quote = 0;
-                        scan->at++;
-                        continue;
-                }
-                if (value == '\n' ||
-                    (!quote && (value == ' ' || value == '\t' || value == ';' ||
-                                value == '|' || value == '&' || value == '>' ||
-                                value == '<' || value == ')')))
-                        break;
-                if (value == '\\' && quote != '\'' && scan->at + 1 < scan->length) {
-                        scan->at++;
-                        value = scan->text[scan->at];
-                        if (value == '\n') {
-                                scan->at++;
-                                scan->line++;
-                                continue;
-                        }
-                }
-                total++;
-                if (used + 1 < SCRIPT_WORD)
-                        scan->heredoc[used++] = (char)value;
-                scan->at++;
-        }
-        scan->heredoc[used] = 0;
-        scan->heredoc_active = 1;
-        scan->heredoc_length = (unsigned char)used;
-        scan->heredoc_total = total;
+        mw_script_next((struct mw_script_read *)scan, (struct mw_script_token *)token);
 }
 
-static void script_skip_heredoc(struct script_read *scan)
+static inline struct script_token script_peek(struct script_read *scan)
 {
-        //      A << that no line ever closes is not taken as a here-document
-        //      -- a shift in $(( )) reads the same -- and nothing is skipped.
-        //      Finding that out reads to the end of the text, and a script of
-        //      nothing but shifts would do it from every one of them, under
-        //      the script lock: so what may be read again for them is
-        //      bounded, and past it a << is a shift.
-        unsigned long at = scan->at;
-        unsigned long open = scan->at;
-        unsigned int lines = 0;
-        unsigned long length = scan->heredoc_length;
-
-        while (scan->rescan && at < scan->length) {
-                unsigned long start = ++at, stop = start, from;
-
-                lines++;
-                while (stop < scan->length && scan->text[stop] != '\n')
-                        stop++;
-                from = start;
-                if (scan->heredoc_tabs)
-                        while (from < stop && scan->text[from] == '\t')
-                                from++;
-                at = stop;
-                if (stop - from == scan->heredoc_total) {
-                        unsigned long k = 0;
-
-                        while (k < length &&
-                               scan->text[from + k] == (unsigned char)scan->heredoc[k])
-                                k++;
-                        if (k == length) {
-                                scan->at = at;
-                                scan->line += lines;
-                                break;
-                        }
-                }
-        }
-        if (scan->at == open) {
-                //      Unclosed: the newline is an ordinary one.
-                unsigned long spent = at > open ? at - open : 0;
-
-                scan->rescan -= spent < scan->rescan ? spent : scan->rescan;
-                scan->at++;
-                scan->line++;
-        }
-        scan->heredoc_active = 0;
-        scan->heredoc_length = 0;
-}
-
-static void script_next(struct script_read *scan, struct script_token *token)
-{
-        unsigned char value, quote, kind, fresh = 0;
-        unsigned int used = 0;
-        unsigned char *b = (unsigned char *)token;
-        unsigned long n = sizeof(*token);
-
-        while (n--)
-                *b++ = 0;
-        while (scan->at < scan->length) {
-                value = scan->text[scan->at];
-                kind = script_kind[value];
-                if (kind == SK_NL && scan->heredoc_active) {
-                        script_skip_heredoc(scan);
-                        fresh = 1;
-                        continue;
-                }
-                if (kind == SK_NL || kind == SK_SPACE) {
-                        fresh |= kind == SK_NL;
-                        scan->line += kind == SK_NL;
-                        scan->at++;
-                        continue;
-                }
-                if (kind == SK_ESC && scan->at + 1 < scan->length &&
-                    scan->text[scan->at + 1] == '\n') {
-                        scan->at += 2;
-                        scan->line++;
-                        continue;
-                }
-                if (kind == SK_HASH) {
-                        while (scan->at < scan->length &&
-                               scan->text[scan->at] != '\n')
-                                scan->at++;
-                        continue;
-                }
-                break;
-        }
-        token->line = (unsigned short)(scan->line > 65535u ? 65535u : scan->line);
-        token->fresh = fresh;
-        if (scan->at >= scan->length) {
-                token->kind = SCRIPT_TOK_END;
-                return;
-        }
-
-        value = scan->text[scan->at];
-        kind = script_kind[value];
-        if (kind == SK_SEMI && scan->at + 1 < scan->length &&
-            scan->text[scan->at + 1] == ';') {
-                scan->at += 2;
-                token->kind = SCRIPT_TOK_DSEMI;
-                return;
-        }
-        if (value == '<' && scan->at + 2 < scan->length &&
-            scan->text[scan->at + 1] == '<' && scan->text[scan->at + 2] != '<') {
-                script_heredoc_start(scan);
-                token->kind = SCRIPT_TOK_PUNCT;
-                token->punct = '<';
-                token->word[0] = '<';
-                return;
-        }
-        if (kind == SK_PUNCT || kind == SK_SEMI) {
-                scan->at++;
-                token->kind = SCRIPT_TOK_PUNCT;
-                token->punct = value;
-                token->word[0] = (char)value;
-                return;
-        }
-
-        token->kind = SCRIPT_TOK_WORD;
-        if (kind == SK_QUOTE) {
-                quote = value;
-                scan->at++;
-                while (scan->at < scan->length && scan->text[scan->at] != quote) {
-                        value = scan->text[scan->at];
-                        if (quote != '\'' && value == '\\' &&
-                            scan->at + 1 < scan->length) {
-                                scan->at++;
-                                value = scan->text[scan->at];
-                        }
-                        if (value == '\n')
-                                scan->line++;
-                        if (used + 1 < SCRIPT_WORD)
-                                token->word[used++] = (char)value;
-                        scan->at++;
-                }
-                if (scan->at < scan->length)
-                        scan->at++;
-                return;
-        }
-
-        if (kind == SK_WORD) {
-                while (scan->at < scan->length) {
-                        kind = script_kind[scan->text[scan->at]];
-                        //      Inside a word # is a letter; only at the
-                        //      start of one does it open a comment.
-                        if (kind != SK_WORD && kind != SK_WORD2 && kind != SK_HASH)
-                                break;
-                        if (used + 1 < SCRIPT_WORD)
-                                token->word[used++] = (char)scan->text[scan->at];
-                        scan->at++;
-                }
-                return;
-        }
-
-        scan->at++;
-        token->kind = SCRIPT_TOK_PUNCT;
-        token->punct = value;
-        token->word[0] = (char)value;
-}
-
-static struct script_token script_peek(struct script_read *scan)
-{
-        struct script_read held = *scan;
         struct script_token token;
 
-        script_next(scan, &token);
-        *scan = held;
+        mw_script_peek((struct mw_script_read *)scan, (struct mw_script_token *)&token);
         return token;
 }
 
-static int script_event_is(const char *pattern, const char *event)
+static inline int script_event_is(const char *pattern, const char *event)
 {
-        while (*pattern && *event) {
-                char want = *event == ' ' ? '_' : *event;
+        return mw_script_event_is(pattern, event);
+}
 
-                if (*pattern != want && *pattern != *event)
-                        return 0;
-                pattern++;
-                event++;
-        }
-        return !*pattern && !*event;
+static inline unsigned int script_kw(const struct script_token *token)
+{
+        return mw_script_keyword((const struct mw_script_token *)token);
+}
+
+static inline int script_command_start(const struct script_token *token)
+{
+        return mw_script_command_start((const struct mw_script_token *)token);
 }
 
 static void script_arm_event(struct moonwater_overlay *into, unsigned int event,
@@ -521,15 +306,15 @@ static void script_parse_case(struct script_read *scan,
                 script_next(scan, &token);
                 if (token.kind == SCRIPT_TOK_END)
                         return;
-        } while (!script_word_is(&token, "esac") && !script_word_is(&token, "in"));
-        if (script_word_is(&token, "esac"))
+        } while (!(script_kw(&token) & (MW_KW_ESAC | MW_KW_IN)));
+        if (script_kw(&token) == MW_KW_ESAC)
                 return;
 
         while (cases) {
                 script_next(scan, &token);
                 if (token.kind == SCRIPT_TOK_END || script_punct_is(&token, '}'))
                         return;
-                if (script_word_is(&token, "esac")) {
+                if (script_kw(&token) == MW_KW_ESAC) {
                         cases--;
                         continue;
                 }
@@ -537,7 +322,7 @@ static void script_parse_case(struct script_read *scan,
                         script_block(scan, 0, 1);
                         continue;
                 }
-                if (script_word_is(&token, "case")) {
+                if (script_kw(&token) == MW_KW_CASE) {
                         cases++;
                         continue;
                 }
@@ -555,11 +340,11 @@ static void script_parse_case(struct script_read *scan,
                 while (!script_punct_is(&token, ')') &&
                        token.kind != SCRIPT_TOK_END &&
                        token.kind != SCRIPT_TOK_DSEMI &&
-                       !script_word_is(&token, "esac"))
+                       script_kw(&token) != MW_KW_ESAC)
                         script_next(scan, &token);
                 if (token.kind == SCRIPT_TOK_END)
                         return;
-                if (script_word_is(&token, "esac")) {
+                if (script_kw(&token) == MW_KW_ESAC) {
                         cases--;
                         continue;
                 }
@@ -571,9 +356,9 @@ static void script_parse_case(struct script_read *scan,
                                 return;
                         if (token.kind == SCRIPT_TOK_DSEMI)
                                 break;
-                        if (script_word_is(&token, "case"))
+                        if (script_kw(&token) == MW_KW_CASE)
                                 cases++;
-                        else if (script_word_is(&token, "esac")) {
+                        else if (script_kw(&token) == MW_KW_ESAC) {
                                 cases--;
                                 break;
                         } else if (script_punct_is(&token, '{'))
@@ -595,7 +380,7 @@ static void script_block(struct script_read *scan, struct moonwater_overlay *int
                         depth++;
                 else if (script_punct_is(&token, '}'))
                         depth--;
-                else if (into && script_word_is(&token, "case"))
+                else if (into && script_kw(&token) == MW_KW_CASE)
                         script_parse_case(scan, into);
         }
 }
@@ -611,57 +396,31 @@ static void script_block(struct script_read *scan, struct moonwater_overlay *int
         either is read as a case, so that its patterns' ) are not taken for
         the end, and the arms of the event hook's are the rows it owns.
 */
-static int script_word_in(const struct script_token *token,
-                          const char *const *words)
-{
-        unsigned int i;
-
-        for (i = 0; words[i]; i++)
-                if (script_word_is(token, words[i]))
-                        return 1;
-        return 0;
-}
-
-static int script_command_start(const struct script_token *token)
-{
-        static const char *const before[] = {
-                "if", "while", "until", "then", "do", "else", "elif", "!", "time", 0 };
-
-        if (token->kind == SCRIPT_TOK_DSEMI)
-                return 1;
-        if (token->kind == SCRIPT_TOK_PUNCT)
-                return token->punct == ';' || token->punct == '|' ||
-                       token->punct == '(' || token->punct == ')' ||
-                       token->punct == '{' || token->punct == '}' ||
-                       token->punct == '&';
-        return script_word_in(token, before);
-}
-
 static void script_compound(struct script_read *scan, struct moonwater_overlay *into,
                             int parens)
 {
-        static const char *const openers[] = {
-                "if", "while", "until", "for", "select", 0 };
-        static const char *const closers[] = { "fi", "done", 0 };
         struct script_token token;
         unsigned int depth = 1;
         int command = 1;
 
         while (depth) {
+                unsigned int kw;
+
                 script_next(scan, &token);
                 if (token.kind == SCRIPT_TOK_END)
                         return;
                 if (token.fresh)
                         command = 1;
+                kw = script_kw(&token);
                 if (parens && script_punct_is(&token, '('))
                         depth++;
                 else if (parens && script_punct_is(&token, ')'))
                         depth--;
-                else if (command && script_word_is(&token, "case"))
+                else if (command && kw == MW_KW_CASE)
                         script_parse_case(scan, into);
-                else if (command && !parens && script_word_in(&token, openers))
+                else if (command && !parens && kw == MW_KW_OPENER)
                         depth++;
-                else if (command && !parens && script_word_in(&token, closers))
+                else if (command && !parens && kw == MW_KW_CLOSER)
                         depth--;
                 command = script_command_start(&token);
         }
@@ -670,10 +429,8 @@ static void script_compound(struct script_read *scan, struct moonwater_overlay *
 static int script_take_function(struct script_read *scan, const char *name,
                                 unsigned short line, struct moonwater_overlay *into)
 {
-        static const char *const bodies[] = {
-                "[[", "if", "while", "until", "for", "select", "case", 0 };
         struct script_token token;
-        unsigned int i;
+        unsigned int i, kw;
         unsigned char hook = 0;
         unsigned char off = 0;
 
@@ -685,8 +442,9 @@ static int script_take_function(struct script_read *scan, const char *name,
                         return 0;
                 token = script_peek(scan);
         }
+        kw = script_kw(&token);
         if (!script_punct_is(&token, '{') && !script_punct_is(&token, '(') &&
-            !script_word_in(&token, bodies))
+            !(kw & (MW_KW_OPENER | MW_KW_CASE | MW_KW_TEST)))
                 return 0;
 
         script_next(scan, &token);
@@ -712,13 +470,13 @@ static int script_take_function(struct script_read *scan, const char *name,
 
         if (script_punct_is(&token, '{'))
                 script_block(scan, hook == MOONWATER_HOOK_EVENT ? into : 0, 1);
-        else if (script_word_is(&token, "[[")) {
+        else if (kw == MW_KW_TEST) {
                 while (token.kind != SCRIPT_TOK_END && !script_punct_is(&token, ']'))
                         script_next(scan, &token);
                 token = script_peek(scan);
                 if (script_punct_is(&token, ']'))
                         script_next(scan, &token);
-        } else if (script_word_is(&token, "case"))
+        } else if (kw == MW_KW_CASE)
                 script_parse_case(scan, hook == MOONWATER_HOOK_EVENT ? into : 0);
         else
                 script_compound(scan, hook == MOONWATER_HOOK_EVENT ? into : 0,
@@ -750,7 +508,7 @@ static void moonwater_scan(const char *text, unsigned long length,
                 script_next(&scan, &token);
                 if (token.kind == SCRIPT_TOK_END)
                         break;
-                if (script_word_is(&token, "function")) {
+                if (script_kw(&token) == MW_KW_FUNCTION) {
                         script_next(&scan, &token);
                         if (token.kind == SCRIPT_TOK_WORD)
                                 script_take_function(&scan, token.word, token.line,
