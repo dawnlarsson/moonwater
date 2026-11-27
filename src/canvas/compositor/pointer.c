@@ -53,13 +53,27 @@ static int compositor_accel(int delta, int *remainder, int gain)
         return (int)pointer_scale(delta, remainder, (unsigned long long)(long long)gain);
 }
 
+#define COMPOSITOR_POINTER_RAST_ASM_IMPLEMENTATION
+#if defined(__has_include)
+# if __has_include("pointer_rast.asm.c")
+#  include "pointer_rast.asm.c"
+# elif __has_include("compositor/pointer_rast.asm.c")
+#  include "compositor/pointer_rast.asm.c"
+# else
+#  include "src/canvas/compositor/pointer_rast.asm.c"
+# endif
+#else
+# include "pointer_rast.asm.c"
+#endif
+
+_Static_assert(WINDOW_COORD_MAX == PRAST_COORD_MAX && CP_ACCEL_ONE == PRAST_ACCEL_ONE,
+               "pointer.c constants != pointer_rast.asm.c");
+
 // A device's counts added up, held to WINDOW_COORD_MAX either way: an evdev value is any 32 bits a device (a USB one is
 // anyone's) chose, and two of them, or one past a place, overflowed the int they were added into.
 static int compositor_counts(int sum, long long more)
 {
-        long long total = (long long)sum + more;
-
-        return (int)(total > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : total < -WINDOW_COORD_MAX ? -WINDOW_COORD_MAX : total);
+        return prast_counts(sum, more);
 }
 
 /*
@@ -70,11 +84,7 @@ static int compositor_counts(int sum, long long more)
 */
 static int compositor_gain_wanted(int gain, int flat, int percent)
 {
-        long long base = flat ? CP_ACCEL_ONE : gain;
-
-        if (!percent || percent == 100)
-                return (int)base;
-        return (int)(base * percent / 100);
+        return prast_gain_wanted(gain, flat, percent);
 }
 
 /*
@@ -99,12 +109,7 @@ static void compositor_repeat_target(int kept, int delay, int rate, const int ow
 // the offset in it times the size over the range, rounded down.
 static int compositor_tablet(int value, int minimum, int maximum, int size)
 {
-        long long span = (long long)maximum - minimum, offset;
-
-        if (span <= 0)
-                return 0;
-        offset = (long long)(value < minimum ? minimum : value > maximum ? maximum : value) - minimum;
-        return (int)(offset * size / span);
+        return prast_tablet(value, minimum, maximum, size);
 }
 
 /*
@@ -127,31 +132,17 @@ struct compositor_shake
         int feel; // `moonwater canvas cursor shake sensitivity`: 0 normal (the standard), 1 low, 2 high, its word's place among its words
 };
 
+_Static_assert(sizeof(struct compositor_shake) == sizeof(struct prast_shake), "compositor_shake != prast_shake size");
+_Static_assert(PRAST_OFFSET(struct compositor_shake, window) == PRAST_OFFSET(struct prast_shake, window) &&
+               PRAST_OFFSET(struct compositor_shake, direction) == PRAST_OFFSET(struct prast_shake, direction) &&
+               PRAST_OFFSET(struct compositor_shake, count) == PRAST_OFFSET(struct prast_shake, count) &&
+               PRAST_OFFSET(struct compositor_shake, feel) == PRAST_OFFSET(struct prast_shake, feel) &&
+               CP_SHAKE_WINDOW == PRAST_SHAKE_WINDOW,
+               "compositor_shake != prast_shake layout");
+
 static int compositor_shake(struct compositor_shake *shake, int delta, unsigned long long now)
 {
-        static const int steps[3] = {CP_SHAKE_STEP, 9, 4}, reversals[3] = {CP_SHAKE_REVERSALS, 7, 4};
-        int direction, feel = shake->feel >= 0 && shake->feel < 3 ? shake->feel : 0;
-
-        if (delta > -steps[feel] && delta < steps[feel])
-                return 0;
-
-        direction = delta > 0 ? 1 : -1;
-        if (now - shake->window > CP_SHAKE_WINDOW)
-        {
-                shake->window = now;
-                shake->count = 0;
-        }
-
-        if (direction == shake->direction)
-                return 0;
-
-        shake->direction = direction;
-        if (++shake->count >= reversals[feel])
-        {
-                shake->count = 0;
-                return 1;
-        }
-        return 0;
+        return prast_shake((struct prast_shake *)(void *)shake, delta, now);
 }
 
 
@@ -229,6 +220,22 @@ struct compositor_pointer
         unsigned long picture;  // which picture of a window's client it is (compositor_picture.made), 0 for the compositor's own shapes
         int ring;               // the dwell click's ring round it (access.c): the 32nds of a turn filled, 0 for none
 };
+
+_Static_assert(sizeof(struct compositor_pointer) == sizeof(struct prast_pointer), "compositor_pointer != prast_pointer size");
+_Static_assert(PRAST_OFFSET(struct compositor_pointer, dyn) == PRAST_OFFSET(struct prast_pointer, dyn) &&
+               PRAST_OFFSET(struct compositor_pointer, shape) == PRAST_OFFSET(struct prast_pointer, shape) &&
+               PRAST_OFFSET(struct compositor_pointer, scale) == PRAST_OFFSET(struct prast_pointer, scale) &&
+               PRAST_OFFSET(struct compositor_pointer, hw) == PRAST_OFFSET(struct prast_pointer, hw) &&
+               PRAST_OFFSET(struct compositor_pointer, hh) == PRAST_OFFSET(struct prast_pointer, hh) &&
+               PRAST_OFFSET(struct compositor_pointer, c) == PRAST_OFFSET(struct prast_pointer, c) &&
+               PRAST_OFFSET(struct compositor_pointer, ux) == PRAST_OFFSET(struct prast_pointer, ux) &&
+               PRAST_OFFSET(struct compositor_pointer, uy) == PRAST_OFFSET(struct prast_pointer, uy) &&
+               PRAST_OFFSET(struct compositor_pointer, grow) == PRAST_OFFSET(struct prast_pointer, grow) &&
+               PRAST_OFFSET(struct compositor_pointer, lens) == PRAST_OFFSET(struct prast_pointer, lens) &&
+               PRAST_OFFSET(struct compositor_pointer, picture) == PRAST_OFFSET(struct prast_pointer, picture) &&
+               PRAST_OFFSET(struct compositor_pointer, ring) == PRAST_OFFSET(struct prast_pointer, ring) &&
+               CP_CELL == PRAST_CELL && CP_SHAPES == PRAST_SHAPES && CP_SPAN_MOST == PRAST_SPAN_MOST,
+               "compositor_pointer != prast_pointer layout");
 
 // A value on its way to another (0 at rest): where it left from, where it goes, and when it left.
 struct compositor_sway
@@ -718,78 +725,20 @@ struct compositor_dyn_pre
         long long a, half, reach, line, lined, bound, tip, leg;
 };
 
+_Static_assert(sizeof(struct compositor_dyn_pre) == sizeof(struct prast_dyn_pre), "compositor_dyn_pre != prast_dyn_pre size");
+_Static_assert(PRAST_OFFSET(struct compositor_dyn_pre, a) == PRAST_OFFSET(struct prast_dyn_pre, a) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, half) == PRAST_OFFSET(struct prast_dyn_pre, half) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, reach) == PRAST_OFFSET(struct prast_dyn_pre, reach) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, line) == PRAST_OFFSET(struct prast_dyn_pre, line) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, lined) == PRAST_OFFSET(struct prast_dyn_pre, lined) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, bound) == PRAST_OFFSET(struct prast_dyn_pre, bound) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, tip) == PRAST_OFFSET(struct prast_dyn_pre, tip) &&
+               PRAST_OFFSET(struct compositor_dyn_pre, leg) == PRAST_OFFSET(struct prast_dyn_pre, leg),
+               "compositor_dyn_pre != prast_dyn_pre layout");
+
 static void compositor_dyn_cover(const struct compositor_pointer *p, const struct compositor_dyn_pre *pre, long long u, long long v, unsigned char *fill, unsigned char *edge)
 {
-        long long a = pre->a, reach = pre->reach, x, y, away, nx = 64, ny = 0, along, across, outer, inner;
-        long long line = pre->line, lined = pre->lined;
-
-        *fill = *edge = 0;
-        if (u > pre->bound || u < -pre->bound || v > pre->bound || v < -pre->bound)
-                return;
-        if (p->lens)
-        {
-                // Core circle of radius r (p->hh) with pointy ends at +-tip (p->hw) along (ux, uy): the convex hull of the circle and
-                // its two tips, so the middle keeps the circle's aspect and curvature and the ends taper tangentially to points.
-                long long la = (u * p->ux + v * p->uy) / 64, b = (v * p->ux - u * p->uy) / 64;
-                long long r = p->hh, tip = pre->tip;
-
-                la = la < 0 ? -la : la;
-                b = b < 0 ? -b : b;
-                if (tip == r)
-                {
-                        away = (long long)compositor_isqrt((unsigned long long)(la * la + b * b)) - r;
-                        goto lined;
-                }
-                {
-                        long long leg = pre->leg;
-
-                        if (la * leg <= b * r)
-                                away = (long long)compositor_isqrt((unsigned long long)(la * la + b * b)) - r;
-                        else if ((la - tip) * leg >= b * r)
-                                away = (long long)compositor_isqrt((unsigned long long)((la - tip) * (la - tip) + b * b));
-                        else
-                                away = (la * r + b * leg) / tip - r;
-                }
-                goto lined;
-        }
-        if (p->grow)
-        {
-                along = (u * p->ux + v * p->uy) / 64 * 256 / a, across = (v * p->ux - u * p->uy) / 64 * a / 256;
-                u = (along * p->ux - across * p->uy) / 64;
-                v = (along * p->uy + across * p->ux) / 64;
-        }
-        x = (u < 0 ? -u : u) - (p->hw - p->c), y = (v < 0 ? -v : v) - (p->hh - p->c); // from the corner's centre
-        if (x > 0 && y > 0)
-        {
-                long long square = x * x + y * y, out = p->c + reach, in = p->c - lined * a / 256 - reach;
-
-                if (square >= out * out)
-                        return;
-                if (in > 0 && square <= in * in)
-                {
-                        *fill = 255;
-                        return;
-                }
-                away = (long long)compositor_isqrt((unsigned long long)square);
-                nx = x * 64 / away, ny = y * 64 / away, away -= p->c;
-        }
-        else if (x > y)
-                away = x - p->c;
-        else
-                away = y - p->c, nx = 0, ny = 64;
-        if (p->grow)
-        {
-                nx = u < 0 ? -nx : nx, ny = v < 0 ? -ny : ny;
-                along = (nx * p->ux + ny * p->uy) / 64 * 256 / a, across = (ny * p->ux - nx * p->uy) / 64 * a / 256;
-                along = (long long)compositor_isqrt((unsigned long long)(along * along + across * across));
-                away = away * 64 / (along ? along : 1);
-        }
-lined:
-        away = away * p->scale / 256; // 256ths of a pixel from the outline, less inside it
-        outer = away < -128 ? 256 : away > 128 ? 0 : 128 - away;
-        inner = away + line < -128 ? 256 : away + line > 128 ? 0 : 128 - away - line;
-        *edge = (unsigned char)((outer - inner) * 255 / 256);
-        *fill = (unsigned char)(inner ? inner * 255 / (256 - (outer - inner)) : 0);
+        prast_dyn_cover((const struct prast_pointer *)(const void *)p, (const struct prast_dyn_pre *)(const void *)pre, u, v, fill, edge);
 }
 
 /*
@@ -808,150 +757,31 @@ lined:
         off the bitmap), and the two covers of every count of edge and fill samples a pixel can have, so a pixel is its samples looked up
         and counted, and nothing is divided for it.
 */
+#define CP_RING_STEPS 32
+_Static_assert(CP_RING_STEPS == PRAST_RING_STEPS, "CP_RING_STEPS != PRAST_RING_STEPS");
+
 static void compositor_pointer_ring(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
-                                    unsigned char *fill, unsigned char *edge, int pitch); // below
+                                    unsigned char *fill, unsigned char *edge, int pitch)
+{
+        struct prast_rows_arg arg = {
+            (const struct prast_pointer *)(const void *)p,
+            &compositor_cursor_art[0][0][0],
+            &compositor_cursor_hot[0][0],
+            fill, edge, span, hot_x, hot_y, first, rows, pitch,
+        };
+        prast_pointer_ring(&arg);
+}
 
 static void compositor_pointer_rows(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
                                     unsigned char *fill, unsigned char *edge, int pitch)
 {
-        unsigned char *fill_from = fill, *edge_from = edge;
-        int n = p->dyn ? 1 : p->scale < 4 * 256 ? 4 : 2, all = n * n;
-        long long step = (32768ll << 16) / (all * p->scale); // half a sample's column, in 256ths of a cell, Q16
-        long long ox = hot_x * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][0]);
-        long long oy = hot_y * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][1]);
-        signed char across[CP_SPAN_MOST * 16], down[16];
-        unsigned char share[17 * 17][2]; // [edge samples * (all + 1) + fill samples]: the fill's cover, the edge's
-
-        for (int e = 0; !p->dyn && e <= all; e++)
-                for (int f = 0; e + f <= all; f++)
-                {
-                        int lined = e * 255 / all, filled = f ? f * 255 / (all - e) : 0;
-
-                        if (p->scale < 256)
-                        {
-                                lined = e * 255 * 256 / (all * p->scale), filled = f * 255 * 256 / (all * p->scale);
-                                lined = lined < 255 ? lined : 255;
-                                filled = filled < 255 - lined ? filled : 255 - lined;
-                                filled = filled ? filled * 255 / (255 - lined) : 0;
-                        }
-                        share[e * (all + 1) + f][0] = (unsigned char)filled, share[e * (all + 1) + f][1] = (unsigned char)lined;
-                }
-        for (int k = 0; !p->dyn && k < span * all; k++)
-        {
-                long long u = ((2ll * k + 1) * step >> 16) - ox;
-
-                across[k] = (signed char)(u >= 0 && u < CP_CELL * 256 ? u >> 8 : -1);
-        }
-        struct compositor_dyn_pre pre = {0};
-
-        if (p->dyn)
-        {
-                pre.a = 256 + p->grow;
-                pre.half = 32768 / p->scale + 1;
-                pre.reach = pre.half * pre.a / 256 + 1;
-                pre.line = p->scale < 256 ? 256 : p->scale;
-                pre.lined = pre.line * 256 / p->scale;
-                pre.bound = (p->hw + p->hh) * pre.a / 256 + pre.half;
-                pre.tip = p->hw > p->hh ? p->hw : p->hh;
-                pre.leg = p->lens && pre.tip > p->hh ? (long long)compositor_isqrt((unsigned long long)(pre.tip * pre.tip - (long long)p->hh * p->hh)) : 0;
-        }
-        for (int row = first; row < first + rows; row++, fill += pitch, edge += pitch)
-        {
-                if (p->dyn)
-                {
-                        long long v = ((2ll * row + 1) * step >> 16) - oy;
-                        if (v > pre.bound || v < -pre.bound)
-                        {
-                                memory_zero(fill, (positive)span);
-                                memory_zero(edge, (positive)span);
-                                continue;
-                        }
-                        for (int column = 0; column < span; column++)
-                                compositor_dyn_cover(p, &pre, ((2ll * column + 1) * step >> 16) - ox, v, &fill[column], &edge[column]);
-                        continue;
-                }
-                for (int k = 0; k < all; k++)
-                {
-                        long long v = ((2ll * (row * all + k) + 1) * step >> 16) - oy;
-
-                        down[k] = (signed char)(v >= 0 && v < CP_CELL * 256 ? v >> 8 : -1);
-                }
-                for (int column = 0; column < span; column++)
-                {
-                        const signed char *at = across + column * all;
-                        int inks[3] = {0, 0, 0};
-
-                        // Sample i, j of the pixel is the cell across of its column's sample i n + j, down of its row's sample j n + i.
-                        for (int j = 0; j < n; j++)
-                                for (int i = 0; i < n; i++)
-                                {
-                                        int u = at[i * n + j], v = down[j * n + i];
-                                        char ink = u >= 0 && v >= 0 ? compositor_cursor_art[p->shape][v][u] : '.';
-
-                                        inks[ink == '#' ? 2 : ink == 'o']++;
-                                }
-                        fill[column] = share[inks[2] * (all + 1) + inks[1]][0];
-                        edge[column] = share[inks[2] * (all + 1) + inks[1]][1];
-                }
-        }
-        if (p->ring)
-                compositor_pointer_ring(p, span, hot_x, hot_y, first, rows, fill_from, edge_from, pitch);
-}
-
-/*
-        The dwell click's ring (access.c) laid over a picture's covers: a circle round the pointer in the fill ink with a line of the
-        edge ink either side, as the pointer itself is drawn, filled clockwise from its top by p->ring 32nds of a turn: round the
-        dynamic shape's middle, or the middle of a bitmap's square. A pixel's angle is the diamond's (its quarter and the share of
-        its two legs), which runs round as a turn does with no root; the distance to the circle is the one root a pixel near it takes.
-*/
-#define CP_RING_STEPS 32
-static void compositor_pointer_ring(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
-                                    unsigned char *fill, unsigned char *edge, int pitch)
-{
-        // In 256ths of a pixel: the centre, the radius (12 cells round the dynamic shape, 9.5 in a bitmap's 24), the fill's half width
-        // (at least three quarters of a pixel) and the edge's line (a pixel).
-        long long cx, cy, r, core = (p->scale > 256 ? p->scale : 256) * 3 / 4, line = 256, reach, inner, outer;
-        long long turn = 4096ll * p->ring / CP_RING_STEPS;
-
-        if (p->dyn)
-                cx = (long long)hot_x * 256, cy = (long long)hot_y * 256, r = 12ll * p->scale;
-        else
-                cx = (long long)hot_x * 256 + (CP_CELL / 2 - compositor_cursor_hot[p->shape][0]) * (long long)p->scale,
-                cy = (long long)hot_y * 256 + (CP_CELL / 2 - compositor_cursor_hot[p->shape][1]) * (long long)p->scale, r = 19ll * p->scale / 2;
-        reach = core + line + 256;
-        inner = r > reach ? (r - reach) * (r - reach) : 0, outer = (r + reach) * (r + reach);
-        for (int row = first; row < first + rows; row++, fill += pitch, edge += pitch)
-        {
-                long long dy = (long long)row * 256 + 128 - cy;
-
-                if (dy * dy > outer)
-                        continue;
-                for (int column = 0; column < span; column++)
-                {
-                        long long dx = (long long)column * 256 + 128 - cx, d2 = dx * dx + dy * dy, x = dx, y = -dy, a, b, quarter, off, c, e;
-
-                        if (d2 > outer || d2 < inner)
-                                continue;
-                        // Clockwise from the top (the screen's y is down): the quarter, then the leg that grows over the two.
-                        if (x >= 0 && y > 0)
-                                quarter = 0, a = x, b = y;
-                        else if (x > 0)
-                                quarter = 1, a = -y, b = x;
-                        else if (y < 0)
-                                quarter = 2, a = -x, b = -y;
-                        else
-                                quarter = 3, a = y, b = -x;
-                        if (quarter * 1024 + a * 1024 / (a + b ? a + b : 1) >= turn)
-                                continue;
-                        off = (long long)compositor_isqrt((unsigned long long)d2) - r;
-                        off = off < 0 ? -off : off;
-                        c = core + 128 - off, c = c < 0 ? 0 : c > 256 ? 256 : c;
-                        e = core + line + 128 - off, e = (e < 0 ? 0 : e > 256 ? 256 : e) - c;
-                        c = c * 255 >> 8, e = e * 255 >> 8;
-                        fill[column] = (unsigned char)(fill[column] > c ? fill[column] : c);
-                        edge[column] = (unsigned char)(edge[column] > e ? edge[column] : e);
-                }
-        }
+        struct prast_rows_arg arg = {
+            (const struct prast_pointer *)(const void *)p,
+            &compositor_cursor_art[0][0][0],
+            &compositor_cursor_hot[0][0],
+            fill, edge, span, hot_x, hot_y, first, rows, pitch,
+        };
+        prast_pointer_rows(&arg);
 }
 
 // One row of a picture, span bytes of each cover: the settings' try-out of the pointer makes its picture a row at a time.
@@ -1145,20 +975,16 @@ _Static_assert(COMPOSITOR_LIT_LEFT == CP_EDGE_LEFT && COMPOSITOR_LIT_RIGHT == CP
         it is on two. With corner, a point on one edge within corner of the window's corner along it is on the corner
         too: a finger is not a pixel. 0 when it is on none, inside the window or outside the grip.
 */
+_Static_assert(CP_EDGE_LEFT == PRAST_EDGE_LEFT && CP_EDGE_RIGHT == PRAST_EDGE_RIGHT &&
+               CP_EDGE_TOP == PRAST_EDGE_TOP && CP_EDGE_BOTTOM == PRAST_EDGE_BOTTOM,
+               "CP_EDGE_* != PRAST_EDGE_*");
+
 static unsigned int compositor_edges_at(int px, int py, int x1, int y1, int x2, int y2, int grip, int in, int top_in,
                                         int corner)
 {
-        unsigned int edges = 0;
+        struct prast_edges_arg arg = {px, py, x1, y1, x2, y2, grip, in, top_in, corner};
 
-        if (px < x1 - grip || px >= x2 + grip || py < y1 - grip || py >= y2 + grip)
-                return 0;
-        edges |= px < x1 + in ? CP_EDGE_LEFT : px >= x2 - in ? CP_EDGE_RIGHT : 0;
-        edges |= py < y1 + top_in ? CP_EDGE_TOP : py >= y2 - in ? CP_EDGE_BOTTOM : 0;
-        if (corner && (edges & (CP_EDGE_LEFT | CP_EDGE_RIGHT)) && !(edges & (CP_EDGE_TOP | CP_EDGE_BOTTOM)))
-                edges |= py < y1 + corner ? CP_EDGE_TOP : py >= y2 - corner ? CP_EDGE_BOTTOM : 0;
-        else if (corner && (edges & (CP_EDGE_TOP | CP_EDGE_BOTTOM)) && !(edges & (CP_EDGE_LEFT | CP_EDGE_RIGHT)))
-                edges |= px < x1 + corner ? CP_EDGE_LEFT : px >= x2 - corner ? CP_EDGE_RIGHT : 0;
-        return edges;
+        return prast_edges_at(&arg);
 }
 
 /* ---- end of the pointer ---- */
